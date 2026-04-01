@@ -15,7 +15,7 @@
             padding: 12px;
             border-radius: 8px;
             box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-            width: 420px;
+            width: 500px;
         }
         #toolbar .row { display: flex; gap: 8px; margin-bottom: 8px; }
         #toolbar label { font-size: 13px; color: #333; }
@@ -56,6 +56,28 @@
             line-height: 1.4;
             min-height: 34px;
         }
+        #warehouseSummary {
+            max-height: 150px;
+            overflow: auto;
+            border: 1px solid #eee;
+            border-radius: 6px;
+            padding: 6px 8px;
+            font-size: 12px;
+            color: #333;
+            background: #fafafa;
+        }
+        #warehouseSummary .title {
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+        #warehouseSummary ul {
+            margin: 0;
+            padding-left: 16px;
+        }
+        #warehouseSummary li {
+            margin: 2px 0;
+            line-height: 1.35;
+        }
         #dashboard {
             display: grid;
             grid-template-rows: 60vh 40vh;
@@ -88,6 +110,7 @@
             <span id="lastUpdated" style="font-size:12px;color:#888;"></span>
         </div>
         <div id="statusText">正在加载地图...</div>
+        <div id="warehouseSummary"></div>
     </div>
     <div id="dashboard">
         <div id="warehouse-map"></div>
@@ -102,6 +125,7 @@
         const daysSelect = document.getElementById('daysSelect');
         const autoRefresh = document.getElementById('autoRefresh');
         const lastUpdated = document.getElementById('lastUpdated');
+        const warehouseSummary = document.getElementById('warehouseSummary');
         const queryBtn = document.getElementById('queryBtn');
         const mapChart = echarts.init(mapDom);
         const trendChart = echarts.init(trendDom);
@@ -288,12 +312,14 @@
                         symbolSize: function (val) {
                             const cap = Number(val[2] || 0);
                             if (cap <= 0) return 0;
-                            return Math.max(20, Math.sqrt(cap) / 6);
+                            return Math.max(34, Math.sqrt(cap) * 2.6);
                         },
                         itemStyle: {
                             color: 'rgba(0,0,0,0)',
                             borderColor: '#0958d9',
-                            borderWidth: 2
+                            borderWidth: 3,
+                            shadowColor: 'rgba(9,88,217,0.25)',
+                            shadowBlur: 4
                         },
                         label: {
                             show: false
@@ -305,7 +331,7 @@
                         coordinateSystem: 'geo',
                         data: pointData,
                         symbolSize: function (val) {
-                            return Math.max(10, Math.sqrt(val[2]) / 8);
+                            return Math.max(14, Math.sqrt(val[2]) * 8);
                         },
                         label: {
                             show: true,
@@ -321,7 +347,7 @@
                                 return `${params.name}\n${formatNumber(volume)} / ${formatNumber(capacity)} 柜 (${ratio}%)`;
                             },
                             color: '#333',
-                            fontSize: 10,
+                            fontSize: 11,
                             backgroundColor: 'rgba(255,255,255,0.82)',
                             borderColor: '#e6e6e6',
                             borderWidth: 1,
@@ -332,7 +358,9 @@
                             lineHeight: 14
                         },
                         itemStyle: {
-                            color: '#ff7a45'
+                            color: '#ff4d4f',
+                            borderColor: '#fff',
+                            borderWidth: 1.5
                         },
                         emphasis: {
                             label: {
@@ -360,6 +388,20 @@
                 ? `；${payload.fallback.reason}`
                 : '';
             statusText.textContent = `${channelLabel}；已展示 ${pointData.length}/${list.length} 个仓库（橙色=货柜数，蓝色圈=总容量/爆仓线）${snapshotLabel}${unmappedLabel}${fallbackReason}`;
+
+            const summaryItems = mapped
+                .slice()
+                .sort((a, b) => Number(b.volume || 0) - Number(a.volume || 0))
+                .map(item => {
+                    const vol = Number(item.volume || 0);
+                    const cap = Number(item.capacity || 0);
+                    const ratio = cap > 0 ? ((vol / cap) * 100).toFixed(1) : 'N/A';
+                    return `<li>${item.name}: ${formatNumber(vol)} / ${formatNumber(cap)} 柜 (${ratio}%)</li>`;
+                });
+            warehouseSummary.innerHTML = `
+                <div class="title">仓库容量与占用（实时）</div>
+                <ul>${summaryItems.join('')}</ul>
+            `;
         }
 
         function renderTrend(payload) {
