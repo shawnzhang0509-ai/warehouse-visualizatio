@@ -137,6 +137,13 @@
             return Number(num || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
         }
 
+        function formatCoords(coords, digits = 5) {
+            if (!Array.isArray(coords) || coords.length < 2) return 'N/A';
+            const lng = Number(coords[0]).toFixed(digits);
+            const lat = Number(coords[1]).toFixed(digits);
+            return `${lat}, ${lng}`;
+        }
+
         function getChannelsFromInput() {
             return channelInput.value
                 .split(',')
@@ -240,6 +247,10 @@
             // 按体积排序，优先显示体积较大的标签，减轻重叠
             mapped.sort((a, b) => Number(b.volume || 0) - Number(a.volume || 0));
             const { pointData, lineData } = buildDisplayPoints(mapped);
+            const anchorData = mapped.map(item => ({
+                value: [Number(item.coords[0]), Number(item.coords[1]), Number(item.volume || 0)],
+                raw: item
+            }));
 
             const capacityBubbleData = pointData.map(item => ({
                 value: [item.value[0], item.value[1], Number(item.raw.capacity || 0)],
@@ -286,6 +297,21 @@
                     }
                 },
                 series: [
+                    {
+                        name: '真实坐标锚点',
+                        type: 'scatter',
+                        coordinateSystem: 'geo',
+                        data: anchorData,
+                        silent: true,
+                        zlevel: 0,
+                        symbol: 'circle',
+                        symbolSize: 6,
+                        itemStyle: {
+                            color: '#262626',
+                            opacity: 0.9
+                        },
+                        label: { show: false }
+                    },
                     {
                         name: '仓库偏移引导线',
                         type: 'lines',
@@ -344,18 +370,19 @@
                                 const volume = Number(params.data.raw.volume || 0);
                                 const capacity = Number(params.data.raw.capacity || 0);
                                 const ratio = capacity > 0 ? ((volume / capacity) * 100).toFixed(1) : 'N/A';
-                                return `${params.name}\n${formatNumber(volume)} / ${formatNumber(capacity)} 柜 (${ratio}%)`;
+                                const coordText = formatCoords(params.data.raw.coords || params.data.originalCoords, 4);
+                                return `${params.name}\n${formatNumber(volume)} / ${formatNumber(capacity)} 柜 (${ratio}%)\n坐标:${coordText}`;
                             },
                             color: '#333',
-                            fontSize: 11,
+                            fontSize: 10,
                             backgroundColor: 'rgba(255,255,255,0.82)',
                             borderColor: '#e6e6e6',
                             borderWidth: 1,
                             borderRadius: 4,
                             padding: [2, 4],
-                            width: 165,
+                            width: 220,
                             overflow: 'truncate',
-                            lineHeight: 14
+                            lineHeight: 13
                         },
                         itemStyle: {
                             color: '#ff4d4f',
@@ -396,10 +423,11 @@
                     const vol = Number(item.volume || 0);
                     const cap = Number(item.capacity || 0);
                     const ratio = cap > 0 ? ((vol / cap) * 100).toFixed(1) : 'N/A';
-                    return `<li>${item.name}: ${formatNumber(vol)} / ${formatNumber(cap)} 柜 (${ratio}%)</li>`;
+                    const coordText = formatCoords(item.coords, 5);
+                    return `<li><b>${item.name}</b><br/>坐标: ${coordText}<br/>${formatNumber(vol)} / ${formatNumber(cap)} 柜 (${ratio}%)</li>`;
                 });
             warehouseSummary.innerHTML = `
-                <div class="title">仓库容量与占用（实时）</div>
+                <div class="title">仓库容量与占用（实时，含坐标）</div>
                 <ul>${summaryItems.join('')}</ul>
             `;
         }
