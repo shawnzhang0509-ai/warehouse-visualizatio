@@ -137,6 +137,8 @@
             const list = Array.isArray(payload.data) ? payload.data : [];
             const mapped = list.filter(item => Array.isArray(item.coords) && item.coords.length === 2);
 
+            // 按体积排序，优先显示体积较大的标签，减轻重叠
+            mapped.sort((a, b) => Number(b.volume || 0) - Number(a.volume || 0));
             const seriesData = mapped.map(item => ({
                 name: item.name,
                 value: [item.coords[0], item.coords[1], Number(item.volume || 0)],
@@ -172,12 +174,13 @@
                     zoom: 4.1,
                     center: [173.5, -41.2],
                     itemStyle: {
-                        areaColor: '#eef2f7',
-                        borderColor: '#999'
+                        areaColor: '#ffe58f',
+                        borderColor: '#b08900',
+                        borderWidth: 1
                     },
                     emphasis: {
                         itemStyle: {
-                            areaColor: '#dce5f1'
+                            areaColor: '#ffd666'
                         }
                     }
                 },
@@ -192,12 +195,35 @@
                         },
                         label: {
                             show: true,
-                            position: 'right',
-                            formatter: '{b}',
-                            color: '#333'
+                            position: 'top',
+                            distance: 10,
+                            formatter: function (params) {
+                                const volume = Number(params.data.raw.volume || 0);
+                                return `${params.name}\n${formatNumber(volume)} m³`;
+                            },
+                            color: '#333',
+                            fontSize: 11,
+                            backgroundColor: 'rgba(255,255,255,0.82)',
+                            borderColor: '#e6e6e6',
+                            borderWidth: 1,
+                            borderRadius: 4,
+                            padding: [2, 4],
+                            width: 110,
+                            overflow: 'truncate',
+                            lineHeight: 14
                         },
                         itemStyle: {
                             color: '#ff7a45'
+                        },
+                        labelLayout: {
+                            hideOverlap: true
+                        },
+                        emphasis: {
+                            label: {
+                                show: true,
+                                width: null,
+                                overflow: 'none'
+                            }
                         }
                     }
                 ]
@@ -213,7 +239,11 @@
             const unmappedLabel = unmapped.length
                 ? `；缺少坐标: ${unmapped.join(', ')}`
                 : '';
-            statusText.textContent = `${channelLabel}；已展示 ${seriesData.length}/${list.length} 个仓库${unmappedLabel}`;
+            const snapshotLabel = payload.snapshotDate ? `；快照日期: ${payload.snapshotDate}` : '';
+            const fallbackReason = payload.fallback && payload.fallback.reason
+                ? `；${payload.fallback.reason}`
+                : '';
+            statusText.textContent = `${channelLabel}；已展示 ${seriesData.length}/${list.length} 个仓库${snapshotLabel}${unmappedLabel}${fallbackReason}`;
         }
 
         function renderTrend(payload) {
@@ -287,7 +317,7 @@
             const mapCandidates = [
                 '/static/nz.json',
                 '/nz.json',
-                'https://raw.githubusercontent.com/apache/echarts-examples/gh-pages/public/data/asset/geo/NZ.json'
+                'https://raw.githubusercontent.com/johan/world.geo.json/master/countries/NZL.geo.json'
             ];
             let lastErr = null;
             for (const url of mapCandidates) {
@@ -326,23 +356,15 @@
                 if (mapPayload.status !== 'success') {
                     throw new Error(mapPayload.message || '地图接口返回异常');
                 }
-                if (trendPayload.status !== 'success') {
-                    throw new Error(trendPayload.message || '趋势接口返回异常');
-                }
                 renderChart(mapPayload);
-                renderTrend(trendPayload);
+                if (trendPayload.status === 'success') {
+                    renderTrend(trendPayload);
+                } else {
+                    statusText.textContent = `地图已更新；趋势图查询失败：${trendPayload.message || '未知错误'}`;
+                }
                 markUpdatedTime();
             } catch (err) {
                 statusText.textContent = `加载失败：${err.message}`;
-                mapChart.setOption({
-                    title: {
-                        text: '地图加载失败',
-                        left: 'center',
-                        top: 'middle',
-                        textStyle: { color: '#d4380d', fontSize: 18 }
-                    },
-                    series: []
-                });
             }
         }
 
