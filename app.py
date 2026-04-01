@@ -16,7 +16,7 @@ app = Flask(__name__)
 
 # 1) 数据库连接信息（优先读取环境变量，便于部署）
 DEFAULT_CONN_STR = (
-    "DRIVER={ODBC Driver 17 for SQL Server};"
+    "DRIVER={ODBC Driver 18 for SQL Server};"
     "SERVER=if-akl-live.database.windows.net;"
     "DATABASE=nz_ierp_live;"
     "UID=nzlivepooluser;"
@@ -465,13 +465,55 @@ def _save_snapshot_store(store):
         json.dump(store, f, ensure_ascii=False, indent=2)
 
 
+def _snapshot_needs_unit_fix(store):
+    """检测快照是否明显偏离 CSV 全量口径（例如重复 /69 或未 /69）。"""
+    days = store.get("days", [])
+    if not days:
+        return False
+    latest = days[-1]
+    base_map = latest.get("base", {}) if isinstance(latest.get("base"), dict) else {}
+    if not base_map:
+        return False
+
+    snapshot_total = sum(float(v or 0) for v in base_map.values())
+    csv_total = _csv_total_volume()
+    if csv_total <= 0:
+        return False
+
+    ratio = snapshot_total / csv_total if csv_total else 1.0
+    # 允许 15% 偏差；超出则视为单位口径错误，触发重建。
+    return not (0.85 <= ratio <= 1.15)
+
+
+def _fix_snapshot_units_if_needed():
+    store = _load_snapshot_store()
+    if not store.get("days"):
+        return False
+    if not _snapshot_needs_unit_fix(store):
+        return False
+    # 当前环境无法实时查库时，使用 CSV 口径就地校正，避免继续沿用错误单位。
+    latest = store.get("days", [])[-1] if store.get("days") else None
+    if latest and str(latest.get("source")) == "csv":
+        base_rows = _load_base_rows_from_csv()
+        base_map = _rows_to_snapshot_map(base_rows)
+        latest["base"] = base_map
+        latest["channels"] = {"ALL": dict(base_map)}
+        store["last_updated"] = latest.get("date") or store.get("last_updated")
+        _save_snapshot_store(store)
+        return True
+    # 能实时查库时，直接按当前口径重建快照。
+    _refresh_daily_snapshot(force=True)
+    return True
+
+
 def _snapshot_rows_to_map(rows):
     mapped = {}
     for row in rows:
         name = (_row_get(row, "WarehouseName", "") or "").strip()
         if not name or _is_excluded_warehouse(name):
             continue
-        mapped[name] = _m3_to_container(_row_get(row, "TotalOccupiedVolume", 0) or 0)
+        # rows 进入这里前已经是“货柜数”口径（DB 已转换，CSV 本身也已转换）
+        mapped[name] = float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
     return mapped
 
 
@@ -480,7 +522,8 @@ def _snapshot_channel_rows_to_map(rows):
     for row in rows:
         channel = (_row_get(row, "ChannelName", "") or "").strip()
         warehouse = (_row_get(row, "WarehouseName", "") or "").strip()
-        volume = _m3_to_container(_row_get(row, "TotalOccupiedVolume", 0) or 0)
+        # rows 进入这里前已经是“货柜数”口径（避免重复 /69）
+        volume = float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
         if not channel or not warehouse or _is_excluded_warehouse(warehouse):
             continue
         channel_key = channel.upper()
@@ -500,8 +543,10 @@ def _snapshot_total_by_channel(channel_filters, channel_map):
         if warehouses:
             matched = True
             total += sum(float(v) for v in warehouses.values())
-    if not matched and "ALL" in channel_map:
-        return sum(float(v) for v in channel_map["ALL"].values())
+    # 渠道未命中时返回 0，避免把 ALL 误当成渠道结果
+    # 导致“地图显示0但总量/趋势仍有值”的口径错乱。
+    if not matched:
+        return 0.0
     return total
 
 
@@ -518,6 +563,10 @@ def _snapshot_map_rows(channel_filters, base_map, channel_map):
             aggregate[name] = aggregate.get(name, 0.0) + float(volume)
     if aggregate:
         return [{"WarehouseName": name, "TotalOccupiedVolume": volume} for name, volume in aggregate.items()]
+    # 渠道未命中时返回空集合，而不是回退 ALL
+    # 这样地图和趋势都能准确反映“该渠道当前无数据”。
+    if channel_filters:
+        return []
     if "ALL" in channel_map:
         return [{"WarehouseName": name, "TotalOccupiedVolume": volume} for name, volume in channel_map["ALL"].items()]
     return []
@@ -583,6 +632,12 @@ def _refresh_daily_snapshot(force=False):
     return store, True
 
 
+def _normalize_snapshot_units():
+    # 直接以当前代码口径重建当日快照，彻底消除历史单位污染。
+    store, _created = _refresh_daily_snapshot(force=True)
+    return store
+
+
 def _csv_total_volume():
     return sum(item["TotalOccupiedVolume"] for item in _load_base_rows_from_csv())
 
@@ -595,6 +650,49 @@ def _sum_rows_total(rows):
             continue
         total += float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
     return total
+
+
+def _rows_to_snapshot_map(rows):
+    mapped = {}
+    for row in rows:
+        name = (_row_get(row, "WarehouseName", "") or "").strip()
+        if not name or _is_excluded_warehouse(name):
+            continue
+        mapped[name] = mapped.get(name, 0.0) + float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
+    return mapped
+
+
+def _rows_to_map_rows(rows):
+    mapped = _rows_to_snapshot_map(rows)
+    out = [{"WarehouseName": name, "TotalOccupiedVolume": volume} for name, volume in mapped.items()]
+    out.sort(key=lambda item: float(item.get("TotalOccupiedVolume", 0) or 0), reverse=True)
+    return out
+
+
+def _normalize_snapshot_units():
+    store = _load_snapshot_store()
+    changed = False
+    for day in store.get("days", []):
+        base_map = day.get("base")
+        if isinstance(base_map, dict):
+            for key, value in list(base_map.items()):
+                fv = float(value or 0)
+                if fv > 50:
+                    base_map[key] = fv / CONTAINER_VOLUME_M3
+                    changed = True
+        channel_map = day.get("channels")
+        if isinstance(channel_map, dict):
+            for ch, wmap in channel_map.items():
+                if not isinstance(wmap, dict):
+                    continue
+                for wname, value in list(wmap.items()):
+                    fv = float(value or 0)
+                    if fv > 50:
+                        channel_map[ch][wname] = fv / CONTAINER_VOLUME_M3
+                        changed = True
+    if changed:
+        _save_snapshot_store(store)
+    return changed
 
 
 def _run_query(sql, params=None):
@@ -669,12 +767,23 @@ def _latest_snapshot_entry():
 def _rows_from_snapshot_store(channel_filters):
     store, latest = _latest_snapshot_entry()
     if not latest:
-        return None, None
+        return None, None, store
     base_map = latest.get("base", {}) if isinstance(latest.get("base"), dict) else {}
     channel_map = latest.get("channels", {}) if isinstance(latest.get("channels"), dict) else {}
     rows = _snapshot_map_rows(channel_filters, base_map, channel_map)
     rows.sort(key=lambda item: float(item.get("TotalOccupiedVolume", 0) or 0), reverse=True)
-    return rows, latest.get("date")
+    return rows, latest.get("date"), store
+
+
+def _snapshot_has_channels(store, channel_filters):
+    if not channel_filters:
+        return True
+    normalized = {ch.upper() for ch in channel_filters}
+    for item in store.get("days", []):
+        channel_map = item.get("channels", {}) if isinstance(item.get("channels"), dict) else {}
+        if normalized.intersection(channel_map.keys()):
+            return True
+    return False
 
 
 try:
@@ -700,20 +809,28 @@ def nz_geojson():
 @app.route("/get-data")
 def get_data():
     try:
+        _fix_snapshot_units_if_needed()
         channel_filters = _parse_channel_filters()
         fallback_used = False
         fallback_reason = None
         snapshot_date = None
 
-        rows, snapshot_date = _rows_from_snapshot_store(channel_filters)
-        if rows is None:
+        snapshot_rows, snapshot_date, snapshot_store = _rows_from_snapshot_store(channel_filters)
+        rows = snapshot_rows
+        use_snapshot_rows = rows is not None and (
+            not channel_filters or _snapshot_has_channels(snapshot_store, channel_filters)
+        )
+        if not use_snapshot_rows:
             if channel_filters:
                 try:
                     rows = _convert_rows_to_containers(_run_query(_build_channel_sql(channel_filters), channel_filters))
-                except Exception as db_error:
-                    rows = _load_base_rows_from_csv()
                     fallback_used = True
-                    fallback_reason = f"静态快照缺失，且渠道实时查询不可用，已回退全量：{db_error}"
+                    fallback_reason = "静态快照未包含该渠道，已改用实时渠道查询"
+                    snapshot_date = None
+                except Exception as db_error:
+                    rows = snapshot_rows if snapshot_rows is not None else []
+                    fallback_used = True
+                    fallback_reason = f"静态快照未包含该渠道，且实时查询失败，按快照口径返回：{db_error}"
             else:
                 try:
                     rows = _convert_rows_to_containers(_run_query(BASE_VOLUME_SQL))
@@ -736,6 +853,7 @@ def get_data():
         total_volume = 0.0
         unmapped = []
 
+        has_channel_filter = bool(channel_filters)
         for profile in profiles:
             name = profile["name"]
             include = bool(profile["includeInVolume"])
@@ -747,7 +865,9 @@ def get_data():
                 total_volume += volume
                 if not coords:
                     unmapped.append(name)
-                if coords:
+                # 渠道筛选时仅展示命中仓库（volume>0），避免“全是0气泡”误导。
+                should_show = bool(coords) and (not has_channel_filter or volume > 0)
+                if should_show:
                     result.append(
                         {
                             "name": name,
@@ -791,12 +911,36 @@ def get_trend_data():
         store = _load_snapshot_store()
         refreshed = False
 
-        rows = _build_snapshot_trend(days, channel_filters, store)
-        if not rows:
+        rows = None
+        used_db_for_trend = False
+        if channel_filters and CHANNEL_VOLUME_SQL:
+            # 渠道筛选优先尝试实时数据库，避免快照缺少渠道维度时误判为 0。
+            try:
+                channel_rows = _convert_rows_to_containers(_run_query(CHANNEL_VOLUME_SQL))
+                filtered = []
+                matched_channels = {ch.upper() for ch in channel_filters}
+                for row in channel_rows:
+                    channel = (_row_get(row, "ChannelName", "") or "").strip().upper()
+                    warehouse = (_row_get(row, "WarehouseName", "") or "").strip()
+                    if channel in matched_channels and not _is_excluded_warehouse(warehouse):
+                        filtered.append(row)
+                total = _sum_rows_total(filtered)
+                rows = _build_flat_trend(days, total)
+                source = "database_channel_realtime_flat"
+                used_db_for_trend = True
+            except Exception as db_error:
+                fallback_used = True
+                fallback_reason = f"渠道趋势实时查询不可用，已使用快照：{db_error}"
+
+        if rows is None:
+            rows = _build_snapshot_trend(days, channel_filters, store)
+
+        if (not rows) and (not used_db_for_trend):
             fallback_used = True
             rows = _build_flat_trend(days, _csv_total_volume())
             source = "flat:csv_snapshot"
-            fallback_reason = "静态快照为空，已退化为单值趋势"
+            if not fallback_reason:
+                fallback_reason = "静态快照为空，已退化为单值趋势"
 
         trend_data = []
         totals_by_date = {}
@@ -884,6 +1028,24 @@ def snapshot_status():
             "latestSource": latest.get("source") if latest else None,
         }
     )
+
+
+@app.route("/snapshot/normalize")
+def normalize_snapshot():
+    try:
+        changed = _normalize_snapshot_units()
+        store = _load_snapshot_store()
+        latest = store.get("days", [])[-1] if store.get("days") else None
+        return jsonify(
+            {
+                "status": "success",
+                "normalized": bool(changed),
+                "lastUpdated": store.get("last_updated"),
+                "latestDate": latest.get("date") if latest else None,
+            }
+        )
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
 
 
 @app.route("/channels")

@@ -89,6 +89,38 @@
             color: #333;
             background: #fff;
         }
+        #coordTableHead {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 4px;
+            gap: 8px;
+        }
+        #coordSaveBtn {
+            border: none;
+            border-radius: 4px;
+            padding: 4px 8px;
+            background: #1677ff;
+            color: #fff;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        #coordSizeSelect {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 12px;
+            padding: 2px 4px;
+            background: #fff;
+        }
+        #coordSizeWrap {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            justify-content: flex-end;
+            margin-top: 6px;
+            font-size: 12px;
+            color: #666;
+        }
         #warehouseCoordTable table {
             width: 100%;
             border-collapse: collapse;
@@ -105,6 +137,20 @@
             background: #fff;
             z-index: 1;
             font-weight: 600;
+        }
+        .coord-input {
+            width: 148px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 3px 5px;
+            font-size: 12px;
+        }
+        .coord-include-select {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 2px 4px;
+            font-size: 12px;
+            background: #fff;
         }
         #editorModalMask {
             position: fixed;
@@ -167,7 +213,7 @@
     <div id="toolbar">
         <label for="channelInput">渠道筛选（可选，多个渠道用逗号分隔）</label>
         <div class="row">
-            <input id="channelInput" placeholder="例如：Retail,Online" />
+            <input id="channelInput" placeholder="例如：Retail,Online" autocomplete="off" />
             <select id="daysSelect">
                 <option value="7">近7天</option>
                 <option value="14">近14天</option>
@@ -176,6 +222,7 @@
                 <option value="90">近90天</option>
             </select>
             <button id="queryBtn">查询</button>
+            <button id="clearFilterBtn" style="border:none;border-radius:4px;padding:6px 10px;font-size:12px;cursor:pointer;background:#8c8c8c;color:#fff;">清空</button>
         </div>
         <div class="row" style="margin-top: -2px;">
             <button id="openEditorBtn" style="border:none;border-radius:4px;padding:6px 10px;font-size:12px;cursor:pointer;background:#13c2c2;color:#fff;">
@@ -222,6 +269,7 @@
         const warehouseSummary = document.getElementById('warehouseSummary');
         const warehouseCoordTable = document.getElementById('warehouseCoordTable');
         const queryBtn = document.getElementById('queryBtn');
+        const clearFilterBtn = document.getElementById('clearFilterBtn');
         const openEditorBtn = document.getElementById('openEditorBtn');
         const editorModalMask = document.getElementById('editorModalMask');
         const closeEditorBtn = document.getElementById('closeEditorBtn');
@@ -233,6 +281,7 @@
         let mapReady = false;
         let refreshTimer = null;
         let latestProfiles = [];
+        let filterTouched = false;
 
         function formatNumber(num) {
             return Number(num || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -246,6 +295,7 @@
         }
 
         function getChannelsFromInput() {
+            if (!filterTouched) return [];
             return channelInput.value
                 .split(',')
                 .map(item => item.trim())
@@ -344,6 +394,10 @@
         function renderChart(payload) {
             const list = Array.isArray(payload.data) ? payload.data : [];
             const profiles = Array.isArray(payload.warehouseProfiles) ? payload.warehouseProfiles : [];
+            const channels = payload.filters && Array.isArray(payload.filters.channels)
+                ? payload.filters.channels
+                : [];
+            const channelLabel = channels.length ? channels.join(', ') : '全部';
             latestProfiles = profiles.slice();
             const includedForVolume = profiles.filter(p => p.includeInVolume);
             const includedWithCoords = includedForVolume.filter(
@@ -366,7 +420,7 @@
 
             const option = {
                 title: {
-                    text: `新西兰仓库占用货柜分布（总计 ${formatNumber(payload.total)} 柜）`,
+                    text: `新西兰仓库占用货柜分布（渠道 ${channelLabel}，总计 ${formatNumber(payload.total)} 柜）`,
                     left: 'center',
                     top: 12
                 },
@@ -509,10 +563,7 @@
 
             mapChart.setOption(option);
 
-            const channels = payload.filters && Array.isArray(payload.filters.channels)
-                ? payload.filters.channels
-                : [];
-            const channelLabel = channels.length ? `渠道: ${channels.join(', ')}` : '渠道: 全部';
+            const channelText = channels.length ? `渠道: ${channels.join(', ')}` : '渠道: 全部';
             const unmapped = Array.isArray(payload.unmappedWarehouses) ? payload.unmappedWarehouses : [];
             const unmappedLabel = unmapped.length
                 ? `；缺少坐标: ${unmapped.join(', ')}`
@@ -521,8 +572,11 @@
             const fallbackReason = payload.fallback && payload.fallback.reason
                 ? `；${payload.fallback.reason}`
                 : '';
+            const noHitLabel = channels.length && Number(payload.total || 0) === 0
+                ? '；当前渠道无命中数据'
+                : '';
             const statusSummary = `已展示 ${pointData.length}/${includedWithCoords.length} 个仓库（参与统计 ${includedForVolume.length}；有坐标 ${includedWithCoords.length}）`;
-            statusText.textContent = `${channelLabel}；${statusSummary}（橙色=货柜数，蓝色圈=总容量/爆仓线）${snapshotLabel}${unmappedLabel}${fallbackReason}`;
+            statusText.textContent = `${channelText}；${statusSummary}（橙色=货柜数，蓝色圈=总容量/爆仓线）${noHitLabel}${snapshotLabel}${unmappedLabel}${fallbackReason}`;
 
             const summaryItems = mapped
                 .slice()
@@ -539,22 +593,97 @@
                 <ul>${summaryItems.join('')}</ul>
             `;
 
-            const coordRows = profiles
+            const sortedProfiles = profiles
                 .slice()
                 .sort((a, b) => a.name.localeCompare(b.name))
                 .map(item => {
                     const coordText = formatCoords(item.coords, 5);
-                    const includeText = item.includeInVolume ? '参与' : '排除';
-                    return `<tr><td>${item.name}</td><td>${coordText}</td><td>${includeText}</td></tr>`;
+                    const coordInputVal = coordText === 'N/A'
+                        ? ''
+                        : `${Number(item.coords[1]).toFixed(6)},${Number(item.coords[0]).toFixed(6)}`;
+                    return `
+                        <tr>
+                            <td>${item.name}</td>
+                            <td>
+                                <input class="coord-input" data-name="${item.name}" data-field="coords" value="${coordInputVal}" placeholder="lat,lng" />
+                            </td>
+                            <td>
+                                <select class="coord-include-select" data-name="${item.name}" data-field="include">
+                                    <option value="1" ${item.includeInVolume ? 'selected' : ''}>参与</option>
+                                    <option value="0" ${item.includeInVolume ? '' : 'selected'}>排除</option>
+                                </select>
+                            </td>
+                        </tr>
+                    `;
                 })
                 .join('');
             warehouseCoordTable.innerHTML = `
-                <div class="title" style="font-weight:600;margin-bottom:4px;">仓库主数据清单（坐标 + 是否参与统计）</div>
+                <div id="coordTableHead">
+                    <div class="title" style="font-weight:600;">仓库主数据清单（可编辑）</div>
+                    <button id="coordSaveBtn">保存清单修改</button>
+                </div>
                 <table>
                     <thead><tr><th>仓库</th><th>坐标(lat, lng)</th><th>体积统计</th></tr></thead>
-                    <tbody>${coordRows}</tbody>
+                    <tbody>${sortedProfiles}</tbody>
                 </table>
+                <div id="coordSizeWrap">
+                    <span>清单高度</span>
+                    <select id="coordSizeSelect">
+                        <option value="130">小</option>
+                        <option value="220" selected>中</option>
+                        <option value="320">大</option>
+                    </select>
+                </div>
             `;
+            const sizeSelect = warehouseCoordTable.querySelector('#coordSizeSelect');
+            if (sizeSelect) {
+                const current = String(parseInt(warehouseCoordTable.style.maxHeight || '130', 10));
+                if (['130', '220', '320'].includes(current)) {
+                    sizeSelect.value = current;
+                }
+                sizeSelect.addEventListener('change', function () {
+                    warehouseCoordTable.style.maxHeight = `${this.value}px`;
+                });
+            }
+            const saveBtn = warehouseCoordTable.querySelector('#coordSaveBtn');
+            if (saveBtn) {
+                saveBtn.addEventListener('click', saveInlineCoordTable);
+            }
+        }
+
+        async function saveInlineCoordTable() {
+            try {
+                const rows = latestProfiles
+                    .slice()
+                    .sort((a, b) => a.name.localeCompare(b.name))
+                    .map(item => {
+                        const coordsEl = warehouseCoordTable.querySelector(`input[data-name="${item.name}"][data-field="coords"]`);
+                        const includeEl = warehouseCoordTable.querySelector(`select[data-name="${item.name}"][data-field="include"]`);
+                        const parsed = parseCoordInput(coordsEl ? coordsEl.value : '');
+                        if (parsed === undefined) {
+                            throw new Error(`仓库 ${item.name} 的坐标格式错误，应为 lat,lng`);
+                        }
+                        return {
+                            name: item.name,
+                            coords: parsed,
+                            includeInVolume: includeEl ? includeEl.value === '1' : !!item.includeInVolume,
+                        };
+                    });
+
+                const res = await fetch('/warehouse-profiles', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ profiles: rows }),
+                });
+                const payload = await res.json();
+                if (payload.status !== 'success') {
+                    throw new Error(payload.message || '保存失败');
+                }
+                statusText.textContent = '仓库主数据保存成功，正在刷新图表...';
+                await loadAll();
+            } catch (err) {
+                statusText.textContent = `保存失败：${err.message}`;
+            }
         }
 
         function openEditor() {
@@ -762,15 +891,27 @@
             }
         }
 
-        queryBtn.addEventListener('click', loadAll);
+        queryBtn.addEventListener('click', function () {
+            filterTouched = true;
+            loadAll();
+        });
+        clearFilterBtn.addEventListener('click', function () {
+            filterTouched = false;
+            channelInput.value = '';
+            loadAll();
+        });
         openEditorBtn.addEventListener('click', openEditor);
         closeEditorBtn.addEventListener('click', closeEditor);
         saveEditorBtn.addEventListener('click', saveEditor);
         editorModalMask.addEventListener('click', function (e) {
             if (e.target === editorModalMask) closeEditor();
         });
+        channelInput.addEventListener('input', function () {
+            filterTouched = true;
+        });
         channelInput.addEventListener('keydown', function (event) {
             if (event.key === 'Enter') {
+                filterTouched = true;
                 loadAll();
             }
         });
