@@ -500,8 +500,10 @@ def _snapshot_total_by_channel(channel_filters, channel_map):
         if warehouses:
             matched = True
             total += sum(float(v) for v in warehouses.values())
-    if not matched and "ALL" in channel_map:
-        return sum(float(v) for v in channel_map["ALL"].values())
+    # 渠道未命中时返回 0，避免把 ALL 误当成渠道结果
+    # 导致“地图显示0但总量/趋势仍有值”的口径错乱。
+    if not matched:
+        return 0.0
     return total
 
 
@@ -518,6 +520,10 @@ def _snapshot_map_rows(channel_filters, base_map, channel_map):
             aggregate[name] = aggregate.get(name, 0.0) + float(volume)
     if aggregate:
         return [{"WarehouseName": name, "TotalOccupiedVolume": volume} for name, volume in aggregate.items()]
+    # 渠道未命中时返回空集合，而不是回退 ALL
+    # 这样地图和趋势都能准确反映“该渠道当前无数据”。
+    if channel_filters:
+        return []
     if "ALL" in channel_map:
         return [{"WarehouseName": name, "TotalOccupiedVolume": volume} for name, volume in channel_map["ALL"].items()]
     return []
@@ -736,6 +742,7 @@ def get_data():
         total_volume = 0.0
         unmapped = []
 
+        has_channel_filter = bool(channel_filters)
         for profile in profiles:
             name = profile["name"]
             include = bool(profile["includeInVolume"])
@@ -747,7 +754,9 @@ def get_data():
                 total_volume += volume
                 if not coords:
                     unmapped.append(name)
-                if coords:
+                # 渠道筛选时仅展示命中仓库（volume>0），避免“全是0气泡”误导。
+                should_show = bool(coords) and (not has_channel_filter or volume > 0)
+                if should_show:
                     result.append(
                         {
                             "name": name,
