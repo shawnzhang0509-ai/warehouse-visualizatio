@@ -3,6 +3,7 @@ import json
 import os
 from datetime import date, timedelta
 from pathlib import Path
+from threading import Lock
 
 from flask import Flask, jsonify, render_template_string, request, send_file
 
@@ -54,6 +55,7 @@ DAILY_CHANNEL_TREND_SQL = None
 SNAPSHOT_FILE = Path(__file__).with_name("data").joinpath("daily_snapshots.json")
 MASTER_FILE = Path(__file__).with_name("warehouse_master.csv")
 CONTAINER_VOLUME_M3 = 69.0
+MASTER_LOCK = Lock()
 
 # 默认不参与体积统计的仓库
 EXCLUDED_WAREHOUSE_NAMES = [
@@ -227,9 +229,6 @@ def _ensure_warehouse_master():
                 "capacity": None,
             }
             changed = True
-        elif master[name].get("include_in_volume", True):
-            master[name]["include_in_volume"] = False
-            changed = True
     if changed:
         _save_warehouse_master(master)
     return master
@@ -291,6 +290,109 @@ def _warehouse_master_profiles(extra_names=None):
             }
         )
     return profiles
+
+
+def _canonical_master_name(name):
+    if name in WAREHOUSE_MASTER:
+        return name
+    target = _normalize_warehouse_key(name)
+    if not target:
+        return name
+    best = None
+    best_score = None
+    for key in WAREHOUSE_MASTER.keys():
+        normalized = _normalize_warehouse_key(key)
+        if normalized == target:
+            return key
+        if normalized and (target in normalized or normalized in target):
+            score = abs(len(normalized) - len(target))
+            if best is None or score < best_score:
+                best = key
+                best_score = score
+    return best or name
+
+
+def _parse_optional_float(value):
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip() == "":
+        return None
+    return float(value)
+
+
+def _parse_update_coords(payload):
+    lat = _parse_optional_float(payload.get("lat"))
+    lng = _parse_optional_float(payload.get("lng"))
+    if lat is None and lng is None:
+        return None
+    if lat is None or lng is None:
+        raise ValueError("坐标需同时提供纬度和经度，或同时留空。")
+    if not (-90 <= lat <= 90 and -180 <= lng <= 180):
+        raise ValueError("坐标超出合法范围。")
+    return [lng, lat]
+
+
+def _parse_coords_payload(value):
+    """支持 None / [lng, lat] / {'lat': x, 'lng': y} / 'lat,lng'。"""
+    if value is None:
+        return None
+
+    if isinstance(value, list):
+        if len(value) != 2:
+            raise ValueError("坐标数组格式应为 [lng, lat]。")
+        lng = _parse_optional_float(value[0])
+        lat = _parse_optional_float(value[1])
+    elif isinstance(value, dict):
+        lat = _parse_optional_float(value.get("lat"))
+        lng = _parse_optional_float(value.get("lng"))
+    elif isinstance(value, str):
+        text = value.strip()
+        if text == "":
+            return None
+        parsed = _parse_coords(text)
+        if parsed is None:
+            raise ValueError("坐标字符串格式应为 lat,lng。")
+        lng, lat = parsed[0], parsed[1]
+    else:
+        raise ValueError("不支持的坐标类型。")
+
+    if lat is None or lng is None:
+        raise ValueError("坐标需同时提供纬度和经度。")
+    if not (-90 <= float(lat) <= 90 and -180 <= float(lng) <= 180):
+        raise ValueError("坐标超出合法范围。")
+    return [float(lng), float(lat)]
+
+
+def _save_profiles_batch(profiles):
+    if not isinstance(profiles, list) or not profiles:
+        raise ValueError("profiles 必须是非空数组。")
+
+    for item in profiles:
+        if not isinstance(item, dict):
+            raise ValueError("profiles 中每一项必须是对象。")
+        name = (item.get("name") or "").strip()
+        if not name:
+            raise ValueError("仓库名称不能为空。")
+        canonical_name = _canonical_master_name(name)
+        existing = WAREHOUSE_MASTER.get(canonical_name, {})
+
+        if "coords" in item:
+            coords = _parse_coords_payload(item.get("coords"))
+        else:
+            coords = existing.get("coords")
+
+        if "includeInVolume" in item:
+            include = _parse_bool(item.get("includeInVolume"), default=True)
+        else:
+            include = bool(existing.get("include_in_volume", True))
+
+        WAREHOUSE_MASTER[canonical_name] = {
+            "coords": coords,
+            "include_in_volume": include,
+            "capacity": existing.get("capacity"),
+        }
+
+    _save_warehouse_master(WAREHOUSE_MASTER)
 
 
 def _convert_row_to_containers(row):
@@ -808,10 +910,41 @@ def get_channels():
         return jsonify({"status": "error", "message": str(e)})
 
 
-@app.route("/warehouse-profiles")
-def get_warehouse_profiles():
-    profiles = _warehouse_master_profiles()
-    return jsonify({"status": "success", "total": len(profiles), "data": profiles})
+@app.route("/warehouse-profile", methods=["POST"])
+def update_warehouse_profile():
+    try:
+        payload = request.get_json(silent=True) or {}
+        name = (payload.get("name") or "").strip()
+        if not name:
+            return jsonify({"status": "error", "message": "name 不能为空"}), 400
+
+        profiles = [
+            {
+                "name": name,
+                "coords": payload.get("coords"),
+                "includeInVolume": payload.get("includeInVolume"),
+            }
+        ]
+        _save_profiles_batch(profiles)
+        return jsonify({"status": "success"})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
+
+
+@app.route("/warehouse-profiles", methods=["GET", "POST"])
+def warehouse_profiles():
+    if request.method == "GET":
+        profiles = _warehouse_master_profiles()
+        return jsonify({"status": "success", "total": len(profiles), "data": profiles})
+
+    try:
+        payload = request.get_json(silent=True) or {}
+        profiles = payload.get("profiles")
+        _save_profiles_batch(profiles)
+        latest = _warehouse_master_profiles()
+        return jsonify({"status": "success", "total": len(latest), "data": latest})
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 400
 
 
 if __name__ == "__main__":

@@ -106,6 +106,53 @@
             z-index: 1;
             font-weight: 600;
         }
+        #editorModalMask {
+            position: fixed;
+            inset: 0;
+            background: rgba(0, 0, 0, 0.35);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 50;
+        }
+        #editorModal {
+            width: 760px;
+            max-width: 92vw;
+            max-height: 82vh;
+            overflow: auto;
+            background: #fff;
+            border-radius: 8px;
+            box-shadow: 0 10px 35px rgba(0, 0, 0, 0.2);
+            padding: 12px;
+        }
+        #editorModal .head {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+        }
+        #editorTable {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+        }
+        #editorTable th, #editorTable td {
+            border-bottom: 1px solid #f0f0f0;
+            padding: 6px 4px;
+            text-align: left;
+        }
+        #editorTable input[type="text"] {
+            width: 150px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 4px 6px;
+            font-size: 12px;
+        }
+        #editorHint {
+            color: #666;
+            font-size: 12px;
+            margin-bottom: 8px;
+        }
         #dashboard {
             display: grid;
             grid-template-rows: 60vh 40vh;
@@ -130,6 +177,11 @@
             </select>
             <button id="queryBtn">查询</button>
         </div>
+        <div class="row" style="margin-top: -2px;">
+            <button id="openEditorBtn" style="border:none;border-radius:4px;padding:6px 10px;font-size:12px;cursor:pointer;background:#13c2c2;color:#fff;">
+                编辑仓库坐标/统计规则
+            </button>
+        </div>
         <div class="row" style="justify-content: space-between; align-items: center; margin-bottom: 4px;">
             <div id="autoRefreshWrap">
                 <input id="autoRefresh" type="checkbox" />
@@ -145,6 +197,19 @@
         <div id="warehouse-map"></div>
         <div id="volume-trend"></div>
     </div>
+    <div id="editorModalMask">
+        <div id="editorModal">
+            <div class="head">
+                <b>仓库主数据编辑（坐标 + 是否参与统计）</b>
+                <button id="closeEditorBtn" style="border:none;background:#f5f5f5;padding:4px 8px;border-radius:4px;cursor:pointer;">关闭</button>
+            </div>
+            <div id="editorHint">坐标格式：lat,lng（例如 -36.90829,174.81150）。保存后会立即刷新地图。</div>
+            <div id="editorBody"></div>
+            <div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end;">
+                <button id="saveEditorBtn" style="border:none;border-radius:4px;padding:6px 12px;background:#1677ff;color:#fff;cursor:pointer;">保存</button>
+            </div>
+        </div>
+    </div>
 
     <script>
         const mapDom = document.getElementById('warehouse-map');
@@ -157,11 +222,17 @@
         const warehouseSummary = document.getElementById('warehouseSummary');
         const warehouseCoordTable = document.getElementById('warehouseCoordTable');
         const queryBtn = document.getElementById('queryBtn');
+        const openEditorBtn = document.getElementById('openEditorBtn');
+        const editorModalMask = document.getElementById('editorModalMask');
+        const closeEditorBtn = document.getElementById('closeEditorBtn');
+        const saveEditorBtn = document.getElementById('saveEditorBtn');
+        const editorBody = document.getElementById('editorBody');
         const mapChart = echarts.init(mapDom);
         const trendChart = echarts.init(trendDom);
 
         let mapReady = false;
         let refreshTimer = null;
+        let latestProfiles = [];
 
         function formatNumber(num) {
             return Number(num || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -273,6 +344,7 @@
         function renderChart(payload) {
             const list = Array.isArray(payload.data) ? payload.data : [];
             const profiles = Array.isArray(payload.warehouseProfiles) ? payload.warehouseProfiles : [];
+            latestProfiles = profiles.slice();
             const includedForVolume = profiles.filter(p => p.includeInVolume);
             const includedWithCoords = includedForVolume.filter(
                 p => Array.isArray(p.coords) && p.coords.length === 2
@@ -485,6 +557,79 @@
             `;
         }
 
+        function openEditor() {
+            const rows = latestProfiles
+                .slice()
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map((item, idx) => {
+                    const coordText = formatCoords(item.coords, 6) === 'N/A' ? '' : `${Number(item.coords[1]).toFixed(6)},${Number(item.coords[0]).toFixed(6)}`;
+                    return `
+                        <tr>
+                            <td>${item.name}</td>
+                            <td><input type="text" data-row="${idx}" data-field="coords" value="${coordText}" placeholder="lat,lng" /></td>
+                            <td><input type="checkbox" data-row="${idx}" data-field="include" ${item.includeInVolume ? 'checked' : ''} /></td>
+                        </tr>
+                    `;
+                }).join('');
+            editorBody.innerHTML = `
+                <table id="editorTable">
+                    <thead><tr><th>仓库</th><th>坐标(lat,lng)</th><th>参与统计</th></tr></thead>
+                    <tbody>${rows}</tbody>
+                </table>
+            `;
+            editorModalMask.style.display = 'flex';
+        }
+
+        function closeEditor() {
+            editorModalMask.style.display = 'none';
+        }
+
+        function parseCoordInput(text) {
+            const t = (text || '').trim();
+            if (!t) return null;
+            const parts = t.split(',').map(s => s.trim());
+            if (parts.length !== 2) return undefined;
+            const lat = Number(parts[0]);
+            const lng = Number(parts[1]);
+            if (!Number.isFinite(lat) || !Number.isFinite(lng)) return undefined;
+            return [lng, lat];
+        }
+
+        async function saveEditor() {
+            try {
+                const data = latestProfiles
+                    .slice()
+                    .sort((a, b) => a.name.localeCompare(b.name))
+                    .map((item, idx) => {
+                        const coordsEl = editorBody.querySelector(`input[data-row="${idx}"][data-field="coords"]`);
+                        const includeEl = editorBody.querySelector(`input[data-row="${idx}"][data-field="include"]`);
+                        const parsed = parseCoordInput(coordsEl ? coordsEl.value : '');
+                        if (parsed === undefined) {
+                            throw new Error(`仓库 ${item.name} 的坐标格式错误，应为 lat,lng`);
+                        }
+                        return {
+                            name: item.name,
+                            coords: parsed,
+                            includeInVolume: !!(includeEl && includeEl.checked),
+                        };
+                    });
+
+                const res = await fetch('/warehouse-profiles', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ profiles: data }),
+                });
+                const payload = await res.json();
+                if (payload.status !== 'success') {
+                    throw new Error(payload.message || '保存失败');
+                }
+                closeEditor();
+                await loadAll();
+            } catch (err) {
+                statusText.textContent = `保存失败：${err.message}`;
+            }
+        }
+
         function renderTrend(payload) {
             const totals = Array.isArray(payload.totals) ? payload.totals : [];
             const xData = totals.map(item => item.date);
@@ -618,6 +763,12 @@
         }
 
         queryBtn.addEventListener('click', loadAll);
+        openEditorBtn.addEventListener('click', openEditor);
+        closeEditorBtn.addEventListener('click', closeEditor);
+        saveEditorBtn.addEventListener('click', saveEditor);
+        editorModalMask.addEventListener('click', function (e) {
+            if (e.target === editorModalMask) closeEditor();
+        });
         channelInput.addEventListener('keydown', function (event) {
             if (event.key === 'Enter') {
                 loadAll();
