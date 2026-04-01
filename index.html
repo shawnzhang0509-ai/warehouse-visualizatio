@@ -140,8 +140,8 @@
         }
 
         function buildDisplayPoints(items) {
-            const threshold = 0.08; // 近邻阈值（经纬度）
-            const spreadRadius = 0.06; // 错位半径
+            const threshold = 0.12; // 近邻阈值（经纬度）
+            const spreadRadius = 0.1; // 错位半径
             const visited = new Array(items.length).fill(false);
             const pointData = [];
             const lineData = [];
@@ -170,19 +170,35 @@
                     continue;
                 }
 
+                let centerLng = 0;
+                let centerLat = 0;
+                cluster.forEach((idx) => {
+                    centerLng += Number(items[idx].coords[0]);
+                    centerLat += Number(items[idx].coords[1]);
+                });
+                centerLng /= cluster.length;
+                centerLat /= cluster.length;
+
                 const n = cluster.length;
                 cluster.forEach((idx, order) => {
                     const item = items[idx];
-                    const angle = (2 * Math.PI * order) / n;
+                    const angle = (-Math.PI / 2) + (2 * Math.PI * order) / n;
                     const displayCoords = [
-                        Number(item.coords[0]) + spreadRadius * Math.cos(angle),
-                        Number(item.coords[1]) + spreadRadius * Math.sin(angle) * 0.7
+                        centerLng + spreadRadius * Math.cos(angle),
+                        centerLat + spreadRadius * Math.sin(angle) * 0.7
                     ];
+                    let labelPos = 'top';
+                    if (Math.abs(Math.cos(angle)) > Math.abs(Math.sin(angle))) {
+                        labelPos = Math.cos(angle) >= 0 ? 'right' : 'left';
+                    } else {
+                        labelPos = Math.sin(angle) >= 0 ? 'bottom' : 'top';
+                    }
                     pointData.push({
                         name: item.name,
                         value: [displayCoords[0], displayCoords[1], Number(item.volume || 0)],
                         raw: item,
-                        originalCoords: item.coords
+                        originalCoords: item.coords,
+                        labelPos: labelPos
                     });
                     lineData.push({
                         coords: [displayCoords, item.coords]
@@ -200,6 +216,11 @@
             // 按体积排序，优先显示体积较大的标签，减轻重叠
             mapped.sort((a, b) => Number(b.volume || 0) - Number(a.volume || 0));
             const { pointData, lineData } = buildDisplayPoints(mapped);
+
+            const capacityBubbleData = pointData.map(item => ({
+                value: [item.value[0], item.value[1], Number(item.raw.capacity || 0)],
+                raw: item.raw
+            }));
 
             const option = {
                 title: {
@@ -257,6 +278,28 @@
                         }
                     },
                     {
+                        name: '仓库容量线',
+                        type: 'scatter',
+                        coordinateSystem: 'geo',
+                        data: capacityBubbleData,
+                        silent: true,
+                        zlevel: 2,
+                        symbol: 'circle',
+                        symbolSize: function (val) {
+                            const cap = Number(val[2] || 0);
+                            if (cap <= 0) return 0;
+                            return Math.max(20, Math.sqrt(cap) / 6);
+                        },
+                        itemStyle: {
+                            color: 'rgba(0,0,0,0)',
+                            borderColor: '#0958d9',
+                            borderWidth: 2
+                        },
+                        label: {
+                            show: false
+                        }
+                    },
+                    {
                         name: '仓库体积',
                         type: 'scatter',
                         coordinateSystem: 'geo',
@@ -268,27 +311,23 @@
                             show: true,
                             position: function (params) {
                                 const data = params.data || {};
-                                const original = data.originalCoords || params.value;
-                                const dx = Number(params.value[0]) - Number(original[0]);
-                                const dy = Number(params.value[1]) - Number(original[1]);
-                                if (Math.abs(dx) > Math.abs(dy)) {
-                                    return dx >= 0 ? 'right' : 'left';
-                                }
-                                return dy >= 0 ? 'top' : 'bottom';
+                                return data.labelPos || 'top';
                             },
                             distance: 10,
                             formatter: function (params) {
                                 const volume = Number(params.data.raw.volume || 0);
-                                return `${params.name}\n${formatNumber(volume)} m³`;
+                                const capacity = Number(params.data.raw.capacity || 0);
+                                const ratio = capacity > 0 ? ((volume / capacity) * 100).toFixed(1) : 'N/A';
+                                return `${params.name}\n${formatNumber(volume)} / ${formatNumber(capacity)} m³ (${ratio}%)`;
                             },
                             color: '#333',
-                            fontSize: 11,
+                            fontSize: 10,
                             backgroundColor: 'rgba(255,255,255,0.82)',
                             borderColor: '#e6e6e6',
                             borderWidth: 1,
                             borderRadius: 4,
                             padding: [2, 4],
-                            width: 110,
+                            width: 165,
                             overflow: 'truncate',
                             lineHeight: 14
                         },
@@ -320,7 +359,7 @@
             const fallbackReason = payload.fallback && payload.fallback.reason
                 ? `；${payload.fallback.reason}`
                 : '';
-            statusText.textContent = `${channelLabel}；已展示 ${seriesData.length}/${list.length} 个仓库${snapshotLabel}${unmappedLabel}${fallbackReason}`;
+            statusText.textContent = `${channelLabel}；已展示 ${pointData.length}/${list.length} 个仓库（橙色=体积，蓝色圈=总容量/爆仓线）${snapshotLabel}${unmappedLabel}${fallbackReason}`;
         }
 
         function renderTrend(payload) {
