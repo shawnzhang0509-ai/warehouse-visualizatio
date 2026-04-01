@@ -16,7 +16,7 @@ app = Flask(__name__)
 
 # 1) 数据库连接信息（优先读取环境变量，便于部署）
 DEFAULT_CONN_STR = (
-    "DRIVER={ODBC Driver 17 for SQL Server};"
+    "DRIVER={ODBC Driver 18 for SQL Server};"
     "SERVER=if-akl-live.database.windows.net;"
     "DATABASE=nz_ierp_live;"
     "UID=nzlivepooluser;"
