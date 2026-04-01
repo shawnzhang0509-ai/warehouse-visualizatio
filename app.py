@@ -172,6 +172,26 @@ def _load_warehouse_meta():
 WAREHOUSE_META = _load_warehouse_meta()
 
 
+def _normalize_name(name):
+    return _normalize_warehouse_key(name)
+
+
+def _get_warehouse_meta(warehouse_name):
+    if warehouse_name in WAREHOUSE_META:
+        return WAREHOUSE_META[warehouse_name]
+
+    target = _normalize_name(warehouse_name)
+    if not target:
+        return {}
+
+    # 名称轻微不一致时，做一次归一化模糊匹配（仓库数量少，线性扫描足够）
+    for name, meta in WAREHOUSE_META.items():
+        normalized = _normalize_name(name)
+        if normalized == target or target in normalized or normalized in target:
+            return meta
+    return {}
+
+
 def _load_base_rows_from_csv():
     rows = []
     csv_path = Path(__file__).with_name("data.csv")
