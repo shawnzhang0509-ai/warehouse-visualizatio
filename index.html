@@ -167,7 +167,7 @@
     <div id="toolbar">
         <label for="channelInput">渠道筛选（可选，多个渠道用逗号分隔）</label>
         <div class="row">
-            <input id="channelInput" placeholder="例如：Retail,Online" />
+            <input id="channelInput" placeholder="例如：Retail,Online" autocomplete="off" />
             <select id="daysSelect">
                 <option value="7">近7天</option>
                 <option value="14">近14天</option>
@@ -176,6 +176,7 @@
                 <option value="90">近90天</option>
             </select>
             <button id="queryBtn">查询</button>
+            <button id="clearFilterBtn" style="border:none;border-radius:4px;padding:6px 10px;font-size:12px;cursor:pointer;background:#8c8c8c;color:#fff;">清空</button>
         </div>
         <div class="row" style="margin-top: -2px;">
             <button id="openEditorBtn" style="border:none;border-radius:4px;padding:6px 10px;font-size:12px;cursor:pointer;background:#13c2c2;color:#fff;">
@@ -222,6 +223,7 @@
         const warehouseSummary = document.getElementById('warehouseSummary');
         const warehouseCoordTable = document.getElementById('warehouseCoordTable');
         const queryBtn = document.getElementById('queryBtn');
+        const clearFilterBtn = document.getElementById('clearFilterBtn');
         const openEditorBtn = document.getElementById('openEditorBtn');
         const editorModalMask = document.getElementById('editorModalMask');
         const closeEditorBtn = document.getElementById('closeEditorBtn');
@@ -344,6 +346,10 @@
         function renderChart(payload) {
             const list = Array.isArray(payload.data) ? payload.data : [];
             const profiles = Array.isArray(payload.warehouseProfiles) ? payload.warehouseProfiles : [];
+            const channels = payload.filters && Array.isArray(payload.filters.channels)
+                ? payload.filters.channels
+                : [];
+            const channelLabel = channels.length ? channels.join(', ') : '全部';
             latestProfiles = profiles.slice();
             const includedForVolume = profiles.filter(p => p.includeInVolume);
             const includedWithCoords = includedForVolume.filter(
@@ -366,7 +372,7 @@
 
             const option = {
                 title: {
-                    text: `新西兰仓库占用货柜分布（总计 ${formatNumber(payload.total)} 柜）`,
+                    text: `新西兰仓库占用货柜分布（渠道 ${channelLabel}，总计 ${formatNumber(payload.total)} 柜）`,
                     left: 'center',
                     top: 12
                 },
@@ -509,10 +515,7 @@
 
             mapChart.setOption(option);
 
-            const channels = payload.filters && Array.isArray(payload.filters.channels)
-                ? payload.filters.channels
-                : [];
-            const channelLabel = channels.length ? `渠道: ${channels.join(', ')}` : '渠道: 全部';
+            const channelText = channels.length ? `渠道: ${channels.join(', ')}` : '渠道: 全部';
             const unmapped = Array.isArray(payload.unmappedWarehouses) ? payload.unmappedWarehouses : [];
             const unmappedLabel = unmapped.length
                 ? `；缺少坐标: ${unmapped.join(', ')}`
@@ -521,8 +524,11 @@
             const fallbackReason = payload.fallback && payload.fallback.reason
                 ? `；${payload.fallback.reason}`
                 : '';
+            const noHitLabel = channels.length && Number(payload.total || 0) === 0
+                ? '；当前渠道无命中数据'
+                : '';
             const statusSummary = `已展示 ${pointData.length}/${includedWithCoords.length} 个仓库（参与统计 ${includedForVolume.length}；有坐标 ${includedWithCoords.length}）`;
-            statusText.textContent = `${channelLabel}；${statusSummary}（橙色=货柜数，蓝色圈=总容量/爆仓线）${snapshotLabel}${unmappedLabel}${fallbackReason}`;
+            statusText.textContent = `${channelText}；${statusSummary}（橙色=货柜数，蓝色圈=总容量/爆仓线）${noHitLabel}${snapshotLabel}${unmappedLabel}${fallbackReason}`;
 
             const summaryItems = mapped
                 .slice()
@@ -763,6 +769,10 @@
         }
 
         queryBtn.addEventListener('click', loadAll);
+        clearFilterBtn.addEventListener('click', function () {
+            channelInput.value = '';
+            loadAll();
+        });
         openEditorBtn.addEventListener('click', openEditor);
         closeEditorBtn.addEventListener('click', closeEditor);
         saveEditorBtn.addEventListener('click', saveEditor);
