@@ -603,6 +603,23 @@ def _sum_rows_total(rows):
     return total
 
 
+def _rows_to_snapshot_map(rows):
+    mapped = {}
+    for row in rows:
+        name = (_row_get(row, "WarehouseName", "") or "").strip()
+        if not name or _is_excluded_warehouse(name):
+            continue
+        mapped[name] = mapped.get(name, 0.0) + float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
+    return mapped
+
+
+def _rows_to_map_rows(rows):
+    mapped = _rows_to_snapshot_map(rows)
+    out = [{"WarehouseName": name, "TotalOccupiedVolume": volume} for name, volume in mapped.items()]
+    out.sort(key=lambda item: float(item.get("TotalOccupiedVolume", 0) or 0), reverse=True)
+    return out
+
+
 def _run_query(sql, params=None):
     if pyodbc is None:
         raise RuntimeError("数据库驱动不可用（pyodbc / libodbc 未安装）")
@@ -675,12 +692,23 @@ def _latest_snapshot_entry():
 def _rows_from_snapshot_store(channel_filters):
     store, latest = _latest_snapshot_entry()
     if not latest:
-        return None, None
+        return None, None, store
     base_map = latest.get("base", {}) if isinstance(latest.get("base"), dict) else {}
     channel_map = latest.get("channels", {}) if isinstance(latest.get("channels"), dict) else {}
     rows = _snapshot_map_rows(channel_filters, base_map, channel_map)
     rows.sort(key=lambda item: float(item.get("TotalOccupiedVolume", 0) or 0), reverse=True)
-    return rows, latest.get("date")
+    return rows, latest.get("date"), store
+
+
+def _snapshot_has_channels(store, channel_filters):
+    if not channel_filters:
+        return True
+    normalized = {ch.upper() for ch in channel_filters}
+    for item in store.get("days", []):
+        channel_map = item.get("channels", {}) if isinstance(item.get("channels"), dict) else {}
+        if normalized.intersection(channel_map.keys()):
+            return True
+    return False
 
 
 try:
@@ -711,15 +739,22 @@ def get_data():
         fallback_reason = None
         snapshot_date = None
 
-        rows, snapshot_date = _rows_from_snapshot_store(channel_filters)
-        if rows is None:
+        snapshot_rows, snapshot_date, snapshot_store = _rows_from_snapshot_store(channel_filters)
+        rows = snapshot_rows
+        use_snapshot_rows = rows is not None and (
+            not channel_filters or _snapshot_has_channels(snapshot_store, channel_filters)
+        )
+        if not use_snapshot_rows:
             if channel_filters:
                 try:
                     rows = _convert_rows_to_containers(_run_query(_build_channel_sql(channel_filters), channel_filters))
-                except Exception as db_error:
-                    rows = _load_base_rows_from_csv()
                     fallback_used = True
-                    fallback_reason = f"静态快照缺失，且渠道实时查询不可用，已回退全量：{db_error}"
+                    fallback_reason = "静态快照未包含该渠道，已改用实时渠道查询"
+                    snapshot_date = None
+                except Exception as db_error:
+                    rows = snapshot_rows if snapshot_rows is not None else []
+                    fallback_used = True
+                    fallback_reason = f"静态快照未包含该渠道，且实时查询失败，按快照口径返回：{db_error}"
             else:
                 try:
                     rows = _convert_rows_to_containers(_run_query(BASE_VOLUME_SQL))
@@ -800,12 +835,36 @@ def get_trend_data():
         store = _load_snapshot_store()
         refreshed = False
 
-        rows = _build_snapshot_trend(days, channel_filters, store)
-        if not rows:
+        rows = None
+        used_db_for_trend = False
+        if channel_filters and CHANNEL_VOLUME_SQL:
+            # 渠道筛选优先尝试实时数据库，避免快照缺少渠道维度时误判为 0。
+            try:
+                channel_rows = _convert_rows_to_containers(_run_query(CHANNEL_VOLUME_SQL))
+                filtered = []
+                matched_channels = {ch.upper() for ch in channel_filters}
+                for row in channel_rows:
+                    channel = (_row_get(row, "ChannelName", "") or "").strip().upper()
+                    warehouse = (_row_get(row, "WarehouseName", "") or "").strip()
+                    if channel in matched_channels and not _is_excluded_warehouse(warehouse):
+                        filtered.append(row)
+                total = _sum_rows_total(filtered)
+                rows = _build_flat_trend(days, total)
+                source = "database_channel_realtime_flat"
+                used_db_for_trend = True
+            except Exception as db_error:
+                fallback_used = True
+                fallback_reason = f"渠道趋势实时查询不可用，已使用快照：{db_error}"
+
+        if rows is None:
+            rows = _build_snapshot_trend(days, channel_filters, store)
+
+        if (not rows) and (not used_db_for_trend):
             fallback_used = True
             rows = _build_flat_trend(days, _csv_total_volume())
             source = "flat:csv_snapshot"
-            fallback_reason = "静态快照为空，已退化为单值趋势"
+            if not fallback_reason:
+                fallback_reason = "静态快照为空，已退化为单值趋势"
 
         trend_data = []
         totals_by_date = {}
