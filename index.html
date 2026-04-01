@@ -284,13 +284,28 @@
         }
 
         async function loadMap() {
-            const response = await fetch('nz.json');
-            if (!response.ok) {
-                throw new Error('找不到 nz.json，请确认文件路径。');
+            const mapCandidates = [
+                '/static/nz.json',
+                '/nz.json',
+                'https://raw.githubusercontent.com/apache/echarts-examples/gh-pages/public/data/asset/geo/NZ.json'
+            ];
+            let lastErr = null;
+            for (const url of mapCandidates) {
+                try {
+                    const response = await fetch(url);
+                    if (!response.ok) {
+                        lastErr = new Error(`地图文件加载失败: ${url} (${response.status})`);
+                        continue;
+                    }
+                    const mapData = await response.json();
+                    echarts.registerMap('NZ', mapData);
+                    mapReady = true;
+                    return;
+                } catch (err) {
+                    lastErr = err;
+                }
             }
-            const mapData = await response.json();
-            echarts.registerMap('NZ', mapData);
-            mapReady = true;
+            throw new Error(`地图底图加载失败，请检查 nz.json（${lastErr ? lastErr.message : 'unknown error'}）`);
         }
 
         async function loadAll() {
@@ -319,6 +334,15 @@
                 markUpdatedTime();
             } catch (err) {
                 statusText.textContent = `加载失败：${err.message}`;
+                mapChart.setOption({
+                    title: {
+                        text: '地图加载失败',
+                        left: 'center',
+                        top: 'middle',
+                        textStyle: { color: '#d4380d', fontSize: 18 }
+                    },
+                    series: []
+                });
             }
         }
 

@@ -3,7 +3,7 @@ import os
 from datetime import date, timedelta
 from pathlib import Path
 
-from flask import Flask, jsonify, render_template_string, request
+from flask import Flask, jsonify, render_template_string, request, send_file
 try:
     import pyodbc
 except ImportError:
@@ -312,6 +312,14 @@ except FileNotFoundError:
 @app.route("/")
 def index():
     return render_template_string(html_content)
+
+
+@app.route("/nz.json")
+def nz_geojson():
+    nz_path = Path(__file__).with_name("nz.json")
+    if not nz_path.exists():
+        return jsonify({"status": "error", "message": "nz.json not found"}), 404
+    return send_file(nz_path, mimetype="application/json")
 
 
 @app.route("/get-data")
