@@ -1,0 +1,29 @@
+WarehouseName,Coords,IncludeInVolume,CapacityM3
+123 Jef,,0,
+APEX Center,,0,
+CHCH Gerald Connelly,"-43.54012528819059, 172.5428335499763",1,5000
+CHCH Temp,,0,
+CHCH Treffers,"-43.543494678604766, 172.57295652140377",1,1000
+Carbine Rd Warehouse,"-36.91663296826453, 174.84653630196237",1,8000
+China_Admin Supplies,,0,
+Discontinued,,0,
+East Tamaki -Luo(No longer available),,0,
+East Tamaki temp warehouse,,0,
+Grabone,,0,
+Hamilton Old Display (No longer available),,0,
+LV Warehouse(all dummy stock),,0,
+Melbourne Stock,,0,
+Missing/To be located,,0,
+Monahan Rd Warehouse(No longer available),,0,
+No Inventory,,0,
+Onehunga warehouse(No longer available),,0,
+Otahuhu-Large,,0,
+Presale-AKL,"-34.99187683169154, 175.8254136454127",1,4000
+Presale-CHCH,"-43.495413606990766, 173.04712424564264",1,2000
+Presale-In Store Only(No longer available),,0,
+SleepLAB-Onehunga,,0,
+Tauranga In Transit,,0,
+To be repaired,,0,
+Walls Road,"-36.908292, 174.811509",1,10000
+[Action Request],,0,
+test1,,0,
