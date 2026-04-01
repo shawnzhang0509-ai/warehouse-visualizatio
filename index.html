@@ -224,7 +224,7 @@
 
             const option = {
                 title: {
-                    text: `新西兰仓库占用体积分布（总计 ${formatNumber(payload.total)} m³）`,
+                    text: `新西兰仓库占用货柜分布（总计 ${formatNumber(payload.total)} 柜）`,
                     left: 'center',
                     top: 12
                 },
@@ -239,8 +239,8 @@
                         return [
                             `<b>${raw.name}</b>`,
                             `坐标(纬度, 经度): ${coordsText}`,
-                            `体积: ${formatNumber(volume)} m³`,
-                            `容量: ${capacity == null ? 'N/A' : `${formatNumber(capacity)} m³`}`,
+                            `货柜数: ${formatNumber(volume)} 柜`,
+                            `容量: ${capacity == null ? 'N/A' : `${formatNumber(capacity)} 柜`}`,
                             `占用率: ${ratio === 'N/A' ? 'N/A' : `${ratio}%`}`
                         ].join('<br/>');
                     }
@@ -318,7 +318,7 @@
                                 const volume = Number(params.data.raw.volume || 0);
                                 const capacity = Number(params.data.raw.capacity || 0);
                                 const ratio = capacity > 0 ? ((volume / capacity) * 100).toFixed(1) : 'N/A';
-                                return `${params.name}\n${formatNumber(volume)} / ${formatNumber(capacity)} m³ (${ratio}%)`;
+                                return `${params.name}\n${formatNumber(volume)} / ${formatNumber(capacity)} 柜 (${ratio}%)`;
                             },
                             color: '#333',
                             fontSize: 10,
@@ -359,7 +359,7 @@
             const fallbackReason = payload.fallback && payload.fallback.reason
                 ? `；${payload.fallback.reason}`
                 : '';
-            statusText.textContent = `${channelLabel}；已展示 ${pointData.length}/${list.length} 个仓库（橙色=体积，蓝色圈=总容量/爆仓线）${snapshotLabel}${unmappedLabel}${fallbackReason}`;
+            statusText.textContent = `${channelLabel}；已展示 ${pointData.length}/${list.length} 个仓库（橙色=货柜数，蓝色圈=总容量/爆仓线）${snapshotLabel}${unmappedLabel}${fallbackReason}`;
         }
 
         function renderTrend(payload) {
@@ -372,7 +372,7 @@
 
             trendChart.setOption({
                 title: {
-                    text: `每日体积趋势（${payload.filters?.days || 30}天）`,
+                    text: `每日货柜趋势（${payload.filters?.days || 30}天）`,
                     left: 'center',
                     top: 10,
                     textStyle: { fontSize: 16 }
@@ -382,7 +382,7 @@
                     formatter: function (params) {
                         if (!params.length) return '';
                         const p = params[0];
-                        return `${p.axisValue}<br/>总体积: ${formatNumber(p.data)} m³`;
+                        return `${p.axisValue}<br/>总货柜数: ${formatNumber(p.data)} 柜`;
                     }
                 },
                 grid: { left: 60, right: 30, top: 50, bottom: 40 },
@@ -393,11 +393,11 @@
                 },
                 yAxis: {
                     type: 'value',
-                    name: 'm³'
+                    name: '柜'
                 },
                 series: [
                     {
-                        name: '总体积',
+                        name: '总货柜数',
                         type: 'line',
                         smooth: true,
                         areaStyle: {},
