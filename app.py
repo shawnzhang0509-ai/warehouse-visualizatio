@@ -117,6 +117,13 @@ def _csv_total_volume():
     return sum(item["TotalOccupiedVolume"] for item in _load_base_rows_from_csv())
 
 
+def _sum_rows_total(rows):
+    total = 0.0
+    for row in rows:
+        total += float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
+    return total
+
+
 def _normalize_name(name):
     return "".join(ch.lower() for ch in str(name) if ch.isalnum())
 
@@ -302,6 +309,21 @@ def _build_flat_trend(days, total):
     return points
 
 
+def _fallback_total_for_filters(channel_filters):
+    if channel_filters:
+        try:
+            sql_query = _build_channel_sql(channel_filters)
+            rows = _run_query(sql_query, channel_filters)
+            return _sum_rows_total(rows), "database_channel_snapshot"
+        except Exception:
+            return _csv_total_volume(), "csv_snapshot_no_channel_breakdown"
+    try:
+        rows = _run_query(BASE_VOLUME_SQL)
+        return _sum_rows_total(rows), "database_snapshot"
+    except Exception:
+        return _csv_total_volume(), "csv_snapshot"
+
+
 try:
     with open("index.html", "r", encoding="utf-8") as f:
         html_content = f.read()
@@ -334,14 +356,11 @@ def get_data():
                 sql_query = _build_channel_sql(channel_filters)
                 rows = _run_query(sql_query, channel_filters)
             except Exception as db_error:
-                return jsonify(
-                    {
-                        "status": "error",
-                        "message": (
-                            "渠道筛选需要数据库查询支持，当前不可用："
-                            f"{db_error}"
-                        ),
-                    }
+                # 当渠道筛选不可用时，退化为全量可视化，避免地图区域“无响应”。
+                rows = _load_base_rows_from_csv()
+                fallback_used = True
+                fallback_reason = (
+                    f"渠道筛选不可用，已退化为全量数据：{db_error}"
                 )
         else:
             try:
@@ -408,18 +427,9 @@ def get_trend_data():
         except Exception as db_error:
             fallback_used = True
             fallback_reason = str(db_error)
-            if channel_filters:
-                return jsonify(
-                    {
-                        "status": "error",
-                        "message": (
-                            "按渠道查询每日趋势需要数据库支持，当前不可用："
-                            f"{db_error}"
-                        ),
-                    }
-                )
-            rows = _build_flat_trend(days, _csv_total_volume())
-            source = "csv_flat"
+            fallback_total, fallback_source = _fallback_total_for_filters(channel_filters)
+            rows = _build_flat_trend(days, fallback_total)
+            source = f"flat:{fallback_source}"
 
         trend_data = []
         totals_by_date = {}
