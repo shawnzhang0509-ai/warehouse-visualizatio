@@ -294,6 +294,12 @@
             return `${lat}, ${lng}`;
         }
 
+        function parseBlockedIpFromReason(reason) {
+            if (!reason) return null;
+            const m = String(reason).match(/IP address '([^']+)' is not allowed/);
+            return m ? m[1] : null;
+        }
+
         function getChannelsFromInput() {
             if (!filterTouched) return [];
             return channelInput.value
@@ -575,8 +581,12 @@
             const noHitLabel = channels.length && Number(payload.total || 0) === 0
                 ? '；当前渠道无命中数据'
                 : '';
+            const blockedIp = parseBlockedIpFromReason(payload.fallback && payload.fallback.reason);
+            const blockedIpLabel = blockedIp
+                ? `；SQL防火墙未放行云端IP: ${blockedIp}`
+                : '';
             const statusSummary = `已展示 ${pointData.length}/${includedWithCoords.length} 个仓库（参与统计 ${includedForVolume.length}；有坐标 ${includedWithCoords.length}）`;
-            statusText.textContent = `${channelText}；${statusSummary}（橙色=货柜数，蓝色圈=总容量/爆仓线）${noHitLabel}${snapshotLabel}${unmappedLabel}${fallbackReason}`;
+            statusText.textContent = `${channelText}；${statusSummary}（橙色=货柜数，蓝色圈=总容量/爆仓线）${noHitLabel}${blockedIpLabel}${snapshotLabel}${unmappedLabel}${fallbackReason}`;
 
             const summaryItems = mapped
                 .slice()
