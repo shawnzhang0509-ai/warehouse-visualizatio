@@ -89,6 +89,38 @@
             color: #333;
             background: #fff;
         }
+        #coordTableHead {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 4px;
+            gap: 8px;
+        }
+        #coordSaveBtn {
+            border: none;
+            border-radius: 4px;
+            padding: 4px 8px;
+            background: #1677ff;
+            color: #fff;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        #coordSizeSelect {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-size: 12px;
+            padding: 2px 4px;
+            background: #fff;
+        }
+        #coordSizeWrap {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            justify-content: flex-end;
+            margin-top: 6px;
+            font-size: 12px;
+            color: #666;
+        }
         #warehouseCoordTable table {
             width: 100%;
             border-collapse: collapse;
@@ -105,6 +137,20 @@
             background: #fff;
             z-index: 1;
             font-weight: 600;
+        }
+        .coord-input {
+            width: 148px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 3px 5px;
+            font-size: 12px;
+        }
+        .coord-include-select {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 2px 4px;
+            font-size: 12px;
+            background: #fff;
         }
         #editorModalMask {
             position: fixed;
@@ -547,22 +593,97 @@
                 <ul>${summaryItems.join('')}</ul>
             `;
 
-            const coordRows = profiles
+            const sortedProfiles = profiles
                 .slice()
                 .sort((a, b) => a.name.localeCompare(b.name))
                 .map(item => {
                     const coordText = formatCoords(item.coords, 5);
-                    const includeText = item.includeInVolume ? '参与' : '排除';
-                    return `<tr><td>${item.name}</td><td>${coordText}</td><td>${includeText}</td></tr>`;
+                    const coordInputVal = coordText === 'N/A'
+                        ? ''
+                        : `${Number(item.coords[1]).toFixed(6)},${Number(item.coords[0]).toFixed(6)}`;
+                    return `
+                        <tr>
+                            <td>${item.name}</td>
+                            <td>
+                                <input class="coord-input" data-name="${item.name}" data-field="coords" value="${coordInputVal}" placeholder="lat,lng" />
+                            </td>
+                            <td>
+                                <select class="coord-include-select" data-name="${item.name}" data-field="include">
+                                    <option value="1" ${item.includeInVolume ? 'selected' : ''}>参与</option>
+                                    <option value="0" ${item.includeInVolume ? '' : 'selected'}>排除</option>
+                                </select>
+                            </td>
+                        </tr>
+                    `;
                 })
                 .join('');
             warehouseCoordTable.innerHTML = `
-                <div class="title" style="font-weight:600;margin-bottom:4px;">仓库主数据清单（坐标 + 是否参与统计）</div>
+                <div id="coordTableHead">
+                    <div class="title" style="font-weight:600;">仓库主数据清单（可编辑）</div>
+                    <button id="coordSaveBtn">保存清单修改</button>
+                </div>
                 <table>
                     <thead><tr><th>仓库</th><th>坐标(lat, lng)</th><th>体积统计</th></tr></thead>
-                    <tbody>${coordRows}</tbody>
+                    <tbody>${sortedProfiles}</tbody>
                 </table>
+                <div id="coordSizeWrap">
+                    <span>清单高度</span>
+                    <select id="coordSizeSelect">
+                        <option value="130">小</option>
+                        <option value="220" selected>中</option>
+                        <option value="320">大</option>
+                    </select>
+                </div>
             `;
+            const sizeSelect = warehouseCoordTable.querySelector('#coordSizeSelect');
+            if (sizeSelect) {
+                const current = String(parseInt(warehouseCoordTable.style.maxHeight || '130', 10));
+                if (['130', '220', '320'].includes(current)) {
+                    sizeSelect.value = current;
+                }
+                sizeSelect.addEventListener('change', function () {
+                    warehouseCoordTable.style.maxHeight = `${this.value}px`;
+                });
+            }
+            const saveBtn = warehouseCoordTable.querySelector('#coordSaveBtn');
+            if (saveBtn) {
+                saveBtn.addEventListener('click', saveInlineCoordTable);
+            }
+        }
+
+        async function saveInlineCoordTable() {
+            try {
+                const rows = latestProfiles
+                    .slice()
+                    .sort((a, b) => a.name.localeCompare(b.name))
+                    .map(item => {
+                        const coordsEl = warehouseCoordTable.querySelector(`input[data-name="${item.name}"][data-field="coords"]`);
+                        const includeEl = warehouseCoordTable.querySelector(`select[data-name="${item.name}"][data-field="include"]`);
+                        const parsed = parseCoordInput(coordsEl ? coordsEl.value : '');
+                        if (parsed === undefined) {
+                            throw new Error(`仓库 ${item.name} 的坐标格式错误，应为 lat,lng`);
+                        }
+                        return {
+                            name: item.name,
+                            coords: parsed,
+                            includeInVolume: includeEl ? includeEl.value === '1' : !!item.includeInVolume,
+                        };
+                    });
+
+                const res = await fetch('/warehouse-profiles', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ profiles: rows }),
+                });
+                const payload = await res.json();
+                if (payload.status !== 'success') {
+                    throw new Error(payload.message || '保存失败');
+                }
+                statusText.textContent = '仓库主数据保存成功，正在刷新图表...';
+                await loadAll();
+            } catch (err) {
+                statusText.textContent = `保存失败：${err.message}`;
+            }
         }
 
         function openEditor() {
