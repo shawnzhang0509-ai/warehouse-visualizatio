@@ -55,6 +55,7 @@ GROUP BY w.Name, LEFT(p.SKU, 3)
 #   VolumeDate(date/datetime), ChannelName, TotalOccupiedVolume
 DAILY_CHANNEL_TREND_SQL = None
 SNAPSHOT_FILE = Path(__file__).with_name("data").joinpath("daily_snapshots.json")
+CONTAINER_VOLUME_M3 = 69.0
 
 # 这些仓库不参与任何体积计算（总量/渠道/趋势）
 EXCLUDED_WAREHOUSE_NAMES = [
@@ -108,6 +109,39 @@ def _parse_coords(coords_text):
     return [lng, lat]
 
 
+def _m3_to_container(value):
+    return float(value or 0) / CONTAINER_VOLUME_M3
+
+
+def _convert_row_to_containers(row):
+    if isinstance(row, dict):
+        mapped = dict(row)
+        mapped["TotalOccupiedVolume"] = _m3_to_container(
+            mapped.get("TotalOccupiedVolume", 0)
+        )
+        return mapped
+
+    class _Obj:
+        pass
+
+    out = _Obj()
+    for key in dir(row):
+        if key.startswith("_"):
+            continue
+        try:
+            setattr(out, key, getattr(row, key))
+        except Exception:
+            continue
+    out.TotalOccupiedVolume = _m3_to_container(
+        _row_get(row, "TotalOccupiedVolume", 0)
+    )
+    return out
+
+
+def _convert_rows_to_containers(rows):
+    return [_convert_row_to_containers(row) for row in rows]
+
+
 def _load_warehouse_meta():
     meta = {}
     csv_path = Path(__file__).with_name("data.csv")
@@ -121,9 +155,16 @@ def _load_warehouse_meta():
             if not name:
                 continue
             capacity_raw = row.get("Capacity")
+            capacity_m3 = (
+                float(capacity_raw) if capacity_raw not in (None, "") else None
+            )
             meta[name] = {
                 "coords": _parse_coords(row.get("zuobiao")),
-                "capacity": float(capacity_raw) if capacity_raw not in (None, "") else None,
+                "capacity": (
+                    _m3_to_container(capacity_m3)
+                    if capacity_m3 is not None
+                    else None
+                ),
             }
     return meta
 
@@ -145,7 +186,8 @@ def _load_base_rows_from_csv():
             if _is_excluded_warehouse(name):
                 continue
             volume_raw = row.get("TotalOccupiedVolume")
-            volume = float(volume_raw) if volume_raw not in (None, "") else 0.0
+            volume_m3 = float(volume_raw) if volume_raw not in (None, "") else 0.0
+            volume = _m3_to_container(volume_m3)
             rows.append(
                 {
                     "WarehouseName": name,
@@ -187,7 +229,7 @@ def _snapshot_rows_to_map(rows):
             continue
         if _is_excluded_warehouse(name):
             continue
-        mapped[name] = float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
+        mapped[name] = _m3_to_container(_row_get(row, "TotalOccupiedVolume", 0) or 0)
     return mapped
 
 
@@ -196,7 +238,7 @@ def _snapshot_channel_rows_to_map(rows):
     for row in rows:
         channel = (_row_get(row, "ChannelName", "") or "").strip()
         warehouse = (_row_get(row, "WarehouseName", "") or "").strip()
-        volume = float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
+        volume = _m3_to_container(_row_get(row, "TotalOccupiedVolume", 0) or 0)
         if not channel or not warehouse:
             continue
         if _is_excluded_warehouse(warehouse):
@@ -295,6 +337,7 @@ def _refresh_daily_snapshot(force=False):
     source = "database"
     try:
         base_rows = _run_query(BASE_VOLUME_SQL)
+        base_rows = _convert_rows_to_containers(base_rows)
     except Exception:
         source = "csv"
         base_rows = _load_base_rows_from_csv()
@@ -304,6 +347,7 @@ def _refresh_daily_snapshot(force=False):
     if source == "database":
         try:
             channel_rows = _run_query(CHANNEL_VOLUME_SQL)
+            channel_rows = _convert_rows_to_containers(channel_rows)
             channel_map = _snapshot_channel_rows_to_map(channel_rows)
         except Exception:
             channel_map = {}
@@ -486,11 +530,13 @@ def _fallback_total_for_filters(channel_filters):
         try:
             sql_query = _build_channel_sql(channel_filters)
             rows = _run_query(sql_query, channel_filters)
+            rows = _convert_rows_to_containers(rows)
             return _sum_rows_total(rows), "database_channel_snapshot"
         except Exception:
             return _csv_total_volume(), "csv_snapshot_no_channel_breakdown"
     try:
         rows = _run_query(BASE_VOLUME_SQL)
+        rows = _convert_rows_to_containers(rows)
         return _sum_rows_total(rows), "database_snapshot"
     except Exception:
         return _csv_total_volume(), "csv_snapshot"
@@ -531,6 +577,7 @@ def get_data():
                 try:
                     sql_query = _build_channel_sql(channel_filters)
                     rows = _run_query(sql_query, channel_filters)
+                    rows = _convert_rows_to_containers(rows)
                 except Exception as db_error:
                     rows = _load_base_rows_from_csv()
                     fallback_used = True
@@ -540,6 +587,7 @@ def get_data():
             else:
                 try:
                     rows = _run_query(BASE_VOLUME_SQL)
+                    rows = _convert_rows_to_containers(rows)
                 except Exception as db_error:
                     rows = _load_base_rows_from_csv()
                     fallback_used = True
