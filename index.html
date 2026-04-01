@@ -3,114 +3,350 @@
 <head>
     <meta charset="utf-8">
     <title>新西兰仓库可视化</title>
-    <!-- 引入 ECharts 和 地图组件 -->
     <script src="https://cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/echarts/map/js/world.js"></script>
     <style>
-        body { margin: 0; padding: 0; overflow: hidden; }
-        #main { width: 100%; height: 100vh; background-color: #f0f0f0; }
+        body { margin: 0; font-family: Arial, sans-serif; background: #f5f6fa; }
+        #toolbar {
+            position: fixed;
+            left: 16px;
+            top: 16px;
+            z-index: 10;
+            background: #fff;
+            padding: 12px;
+            border-radius: 8px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            width: 420px;
+        }
+        #toolbar .row { display: flex; gap: 8px; margin-bottom: 8px; }
+        #toolbar label { font-size: 13px; color: #333; }
+        #channelInput {
+            flex: 1;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 6px 8px;
+            font-size: 13px;
+        }
+        #queryBtn {
+            border: none;
+            border-radius: 4px;
+            padding: 6px 12px;
+            font-size: 13px;
+            cursor: pointer;
+            color: #fff;
+            background: #1677ff;
+        }
+        #daysSelect {
+            width: 90px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 6px 8px;
+            font-size: 13px;
+            background: #fff;
+        }
+        #autoRefreshWrap {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: #444;
+        }
+        #statusText {
+            font-size: 12px;
+            color: #666;
+            line-height: 1.4;
+            min-height: 34px;
+        }
+        #dashboard {
+            display: grid;
+            grid-template-rows: 60vh 40vh;
+            width: 100vw;
+            height: 100vh;
+        }
+        #warehouse-map { width: 100%; height: 100%; }
+        #volume-trend { width: 100%; height: 100%; background: #fff; }
     </style>
 </head>
 <body>
-    <div id="main"></div>
+    <div id="toolbar">
+        <label for="channelInput">渠道筛选（可选，多个渠道用逗号分隔）</label>
+        <div class="row">
+            <input id="channelInput" placeholder="例如：Retail,Online" />
+            <select id="daysSelect">
+                <option value="7">近7天</option>
+                <option value="14">近14天</option>
+                <option value="30" selected>近30天</option>
+                <option value="60">近60天</option>
+                <option value="90">近90天</option>
+            </select>
+            <button id="queryBtn">查询</button>
+        </div>
+        <div class="row" style="justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <div id="autoRefreshWrap">
+                <input id="autoRefresh" type="checkbox" />
+                <label for="autoRefresh">每10分钟自动刷新</label>
+            </div>
+            <span id="lastUpdated" style="font-size:12px;color:#888;"></span>
+        </div>
+        <div id="statusText">正在加载地图...</div>
+    </div>
+    <div id="dashboard">
+        <div id="warehouse-map"></div>
+        <div id="volume-trend"></div>
+    </div>
 
     <script>
-        // 初始化 ECharts 实例
-        var myChart = echarts.init(document.getElementById('main'));
+        const mapDom = document.getElementById('warehouse-map');
+        const trendDom = document.getElementById('volume-trend');
+        const statusText = document.getElementById('statusText');
+        const channelInput = document.getElementById('channelInput');
+        const daysSelect = document.getElementById('daysSelect');
+        const autoRefresh = document.getElementById('autoRefresh');
+        const lastUpdated = document.getElementById('lastUpdated');
+        const queryBtn = document.getElementById('queryBtn');
+        const mapChart = echarts.init(mapDom);
+        const trendChart = echarts.init(trendDom);
 
-        // --- 1. 定义初始配置项 ---
-        // 这里先设置好图表样式，数据先留空
-        var option = {
-            title: {
-                text: '新西兰仓库占用体积分布',
-                subtext: '数据来源：实时数据库',
-                left: 'center',
-                textStyle: {
-                    fontSize: 20,
-                    color: '#333'
-                }
-            },
-            tooltip: {
-                trigger: 'item',
-                formatter: function (params) {
-                    // 显示：仓库名 + 体积
-                    return params.name + '<br/>占用体积: ' + params.value[2].toFixed(2) + ' m³';
-                }
-            },
-            geo: {
-                map: 'world', // 使用世界地图
-                roam: true,   // 允许缩放和平移
-                zoom: 4.5,    // 缩放级别
-                center: [175, -41], // 新西兰中心坐标
-                itemStyle: {
-                    areaColor: '#e0e0e0',
-                    borderColor: '#999'
-                }
-            },
-            series: [
-                {
-                    name: '仓库',
-                    type: 'scatter', // 使用散点图
-                    coordinateSystem: 'geo', // 坐标系使用 geo
-                    symbol: 'pin',   // 标记为图钉
-                    symbolSize: function (val) {
-                        // 根据体积大小自动调整图标尺寸
-                        return Math.sqrt(val[2]) / 50 + 10;
-                    },
-                    label: {
-                        show: true,
-                        position: 'right',
-                        formatter: '{b}', // 显示仓库名称
-                        color: '#333',
-                        fontSize: 12
-                    },
+        let mapReady = false;
+        let refreshTimer = null;
+
+        function formatNumber(num) {
+            return Number(num || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
+        }
+
+        function getChannelsFromInput() {
+            return channelInput.value
+                .split(',')
+                .map(item => item.trim())
+                .filter(Boolean);
+        }
+
+        function buildDataUrl(channels) {
+            const url = new URL('/get-data', window.location.origin);
+            channels.forEach(ch => url.searchParams.append('channel', ch));
+            return url.toString();
+        }
+
+        function buildTrendUrl(channels, days) {
+            const url = new URL('/trend-data', window.location.origin);
+            channels.forEach(ch => url.searchParams.append('channel', ch));
+            url.searchParams.set('days', String(days));
+            return url.toString();
+        }
+
+        function renderChart(payload) {
+            const list = Array.isArray(payload.data) ? payload.data : [];
+            const mapped = list.filter(item => Array.isArray(item.coords) && item.coords.length === 2);
+
+            const seriesData = mapped.map(item => ({
+                name: item.name,
+                value: [item.coords[0], item.coords[1], Number(item.volume || 0)],
+                raw: item
+            }));
+
+            const option = {
+                title: {
+                    text: `新西兰仓库占用体积分布（总计 ${formatNumber(payload.total)} m³）`,
+                    left: 'center',
+                    top: 12
+                },
+                tooltip: {
+                    trigger: 'item',
+                    formatter: function (params) {
+                        const raw = params.data.raw;
+                        const volume = Number(raw.volume || 0);
+                        const capacity = raw.capacity == null ? null : Number(raw.capacity);
+                        const ratio = capacity ? ((volume / capacity) * 100).toFixed(1) : 'N/A';
+                        const coordsText = `${params.value[1].toFixed(6)}, ${params.value[0].toFixed(6)}`;
+                        return [
+                            `<b>${raw.name}</b>`,
+                            `坐标(纬度, 经度): ${coordsText}`,
+                            `体积: ${formatNumber(volume)} m³`,
+                            `容量: ${capacity == null ? 'N/A' : `${formatNumber(capacity)} m³`}`,
+                            `占用率: ${ratio === 'N/A' ? 'N/A' : `${ratio}%`}`
+                        ].join('<br/>');
+                    }
+                },
+                geo: {
+                    map: 'NZ',
+                    roam: true,
+                    zoom: 4.1,
+                    center: [173.5, -41.2],
                     itemStyle: {
-                        color: 'rgba(255, 140, 0, 0.8)' // 橙色
+                        areaColor: '#eef2f7',
+                        borderColor: '#999'
+                    },
+                    emphasis: {
+                        itemStyle: {
+                            areaColor: '#dce5f1'
+                        }
                     }
+                },
+                series: [
+                    {
+                        name: '仓库体积',
+                        type: 'scatter',
+                        coordinateSystem: 'geo',
+                        data: seriesData,
+                        symbolSize: function (val) {
+                            return Math.max(10, Math.sqrt(val[2]) / 8);
+                        },
+                        label: {
+                            show: true,
+                            position: 'right',
+                            formatter: '{b}',
+                            color: '#333'
+                        },
+                        itemStyle: {
+                            color: '#ff7a45'
+                        }
+                    }
+                ]
+            };
+
+            mapChart.setOption(option);
+
+            const channels = payload.filters && Array.isArray(payload.filters.channels)
+                ? payload.filters.channels
+                : [];
+            const channelLabel = channels.length ? `渠道: ${channels.join(', ')}` : '渠道: 全部';
+            const unmapped = Array.isArray(payload.unmappedWarehouses) ? payload.unmappedWarehouses : [];
+            const unmappedLabel = unmapped.length
+                ? `；缺少坐标: ${unmapped.join(', ')}`
+                : '';
+            statusText.textContent = `${channelLabel}；已展示 ${seriesData.length}/${list.length} 个仓库${unmappedLabel}`;
+        }
+
+        function renderTrend(payload) {
+            const totals = Array.isArray(payload.totals) ? payload.totals : [];
+            const xData = totals.map(item => item.date);
+            const yData = totals.map(item => Number(item.volume || 0));
+            const topChannels = Array.isArray(payload.channelTotals)
+                ? payload.channelTotals.slice(0, 5)
+                : [];
+
+            trendChart.setOption({
+                title: {
+                    text: `每日体积趋势（${payload.filters?.days || 30}天）`,
+                    left: 'center',
+                    top: 10,
+                    textStyle: { fontSize: 16 }
+                },
+                tooltip: {
+                    trigger: 'axis',
+                    formatter: function (params) {
+                        if (!params.length) return '';
+                        const p = params[0];
+                        return `${p.axisValue}<br/>总体积: ${formatNumber(p.data)} m³`;
+                    }
+                },
+                grid: { left: 60, right: 30, top: 50, bottom: 40 },
+                xAxis: {
+                    type: 'category',
+                    data: xData,
+                    boundaryGap: false
+                },
+                yAxis: {
+                    type: 'value',
+                    name: 'm³'
+                },
+                series: [
+                    {
+                        name: '总体积',
+                        type: 'line',
+                        smooth: true,
+                        areaStyle: {},
+                        data: yData,
+                        lineStyle: { width: 2, color: '#1677ff' },
+                        itemStyle: { color: '#1677ff' }
+                    }
+                ],
+                graphic: topChannels.length ? [
+                    {
+                        type: 'text',
+                        right: 16,
+                        top: 12,
+                        style: {
+                            text: `Top渠道: ${topChannels.map(c => `${c.channel}(${formatNumber(c.total)})`).join(' / ')}`,
+                            fontSize: 12,
+                            fill: '#666'
+                        }
+                    }
+                ] : []
+            });
+        }
+
+        function markUpdatedTime() {
+            const now = new Date();
+            const hh = String(now.getHours()).padStart(2, '0');
+            const mm = String(now.getMinutes()).padStart(2, '0');
+            const ss = String(now.getSeconds()).padStart(2, '0');
+            lastUpdated.textContent = `更新: ${hh}:${mm}:${ss}`;
+        }
+
+        async function loadMap() {
+            const response = await fetch('nz.json');
+            if (!response.ok) {
+                throw new Error('找不到 nz.json，请确认文件路径。');
+            }
+            const mapData = await response.json();
+            echarts.registerMap('NZ', mapData);
+            mapReady = true;
+        }
+
+        async function loadAll() {
+            try {
+                if (!mapReady) {
+                    statusText.textContent = '正在加载地图底图...';
+                    await loadMap();
                 }
-            ]
-        };
+                statusText.textContent = '正在查询地图和趋势数据...';
+                const channels = getChannelsFromInput();
+                const days = Number(daysSelect.value || 30);
+                const [mapRes, trendRes] = await Promise.all([
+                    fetch(buildDataUrl(channels)),
+                    fetch(buildTrendUrl(channels, days))
+                ]);
+                const mapPayload = await mapRes.json();
+                const trendPayload = await trendRes.json();
+                if (mapPayload.status !== 'success') {
+                    throw new Error(mapPayload.message || '地图接口返回异常');
+                }
+                if (trendPayload.status !== 'success') {
+                    throw new Error(trendPayload.message || '趋势接口返回异常');
+                }
+                renderChart(mapPayload);
+                renderTrend(trendPayload);
+                markUpdatedTime();
+            } catch (err) {
+                statusText.textContent = `加载失败：${err.message}`;
+            }
+        }
 
-        // --- 2. 发送请求获取数据 ---
-        window.addEventListener('load', function() {
-            fetch('/get-data')
-                .then(response => response.json())
-                .then(data => {
-                    if (data.status === 'success') {
-                        // --- 动态更新图表 ---
-                        // 1. 更新标题
-                        option.title.text = `新西兰仓库占用体积分布 (总计: ${parseFloat(data.total).toFixed(2)} m³)`;
-                        
-                        // 2. 更新数据
-                        // 注意：这里的 data.data 格式是 [[经度, 纬度, 体积], ...]
-                        option.series[0].data = data.data.map((item, index) => {
-                            // 为了显示名称，我们需要给每个点加个名字
-                            // 这里假设数据库查询结果包含名字，或者你需要在后端返回名字
-                            // 简单起见，这里用 "仓库" + 索引代替，实际应用中请在后端返回 name
-                            return {
-                                name: `仓库${index + 1}`, 
-                                value: item
-                            };
-                        });
+        function setupAutoRefresh() {
+            if (refreshTimer) {
+                clearInterval(refreshTimer);
+                refreshTimer = null;
+            }
+            if (autoRefresh.checked) {
+                refreshTimer = setInterval(loadAll, 10 * 60 * 1000);
+            }
+        }
 
-                        // 3. 渲染图表
-                        myChart.setOption(option);
-                        
-                        console.log('数据加载成功！', data);
-                    } else {
-                        alert('数据加载失败: ' + data.message);
-                    }
-                })
-                .catch(err => {
-                    console.error('请求出错:', err);
-                    alert('无法连接到服务器，请检查后端是否运行');
-                });
+        queryBtn.addEventListener('click', loadAll);
+        channelInput.addEventListener('keydown', function (event) {
+            if (event.key === 'Enter') {
+                loadAll();
+            }
+        });
+        daysSelect.addEventListener('change', loadAll);
+        autoRefresh.addEventListener('change', setupAutoRefresh);
+        window.addEventListener('resize', () => {
+            mapChart.resize();
+            trendChart.resize();
         });
 
-        // --- 3. 自适应窗口 ---
-        window.addEventListener('resize', function() {
-            myChart.resize();
-        });
+        setupAutoRefresh();
+        loadAll();
     </script>
 </body>
 </html>
