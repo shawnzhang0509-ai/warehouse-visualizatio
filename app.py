@@ -1,4 +1,5 @@
 import csv
+import json
 import os
 from datetime import date, timedelta
 from pathlib import Path
@@ -53,6 +54,7 @@ GROUP BY w.Name, LEFT(p.SKU, 3)
 # 若你提供自定义 SQL，需输出字段：
 #   VolumeDate(date/datetime), ChannelName, TotalOccupiedVolume
 DAILY_CHANNEL_TREND_SQL = None
+SNAPSHOT_FILE = Path(__file__).with_name("data").joinpath("daily_snapshots.json")
 
 
 def _parse_coords(coords_text):
@@ -111,6 +113,167 @@ def _load_base_rows_from_csv():
             )
     rows.sort(key=lambda item: item["TotalOccupiedVolume"], reverse=True)
     return rows
+
+
+def _load_snapshot_store():
+    if not SNAPSHOT_FILE.exists():
+        return {"last_updated": None, "days": []}
+    try:
+        with SNAPSHOT_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            if not isinstance(data, dict):
+                return {"last_updated": None, "days": []}
+            if "days" not in data or not isinstance(data["days"], list):
+                data["days"] = []
+            if "last_updated" not in data:
+                data["last_updated"] = None
+            return data
+    except Exception:
+        return {"last_updated": None, "days": []}
+
+
+def _save_snapshot_store(store):
+    SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
+    with SNAPSHOT_FILE.open("w", encoding="utf-8") as f:
+        json.dump(store, f, ensure_ascii=False, indent=2)
+
+
+def _snapshot_rows_to_map(rows):
+    mapped = {}
+    for row in rows:
+        name = (_row_get(row, "WarehouseName", "") or "").strip()
+        if not name:
+            continue
+        mapped[name] = float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
+    return mapped
+
+
+def _snapshot_channel_rows_to_map(rows):
+    mapped = {}
+    for row in rows:
+        channel = (_row_get(row, "ChannelName", "") or "").strip()
+        warehouse = (_row_get(row, "WarehouseName", "") or "").strip()
+        volume = float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
+        if not channel or not warehouse:
+            continue
+        channel_key = channel.upper()
+        if channel_key not in mapped:
+            mapped[channel_key] = {}
+        mapped[channel_key][warehouse] = volume
+    return mapped
+
+
+def _snapshot_total_by_channel(channel_filters, channel_map):
+    if not channel_filters:
+        total = 0.0
+        for warehouses in channel_map.values():
+            total += sum(float(v) for v in warehouses.values())
+        return total
+    total = 0.0
+    matched = False
+    for channel in channel_filters:
+        warehouses = channel_map.get(channel.upper(), {})
+        if warehouses:
+            matched = True
+            total += sum(float(v) for v in warehouses.values())
+    # 静态快照只有 ALL 聚合时，渠道筛选回退到最新全量快照，避免报错或空图。
+    if not matched and "ALL" in channel_map:
+        return sum(float(v) for v in channel_map["ALL"].values())
+    return total
+
+
+def _snapshot_map_rows(channel_filters, base_map, channel_map):
+    if not channel_filters:
+        if base_map:
+            return [
+                {"WarehouseName": name, "TotalOccupiedVolume": volume}
+                for name, volume in base_map.items()
+            ]
+        if "ALL" in channel_map:
+            return [
+                {"WarehouseName": name, "TotalOccupiedVolume": volume}
+                for name, volume in channel_map["ALL"].items()
+            ]
+        return []
+    aggregate = {}
+    for channel in channel_filters:
+        warehouses = channel_map.get(channel.upper(), {})
+        for name, volume in warehouses.items():
+            aggregate[name] = aggregate.get(name, 0.0) + float(volume)
+    if aggregate:
+        return [
+            {"WarehouseName": name, "TotalOccupiedVolume": volume}
+            for name, volume in aggregate.items()
+        ]
+    if "ALL" in channel_map:
+        return [
+            {"WarehouseName": name, "TotalOccupiedVolume": volume}
+            for name, volume in channel_map["ALL"].items()
+        ]
+    return []
+
+
+def _build_snapshot_trend(days, channel_filters, store):
+    items = store.get("days", [])
+    if not items:
+        return []
+    selected = items[-days:]
+    points = []
+    for item in selected:
+        date_text = item.get("date")
+        if not date_text:
+            continue
+        channel_map = item.get("channels", {}) if isinstance(item.get("channels"), dict) else {}
+        volume = _snapshot_total_by_channel(channel_filters, channel_map)
+        points.append({"date": date_text, "channel": "ALL", "volume": float(volume)})
+    return points
+
+
+def _refresh_daily_snapshot(force=False):
+    """按天刷新快照：同一天只采一次（建议由外部调度在 00:00 调用）。"""
+    today = date.today().isoformat()
+    store = _load_snapshot_store()
+    if (
+        not force
+        and store.get("days")
+        and store["days"][-1].get("date") == today
+    ):
+        return store, False
+
+    # 优先数据库，失败则使用 CSV 快照
+    source = "database"
+    try:
+        base_rows = _run_query(BASE_VOLUME_SQL)
+    except Exception:
+        source = "csv"
+        base_rows = _load_base_rows_from_csv()
+
+    base_map = _snapshot_rows_to_map(base_rows)
+    channel_map = {}
+    if source == "database":
+        try:
+            channel_rows = _run_query(CHANNEL_VOLUME_SQL)
+            channel_map = _snapshot_channel_rows_to_map(channel_rows)
+        except Exception:
+            channel_map = {}
+
+    # 若没有渠道明细，至少保留 ALL 聚合
+    if not channel_map:
+        channel_map = {"ALL": base_map}
+
+    store["days"].append(
+        {
+            "date": today,
+            "source": source,
+            "base": base_map,
+            "channels": channel_map,
+        }
+    )
+    # 仅保留最近 366 天
+    store["days"] = store["days"][-366:]
+    store["last_updated"] = today
+    _save_snapshot_store(store)
+    return store, True
 
 
 def _csv_total_volume():
@@ -205,95 +368,6 @@ def _row_get(row, key, default=None):
     return getattr(row, key, default)
 
 
-def _detect_stocks_date_column():
-    sql = """
-    SELECT c.name AS ColumnName
-    FROM sys.columns c
-    JOIN sys.tables t ON c.object_id = t.object_id
-    JOIN sys.schemas s ON t.schema_id = s.schema_id
-    JOIN sys.types ty ON c.user_type_id = ty.user_type_id
-    WHERE s.name = 'dbo'
-      AND t.name = 'Stocks'
-      AND ty.name IN ('date', 'datetime', 'datetime2', 'smalldatetime')
-    """
-    rows = _run_query(sql)
-    candidates = [_row_get(row, "ColumnName", "") for row in rows]
-    candidates_lower = {c.lower(): c for c in candidates}
-    priority = [
-        "businessdate",
-        "snapshotdate",
-        "stockdate",
-        "updatedon",
-        "updatetime",
-        "modifiedon",
-        "modifiedtime",
-        "createdon",
-        "createtime",
-        "createon",
-    ]
-    for item in priority:
-        if item in candidates_lower:
-            return candidates_lower[item]
-    return candidates[0] if candidates else None
-
-
-def _build_daily_trend_sql(channel_filters, days):
-    params = [days]
-    channel_where = ""
-    if channel_filters:
-        placeholders = ",".join("?" for _ in channel_filters)
-        channel_where = f"AND ChannelName IN ({placeholders})"
-        params.extend(channel_filters)
-
-    if DAILY_CHANNEL_TREND_SQL:
-        sql = f"""
-        WITH DailyChannel AS (
-            {DAILY_CHANNEL_TREND_SQL}
-        )
-        SELECT
-            CAST(VolumeDate AS date) AS VolumeDate,
-            ChannelName,
-            SUM(TotalOccupiedVolume) AS TotalOccupiedVolume
-        FROM DailyChannel
-        WHERE CAST(VolumeDate AS date) >= DATEADD(day, -?, CAST(GETDATE() AS date))
-          {channel_where}
-        GROUP BY CAST(VolumeDate AS date), ChannelName
-        ORDER BY VolumeDate, ChannelName
-        """
-        return sql, params, "custom_sql"
-
-    date_column = _detect_stocks_date_column()
-    if not date_column:
-        raise RuntimeError(
-            "未找到 dbo.Stocks 的日期字段，请配置 DAILY_CHANNEL_TREND_SQL。"
-        )
-    date_expr = f"CAST(s.[{date_column}] AS date)"
-    sql = f"""
-    WITH DailyChannel AS (
-        SELECT
-            {date_expr} AS VolumeDate,
-            LEFT(p.SKU, 3) AS ChannelName,
-            SUM(s.Quantity * ISNULL(p.VolumeWithBox, 0)) AS TotalOccupiedVolume
-        FROM dbo.Stocks s
-        LEFT JOIN dbo.Products p ON s.ProductId = p.Id
-        WHERE p.SKU IS NOT NULL
-          AND s.[{date_column}] IS NOT NULL
-          AND {date_expr} >= DATEADD(day, -?, CAST(GETDATE() AS date))
-        GROUP BY {date_expr}, LEFT(p.SKU, 3)
-    )
-    SELECT
-        VolumeDate,
-        ChannelName,
-        SUM(TotalOccupiedVolume) AS TotalOccupiedVolume
-    FROM DailyChannel
-    WHERE 1=1
-      {channel_where}
-    GROUP BY VolumeDate, ChannelName
-    ORDER BY VolumeDate, ChannelName
-    """
-    return sql, params, f"stocks.{date_column}"
-
-
 def _build_flat_trend(days, total):
     points = []
     end = date.today()
@@ -309,7 +383,39 @@ def _build_flat_trend(days, total):
     return points
 
 
+def _latest_snapshot_entry():
+    store = _load_snapshot_store()
+    days = store.get("days", [])
+    if not days:
+        return store, None
+    return store, days[-1]
+
+
+def _rows_from_snapshot_store(channel_filters):
+    store, latest = _latest_snapshot_entry()
+    if not latest:
+        return None, None
+    base_map = latest.get("base", {}) if isinstance(latest.get("base"), dict) else {}
+    channel_map = (
+        latest.get("channels", {})
+        if isinstance(latest.get("channels"), dict)
+        else {}
+    )
+    rows = _snapshot_map_rows(channel_filters, base_map, channel_map)
+    rows.sort(
+        key=lambda item: float(item.get("TotalOccupiedVolume", 0) or 0),
+        reverse=True,
+    )
+    return rows, latest.get("date")
+
+
 def _fallback_total_for_filters(channel_filters):
+    rows, _snapshot_date = _rows_from_snapshot_store(channel_filters)
+    if rows is not None:
+        total = 0.0
+        for row in rows:
+            total += float(row.get("TotalOccupiedVolume", 0) or 0)
+        return total, "snapshot"
     if channel_filters:
         try:
             sql_query = _build_channel_sql(channel_filters)
@@ -350,26 +456,35 @@ def get_data():
         channel_filters = _parse_channel_filters()
         fallback_used = False
         fallback_reason = None
+        snapshot_date = None
 
-        if channel_filters:
-            try:
-                sql_query = _build_channel_sql(channel_filters)
-                rows = _run_query(sql_query, channel_filters)
-            except Exception as db_error:
-                # 当渠道筛选不可用时，退化为全量可视化，避免地图区域“无响应”。
-                rows = _load_base_rows_from_csv()
-                fallback_used = True
-                fallback_reason = (
-                    f"渠道筛选不可用，已退化为全量数据：{db_error}"
-                )
+        # 地图默认走“每日快照”数据，满足“每天 00:00 存一次，其余时间看静态值”。
+        rows, snapshot_date = _rows_from_snapshot_store(channel_filters)
+        if rows is None:
+            if channel_filters:
+                try:
+                    sql_query = _build_channel_sql(channel_filters)
+                    rows = _run_query(sql_query, channel_filters)
+                except Exception as db_error:
+                    rows = _load_base_rows_from_csv()
+                    fallback_used = True
+                    fallback_reason = (
+                        f"静态快照缺失，且渠道实时查询不可用，已回退全量：{db_error}"
+                    )
+            else:
+                try:
+                    rows = _run_query(BASE_VOLUME_SQL)
+                except Exception as db_error:
+                    rows = _load_base_rows_from_csv()
+                    fallback_used = True
+                    fallback_reason = f"静态快照缺失，回退 CSV：{db_error}"
         else:
-            try:
-                rows = _run_query(BASE_VOLUME_SQL)
-            except Exception as db_error:
-                # 无数据库驱动或数据库不可达时，回退到 CSV，保证地图可用。
-                rows = _load_base_rows_from_csv()
-                fallback_used = True
-                fallback_reason = str(db_error)
+            fallback_used = bool(channel_filters)
+            fallback_reason = (
+                f"已使用 {snapshot_date} 的静态快照数据"
+                if snapshot_date
+                else "已使用静态快照数据"
+            )
 
         result = []
         total_volume = 0.0
@@ -400,9 +515,10 @@ def get_data():
                 "data": result,
                 "total": total_volume,
                 "unmappedWarehouses": unmapped,
+                "snapshotDate": snapshot_date,
                 "fallback": {
                     "used": fallback_used,
-                    "source": "csv" if fallback_used else "database",
+                    "source": "snapshot" if snapshot_date else ("csv" if fallback_used else "database"),
                     "reason": fallback_reason,
                 },
             }
@@ -419,17 +535,16 @@ def get_trend_data():
 
         fallback_used = False
         fallback_reason = None
-        source = "database"
-        rows = []
-        try:
-            trend_sql, params, source = _build_daily_trend_sql(channel_filters, days)
-            rows = _run_query(trend_sql, params)
-        except Exception as db_error:
+        source = "snapshot_daily"
+        store = _load_snapshot_store()
+        refreshed = False
+        rows = _build_snapshot_trend(days, channel_filters, store)
+        if not rows:
             fallback_used = True
-            fallback_reason = str(db_error)
-            fallback_total, fallback_source = _fallback_total_for_filters(channel_filters)
+            fallback_total = _csv_total_volume()
             rows = _build_flat_trend(days, fallback_total)
-            source = f"flat:{fallback_source}"
+            source = "flat:csv_snapshot"
+            fallback_reason = "静态快照为空，已退化为单值趋势"
 
         trend_data = []
         totals_by_date = {}
@@ -478,10 +593,65 @@ def get_trend_data():
                     "used": fallback_used,
                     "reason": fallback_reason,
                 },
+                "snapshot": {
+                    "refreshedToday": refreshed,
+                    "lastUpdated": store.get("last_updated"),
+                },
             }
         )
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)})
+
+
+@app.route("/snapshot-refresh")
+def refresh_snapshot_legacy():
+    try:
+        force = request.args.get("force", "0") == "1"
+        store, refreshed = _refresh_daily_snapshot(force=force)
+        return jsonify(
+            {
+                "status": "success",
+                "refreshed": refreshed,
+                "lastUpdated": store.get("last_updated"),
+                "days": len(store.get("days", [])),
+            }
+        )
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+
+@app.route("/snapshot/refresh")
+def refresh_snapshot():
+    try:
+        force = request.args.get("force", "0") == "1"
+        store, created = _refresh_daily_snapshot(force=force)
+        latest = store.get("days", [])[-1] if store.get("days") else None
+        return jsonify(
+            {
+                "status": "success",
+                "created": created,
+                "latestDate": latest.get("date") if latest else None,
+                "source": latest.get("source") if latest else None,
+                "daysStored": len(store.get("days", [])),
+            }
+        )
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+
+@app.route("/snapshot/status")
+def snapshot_status():
+    store = _load_snapshot_store()
+    latest = store.get("days", [])[-1] if store.get("days") else None
+    return jsonify(
+        {
+            "status": "success",
+            "lastUpdated": store.get("last_updated"),
+            "daysStored": len(store.get("days", [])),
+            "latestDate": latest.get("date") if latest else None,
+            "latestSource": latest.get("source") if latest else None,
+        }
+    )
 
 
 @app.route("/channels")

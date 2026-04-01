@@ -239,7 +239,11 @@
             const unmappedLabel = unmapped.length
                 ? `；缺少坐标: ${unmapped.join(', ')}`
                 : '';
-            statusText.textContent = `${channelLabel}；已展示 ${seriesData.length}/${list.length} 个仓库${unmappedLabel}`;
+            const snapshotLabel = payload.snapshotDate ? `；快照日期: ${payload.snapshotDate}` : '';
+            const fallbackReason = payload.fallback && payload.fallback.reason
+                ? `；${payload.fallback.reason}`
+                : '';
+            statusText.textContent = `${channelLabel}；已展示 ${seriesData.length}/${list.length} 个仓库${snapshotLabel}${unmappedLabel}${fallbackReason}`;
         }
 
         function renderTrend(payload) {
@@ -313,7 +317,7 @@
             const mapCandidates = [
                 '/static/nz.json',
                 '/nz.json',
-                'https://raw.githubusercontent.com/apache/echarts-examples/gh-pages/public/data/asset/geo/NZ.json'
+                'https://raw.githubusercontent.com/johan/world.geo.json/master/countries/NZL.geo.json'
             ];
             let lastErr = null;
             for (const url of mapCandidates) {
