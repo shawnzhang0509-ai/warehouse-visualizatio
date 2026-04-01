@@ -133,17 +133,73 @@
             return url.toString();
         }
 
+        function distanceDeg(a, b) {
+            const dx = Number(a[0]) - Number(b[0]);
+            const dy = Number(a[1]) - Number(b[1]);
+            return Math.sqrt(dx * dx + dy * dy);
+        }
+
+        function buildDisplayPoints(items) {
+            const threshold = 0.08; // 近邻阈值（经纬度）
+            const spreadRadius = 0.06; // 错位半径
+            const visited = new Array(items.length).fill(false);
+            const pointData = [];
+            const lineData = [];
+
+            for (let i = 0; i < items.length; i += 1) {
+                if (visited[i]) continue;
+                visited[i] = true;
+                const cluster = [i];
+
+                for (let j = i + 1; j < items.length; j += 1) {
+                    if (visited[j]) continue;
+                    if (distanceDeg(items[i].coords, items[j].coords) <= threshold) {
+                        visited[j] = true;
+                        cluster.push(j);
+                    }
+                }
+
+                if (cluster.length === 1) {
+                    const item = items[cluster[0]];
+                    pointData.push({
+                        name: item.name,
+                        value: [item.coords[0], item.coords[1], Number(item.volume || 0)],
+                        raw: item,
+                        originalCoords: item.coords
+                    });
+                    continue;
+                }
+
+                const n = cluster.length;
+                cluster.forEach((idx, order) => {
+                    const item = items[idx];
+                    const angle = (2 * Math.PI * order) / n;
+                    const displayCoords = [
+                        Number(item.coords[0]) + spreadRadius * Math.cos(angle),
+                        Number(item.coords[1]) + spreadRadius * Math.sin(angle) * 0.7
+                    ];
+                    pointData.push({
+                        name: item.name,
+                        value: [displayCoords[0], displayCoords[1], Number(item.volume || 0)],
+                        raw: item,
+                        originalCoords: item.coords
+                    });
+                    lineData.push({
+                        coords: [displayCoords, item.coords]
+                    });
+                });
+            }
+
+            return { pointData, lineData };
+        }
+
         function renderChart(payload) {
             const list = Array.isArray(payload.data) ? payload.data : [];
             const mapped = list.filter(item => Array.isArray(item.coords) && item.coords.length === 2);
 
             // 按体积排序，优先显示体积较大的标签，减轻重叠
             mapped.sort((a, b) => Number(b.volume || 0) - Number(a.volume || 0));
-            const seriesData = mapped.map(item => ({
-                name: item.name,
-                value: [item.coords[0], item.coords[1], Number(item.volume || 0)],
-                raw: item
-            }));
+            const { pointData, lineData } = buildDisplayPoints(mapped);
 
             const option = {
                 title: {
@@ -186,16 +242,40 @@
                 },
                 series: [
                     {
+                        name: '仓库偏移引导线',
+                        type: 'lines',
+                        coordinateSystem: 'geo',
+                        data: lineData,
+                        polyline: false,
+                        silent: true,
+                        zlevel: 1,
+                        lineStyle: {
+                            color: '#8c8c8c',
+                            width: 1,
+                            opacity: 0.55,
+                            type: 'dashed'
+                        }
+                    },
+                    {
                         name: '仓库体积',
                         type: 'scatter',
                         coordinateSystem: 'geo',
-                        data: seriesData,
+                        data: pointData,
                         symbolSize: function (val) {
                             return Math.max(10, Math.sqrt(val[2]) / 8);
                         },
                         label: {
                             show: true,
-                            position: 'top',
+                            position: function (params) {
+                                const data = params.data || {};
+                                const original = data.originalCoords || params.value;
+                                const dx = Number(params.value[0]) - Number(original[0]);
+                                const dy = Number(params.value[1]) - Number(original[1]);
+                                if (Math.abs(dx) > Math.abs(dy)) {
+                                    return dx >= 0 ? 'right' : 'left';
+                                }
+                                return dy >= 0 ? 'top' : 'bottom';
+                            },
                             distance: 10,
                             formatter: function (params) {
                                 const volume = Number(params.data.raw.volume || 0);
@@ -214,9 +294,6 @@
                         },
                         itemStyle: {
                             color: '#ff7a45'
-                        },
-                        labelLayout: {
-                            hideOverlap: true
                         },
                         emphasis: {
                             label: {
