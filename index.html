@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <title>新西兰仓库可视化</title>
+    <!-- 引入 ECharts 和 地图组件 -->
+    <script src="https://cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/echarts/map/js/world.js"></script>
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; }
+        #main { width: 100%; height: 100vh; background-color: #f0f0f0; }
+    </style>
+</head>
+<body>
+    <div id="main"></div>
+
+    <script>
+        // 初始化 ECharts 实例
+        var myChart = echarts.init(document.getElementById('main'));
+
+        // --- 1. 定义初始配置项 ---
+        // 这里先设置好图表样式，数据先留空
+        var option = {
+            title: {
+                text: '新西兰仓库占用体积分布',
+                subtext: '数据来源：实时数据库',
+                left: 'center',
+                textStyle: {
+                    fontSize: 20,
+                    color: '#333'
+                }
+            },
+            tooltip: {
+                trigger: 'item',
+                formatter: function (params) {
+                    // 显示：仓库名 + 体积
+                    return params.name + '<br/>占用体积: ' + params.value[2].toFixed(2) + ' m³';
+                }
+            },
+            geo: {
+                map: 'world', // 使用世界地图
+                roam: true,   // 允许缩放和平移
+                zoom: 4.5,    // 缩放级别
+                center: [175, -41], // 新西兰中心坐标
+                itemStyle: {
+                    areaColor: '#e0e0e0',
+                    borderColor: '#999'
+                }
+            },
+            series: [
+                {
+                    name: '仓库',
+                    type: 'scatter', // 使用散点图
+                    coordinateSystem: 'geo', // 坐标系使用 geo
+                    symbol: 'pin',   // 标记为图钉
+                    symbolSize: function (val) {
+                        // 根据体积大小自动调整图标尺寸
+                        return Math.sqrt(val[2]) / 50 + 10;
+                    },
+                    label: {
+                        show: true,
+                        position: 'right',
+                        formatter: '{b}', // 显示仓库名称
+                        color: '#333',
+                        fontSize: 12
+                    },
+                    itemStyle: {
+                        color: 'rgba(255, 140, 0, 0.8)' // 橙色
+                    }
+                }
+            ]
+        };
+
+        // --- 2. 发送请求获取数据 ---
+        window.addEventListener('load', function() {
+            fetch('/get-data')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.status === 'success') {
+                        // --- 动态更新图表 ---
+                        // 1. 更新标题
+                        option.title.text = `新西兰仓库占用体积分布 (总计: ${parseFloat(data.total).toFixed(2)} m³)`;
+                        
+                        // 2. 更新数据
+                        // 注意：这里的 data.data 格式是 [[经度, 纬度, 体积], ...]
+                        option.series[0].data = data.data.map((item, index) => {
+                            // 为了显示名称，我们需要给每个点加个名字
+                            // 这里假设数据库查询结果包含名字，或者你需要在后端返回名字
+                            // 简单起见，这里用 "仓库" + 索引代替，实际应用中请在后端返回 name
+                            return {
+                                name: `仓库${index + 1}`, 
+                                value: item
+                            };
+                        });
+
+                        // 3. 渲染图表
+                        myChart.setOption(option);
+                        
+                        console.log('数据加载成功！', data);
+                    } else {
+                        alert('数据加载失败: ' + data.message);
+                    }
+                })
+                .catch(err => {
+                    console.error('请求出错:', err);
+                    alert('无法连接到服务器，请检查后端是否运行');
+                });
+        });
+
+        // --- 3. 自适应窗口 ---
+        window.addEventListener('resize', function() {
+            myChart.resize();
+        });
+    </script>
+</body>
+</html>
