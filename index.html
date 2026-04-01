@@ -272,7 +272,12 @@
 
         function renderChart(payload) {
             const list = Array.isArray(payload.data) ? payload.data : [];
-            const mapped = list.filter(item => Array.isArray(item.coords) && item.coords.length === 2);
+            const profiles = Array.isArray(payload.warehouseProfiles) ? payload.warehouseProfiles : [];
+            const includedForVolume = profiles.filter(p => p.includeInVolume);
+            const includedWithCoords = includedForVolume.filter(
+                p => Array.isArray(p.coords) && p.coords.length === 2
+            );
+            const mapped = list.filter(item => item.displayOnMap && Array.isArray(item.coords) && item.coords.length === 2);
 
             // 按体积排序，优先显示体积较大的标签，减轻重叠
             mapped.sort((a, b) => Number(b.volume || 0) - Number(a.volume || 0));
@@ -444,7 +449,8 @@
             const fallbackReason = payload.fallback && payload.fallback.reason
                 ? `；${payload.fallback.reason}`
                 : '';
-            statusText.textContent = `${channelLabel}；已展示 ${pointData.length}/${list.length} 个仓库（橙色=货柜数，蓝色圈=总容量/爆仓线）${snapshotLabel}${unmappedLabel}${fallbackReason}`;
+            const statusSummary = `已展示 ${pointData.length}/${includedWithCoords.length} 个仓库（参与统计 ${includedForVolume.length}；有坐标 ${includedWithCoords.length}）`;
+            statusText.textContent = `${channelLabel}；${statusSummary}（橙色=货柜数，蓝色圈=总容量/爆仓线）${snapshotLabel}${unmappedLabel}${fallbackReason}`;
 
             const summaryItems = mapped
                 .slice()
@@ -461,15 +467,19 @@
                 <ul>${summaryItems.join('')}</ul>
             `;
 
-            const coordRows = mapped
+            const coordRows = profiles
                 .slice()
                 .sort((a, b) => a.name.localeCompare(b.name))
-                .map(item => `<tr><td>${item.name}</td><td>${formatCoords(item.coords, 5)}</td></tr>`)
+                .map(item => {
+                    const coordText = formatCoords(item.coords, 5);
+                    const includeText = item.includeInVolume ? '参与' : '排除';
+                    return `<tr><td>${item.name}</td><td>${coordText}</td><td>${includeText}</td></tr>`;
+                })
                 .join('');
             warehouseCoordTable.innerHTML = `
-                <div class="title" style="font-weight:600;margin-bottom:4px;">仓库坐标清单（常显）</div>
+                <div class="title" style="font-weight:600;margin-bottom:4px;">仓库主数据清单（坐标 + 是否参与统计）</div>
                 <table>
-                    <thead><tr><th>仓库</th><th>坐标(lat, lng)</th></tr></thead>
+                    <thead><tr><th>仓库</th><th>坐标(lat, lng)</th><th>体积统计</th></tr></thead>
                     <tbody>${coordRows}</tbody>
                 </table>
             `;
