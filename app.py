@@ -1,5 +1,6 @@
 import csv
 import os
+from datetime import date, timedelta
 from pathlib import Path
 
 from flask import Flask, jsonify, render_template_string, request
@@ -32,15 +33,26 @@ GROUP BY w.Name
 ORDER BY TotalOccupiedVolume DESC
 """
 
-# 3) 渠道体积 SQL 占位（你给我 SQL 后，把它粘贴到这里）
-# 必须输出三列：
+# 3) 渠道体积 SQL（来自 SKU 前三位渠道）
+# 输出字段固定为：
 #   WarehouseName | ChannelName | TotalOccupiedVolume
-# 例如：
-# SELECT w.Name AS WarehouseName, o.Channel AS ChannelName,
-#        SUM(ol.Quantity * ISNULL(p.VolumeWithBox, 0)) AS TotalOccupiedVolume
-# FROM ...
-# GROUP BY w.Name, o.Channel
-CHANNEL_VOLUME_SQL = None
+CHANNEL_VOLUME_SQL = """
+SELECT
+    w.Name AS WarehouseName,
+    LEFT(p.SKU, 3) AS ChannelName,
+    SUM(s.Quantity * ISNULL(p.VolumeWithBox, 0)) AS TotalOccupiedVolume
+FROM dbo.Stocks s
+LEFT JOIN dbo.Products p ON s.ProductId = p.Id
+LEFT JOIN dbo.Warehouses w ON s.WarehouseId = w.Id
+WHERE p.SKU IS NOT NULL
+GROUP BY w.Name, LEFT(p.SKU, 3)
+"""
+
+# 4) 每日渠道趋势 SQL（可选）
+# 若为 None，则自动尝试使用 dbo.Stocks 的日期字段构建 SQL。
+# 若你提供自定义 SQL，需输出字段：
+#   VolumeDate(date/datetime), ChannelName, TotalOccupiedVolume
+DAILY_CHANNEL_TREND_SQL = None
 
 
 def _parse_coords(coords_text):
@@ -101,6 +113,10 @@ def _load_base_rows_from_csv():
     return rows
 
 
+def _csv_total_volume():
+    return sum(item["TotalOccupiedVolume"] for item in _load_base_rows_from_csv())
+
+
 def _normalize_name(name):
     return "".join(ch.lower() for ch in str(name) if ch.isalnum())
 
@@ -156,6 +172,17 @@ def _build_channel_sql(channel_filters):
     """
 
 
+def _parse_days():
+    raw = request.args.get("days", "30").strip()
+    try:
+        days = int(raw)
+    except ValueError:
+        days = 30
+    if days < 1:
+        return 30
+    return min(days, 365)
+
+
 def _parse_channel_filters():
     # 支持 /get-data?channel=A&channel=B 和 /get-data?channels=A,B
     channels = request.args.getlist("channel")
@@ -169,6 +196,110 @@ def _row_get(row, key, default=None):
     if isinstance(row, dict):
         return row.get(key, default)
     return getattr(row, key, default)
+
+
+def _detect_stocks_date_column():
+    sql = """
+    SELECT c.name AS ColumnName
+    FROM sys.columns c
+    JOIN sys.tables t ON c.object_id = t.object_id
+    JOIN sys.schemas s ON t.schema_id = s.schema_id
+    JOIN sys.types ty ON c.user_type_id = ty.user_type_id
+    WHERE s.name = 'dbo'
+      AND t.name = 'Stocks'
+      AND ty.name IN ('date', 'datetime', 'datetime2', 'smalldatetime')
+    """
+    rows = _run_query(sql)
+    candidates = [_row_get(row, "ColumnName", "") for row in rows]
+    candidates_lower = {c.lower(): c for c in candidates}
+    priority = [
+        "businessdate",
+        "snapshotdate",
+        "stockdate",
+        "updatedon",
+        "updatetime",
+        "modifiedon",
+        "modifiedtime",
+        "createdon",
+        "createtime",
+        "createon",
+    ]
+    for item in priority:
+        if item in candidates_lower:
+            return candidates_lower[item]
+    return candidates[0] if candidates else None
+
+
+def _build_daily_trend_sql(channel_filters, days):
+    params = [days]
+    channel_where = ""
+    if channel_filters:
+        placeholders = ",".join("?" for _ in channel_filters)
+        channel_where = f"AND ChannelName IN ({placeholders})"
+        params.extend(channel_filters)
+
+    if DAILY_CHANNEL_TREND_SQL:
+        sql = f"""
+        WITH DailyChannel AS (
+            {DAILY_CHANNEL_TREND_SQL}
+        )
+        SELECT
+            CAST(VolumeDate AS date) AS VolumeDate,
+            ChannelName,
+            SUM(TotalOccupiedVolume) AS TotalOccupiedVolume
+        FROM DailyChannel
+        WHERE CAST(VolumeDate AS date) >= DATEADD(day, -?, CAST(GETDATE() AS date))
+          {channel_where}
+        GROUP BY CAST(VolumeDate AS date), ChannelName
+        ORDER BY VolumeDate, ChannelName
+        """
+        return sql, params, "custom_sql"
+
+    date_column = _detect_stocks_date_column()
+    if not date_column:
+        raise RuntimeError(
+            "未找到 dbo.Stocks 的日期字段，请配置 DAILY_CHANNEL_TREND_SQL。"
+        )
+    date_expr = f"CAST(s.[{date_column}] AS date)"
+    sql = f"""
+    WITH DailyChannel AS (
+        SELECT
+            {date_expr} AS VolumeDate,
+            LEFT(p.SKU, 3) AS ChannelName,
+            SUM(s.Quantity * ISNULL(p.VolumeWithBox, 0)) AS TotalOccupiedVolume
+        FROM dbo.Stocks s
+        LEFT JOIN dbo.Products p ON s.ProductId = p.Id
+        WHERE p.SKU IS NOT NULL
+          AND s.[{date_column}] IS NOT NULL
+          AND {date_expr} >= DATEADD(day, -?, CAST(GETDATE() AS date))
+        GROUP BY {date_expr}, LEFT(p.SKU, 3)
+    )
+    SELECT
+        VolumeDate,
+        ChannelName,
+        SUM(TotalOccupiedVolume) AS TotalOccupiedVolume
+    FROM DailyChannel
+    WHERE 1=1
+      {channel_where}
+    GROUP BY VolumeDate, ChannelName
+    ORDER BY VolumeDate, ChannelName
+    """
+    return sql, params, f"stocks.{date_column}"
+
+
+def _build_flat_trend(days, total):
+    points = []
+    end = date.today()
+    for idx in range(days - 1, -1, -1):
+        d = end - timedelta(days=idx)
+        points.append(
+            {
+                "date": d.isoformat(),
+                "channel": "ALL",
+                "volume": float(total),
+            }
+        )
+    return points
 
 
 try:
@@ -191,8 +322,19 @@ def get_data():
         fallback_reason = None
 
         if channel_filters:
-            sql_query = _build_channel_sql(channel_filters)
-            rows = _run_query(sql_query, channel_filters)
+            try:
+                sql_query = _build_channel_sql(channel_filters)
+                rows = _run_query(sql_query, channel_filters)
+            except Exception as db_error:
+                return jsonify(
+                    {
+                        "status": "error",
+                        "message": (
+                            "渠道筛选需要数据库查询支持，当前不可用："
+                            f"{db_error}"
+                        ),
+                    }
+                )
         else:
             try:
                 rows = _run_query(BASE_VOLUME_SQL)
@@ -234,6 +376,88 @@ def get_data():
                 "fallback": {
                     "used": fallback_used,
                     "source": "csv" if fallback_used else "database",
+                    "reason": fallback_reason,
+                },
+            }
+        )
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)})
+
+
+@app.route("/trend-data")
+def get_trend_data():
+    try:
+        channel_filters = _parse_channel_filters()
+        days = _parse_days()
+
+        fallback_used = False
+        fallback_reason = None
+        source = "database"
+        rows = []
+        try:
+            trend_sql, params, source = _build_daily_trend_sql(channel_filters, days)
+            rows = _run_query(trend_sql, params)
+        except Exception as db_error:
+            fallback_used = True
+            fallback_reason = str(db_error)
+            if channel_filters:
+                return jsonify(
+                    {
+                        "status": "error",
+                        "message": (
+                            "按渠道查询每日趋势需要数据库支持，当前不可用："
+                            f"{db_error}"
+                        ),
+                    }
+                )
+            rows = _build_flat_trend(days, _csv_total_volume())
+            source = "csv_flat"
+
+        trend_data = []
+        totals_by_date = {}
+        channel_totals = {}
+
+        for row in rows:
+            if isinstance(row, dict) and "date" in row:
+                date_text = row["date"]
+                channel = row["channel"]
+                volume = float(row["volume"])
+            else:
+                raw_date = _row_get(row, "VolumeDate")
+                if hasattr(raw_date, "strftime"):
+                    date_text = raw_date.strftime("%Y-%m-%d")
+                else:
+                    date_text = str(raw_date)
+                channel = (_row_get(row, "ChannelName", "") or "").strip() or "UNK"
+                volume = float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
+
+            trend_data.append(
+                {"date": date_text, "channel": channel, "volume": volume}
+            )
+            totals_by_date[date_text] = totals_by_date.get(date_text, 0.0) + volume
+            channel_totals[channel] = channel_totals.get(channel, 0.0) + volume
+
+        trend_data.sort(key=lambda x: (x["date"], x["channel"]))
+        totals = [
+            {"date": d, "volume": totals_by_date[d]}
+            for d in sorted(totals_by_date.keys())
+        ]
+        ranked_channels = sorted(
+            [{"channel": k, "total": v} for k, v in channel_totals.items()],
+            key=lambda x: x["total"],
+            reverse=True,
+        )
+
+        return jsonify(
+            {
+                "status": "success",
+                "filters": {"channels": channel_filters, "days": days},
+                "data": trend_data,
+                "totals": totals,
+                "channelTotals": ranked_channels,
+                "source": source,
+                "fallback": {
+                    "used": fallback_used,
                     "reason": fallback_reason,
                 },
             }

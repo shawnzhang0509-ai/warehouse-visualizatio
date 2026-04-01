@@ -15,7 +15,7 @@
             padding: 12px;
             border-radius: 8px;
             box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-            width: 360px;
+            width: 420px;
         }
         #toolbar .row { display: flex; gap: 8px; margin-bottom: 8px; }
         #toolbar label { font-size: 13px; color: #333; }
@@ -35,13 +35,35 @@
             color: #fff;
             background: #1677ff;
         }
+        #daysSelect {
+            width: 90px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            padding: 6px 8px;
+            font-size: 13px;
+            background: #fff;
+        }
+        #autoRefreshWrap {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            color: #444;
+        }
         #statusText {
             font-size: 12px;
             color: #666;
             line-height: 1.4;
             min-height: 34px;
         }
-        #warehouse-map { width: 100vw; height: 100vh; }
+        #dashboard {
+            display: grid;
+            grid-template-rows: 60vh 40vh;
+            width: 100vw;
+            height: 100vh;
+        }
+        #warehouse-map { width: 100%; height: 100%; }
+        #volume-trend { width: 100%; height: 100%; background: #fff; }
     </style>
 </head>
 <body>
@@ -49,20 +71,43 @@
         <label for="channelInput">渠道筛选（可选，多个渠道用逗号分隔）</label>
         <div class="row">
             <input id="channelInput" placeholder="例如：Retail,Online" />
+            <select id="daysSelect">
+                <option value="7">近7天</option>
+                <option value="14">近14天</option>
+                <option value="30" selected>近30天</option>
+                <option value="60">近60天</option>
+                <option value="90">近90天</option>
+            </select>
             <button id="queryBtn">查询</button>
+        </div>
+        <div class="row" style="justify-content: space-between; align-items: center; margin-bottom: 4px;">
+            <div id="autoRefreshWrap">
+                <input id="autoRefresh" type="checkbox" />
+                <label for="autoRefresh">每10分钟自动刷新</label>
+            </div>
+            <span id="lastUpdated" style="font-size:12px;color:#888;"></span>
         </div>
         <div id="statusText">正在加载地图...</div>
     </div>
-    <div id="warehouse-map"></div>
+    <div id="dashboard">
+        <div id="warehouse-map"></div>
+        <div id="volume-trend"></div>
+    </div>
 
     <script>
-        const chartDom = document.getElementById('warehouse-map');
+        const mapDom = document.getElementById('warehouse-map');
+        const trendDom = document.getElementById('volume-trend');
         const statusText = document.getElementById('statusText');
         const channelInput = document.getElementById('channelInput');
+        const daysSelect = document.getElementById('daysSelect');
+        const autoRefresh = document.getElementById('autoRefresh');
+        const lastUpdated = document.getElementById('lastUpdated');
         const queryBtn = document.getElementById('queryBtn');
-        const myChart = echarts.init(chartDom);
+        const mapChart = echarts.init(mapDom);
+        const trendChart = echarts.init(trendDom);
 
         let mapReady = false;
+        let refreshTimer = null;
 
         function formatNumber(num) {
             return Number(num || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
@@ -78,6 +123,13 @@
         function buildDataUrl(channels) {
             const url = new URL('/get-data', window.location.origin);
             channels.forEach(ch => url.searchParams.append('channel', ch));
+            return url.toString();
+        }
+
+        function buildTrendUrl(channels, days) {
+            const url = new URL('/trend-data', window.location.origin);
+            channels.forEach(ch => url.searchParams.append('channel', ch));
+            url.searchParams.set('days', String(days));
             return url.toString();
         }
 
@@ -151,7 +203,7 @@
                 ]
             };
 
-            myChart.setOption(option);
+            mapChart.setOption(option);
 
             const channels = payload.filters && Array.isArray(payload.filters.channels)
                 ? payload.filters.channels
@@ -164,6 +216,73 @@
             statusText.textContent = `${channelLabel}；已展示 ${seriesData.length}/${list.length} 个仓库${unmappedLabel}`;
         }
 
+        function renderTrend(payload) {
+            const totals = Array.isArray(payload.totals) ? payload.totals : [];
+            const xData = totals.map(item => item.date);
+            const yData = totals.map(item => Number(item.volume || 0));
+            const topChannels = Array.isArray(payload.channelTotals)
+                ? payload.channelTotals.slice(0, 5)
+                : [];
+
+            trendChart.setOption({
+                title: {
+                    text: `每日体积趋势（${payload.filters?.days || 30}天）`,
+                    left: 'center',
+                    top: 10,
+                    textStyle: { fontSize: 16 }
+                },
+                tooltip: {
+                    trigger: 'axis',
+                    formatter: function (params) {
+                        if (!params.length) return '';
+                        const p = params[0];
+                        return `${p.axisValue}<br/>总体积: ${formatNumber(p.data)} m³`;
+                    }
+                },
+                grid: { left: 60, right: 30, top: 50, bottom: 40 },
+                xAxis: {
+                    type: 'category',
+                    data: xData,
+                    boundaryGap: false
+                },
+                yAxis: {
+                    type: 'value',
+                    name: 'm³'
+                },
+                series: [
+                    {
+                        name: '总体积',
+                        type: 'line',
+                        smooth: true,
+                        areaStyle: {},
+                        data: yData,
+                        lineStyle: { width: 2, color: '#1677ff' },
+                        itemStyle: { color: '#1677ff' }
+                    }
+                ],
+                graphic: topChannels.length ? [
+                    {
+                        type: 'text',
+                        right: 16,
+                        top: 12,
+                        style: {
+                            text: `Top渠道: ${topChannels.map(c => `${c.channel}(${formatNumber(c.total)})`).join(' / ')}`,
+                            fontSize: 12,
+                            fill: '#666'
+                        }
+                    }
+                ] : []
+            });
+        }
+
+        function markUpdatedTime() {
+            const now = new Date();
+            const hh = String(now.getHours()).padStart(2, '0');
+            const mm = String(now.getMinutes()).padStart(2, '0');
+            const ss = String(now.getSeconds()).padStart(2, '0');
+            lastUpdated.textContent = `更新: ${hh}:${mm}:${ss}`;
+        }
+
         async function loadMap() {
             const response = await fetch('nz.json');
             if (!response.ok) {
@@ -174,34 +293,60 @@
             mapReady = true;
         }
 
-        async function loadData() {
+        async function loadAll() {
             try {
                 if (!mapReady) {
                     statusText.textContent = '正在加载地图底图...';
                     await loadMap();
                 }
-                statusText.textContent = '正在查询仓库体积...';
+                statusText.textContent = '正在查询地图和趋势数据...';
                 const channels = getChannelsFromInput();
-                const res = await fetch(buildDataUrl(channels));
-                const payload = await res.json();
-                if (payload.status !== 'success') {
-                    throw new Error(payload.message || '接口返回异常');
+                const days = Number(daysSelect.value || 30);
+                const [mapRes, trendRes] = await Promise.all([
+                    fetch(buildDataUrl(channels)),
+                    fetch(buildTrendUrl(channels, days))
+                ]);
+                const mapPayload = await mapRes.json();
+                const trendPayload = await trendRes.json();
+                if (mapPayload.status !== 'success') {
+                    throw new Error(mapPayload.message || '地图接口返回异常');
                 }
-                renderChart(payload);
+                if (trendPayload.status !== 'success') {
+                    throw new Error(trendPayload.message || '趋势接口返回异常');
+                }
+                renderChart(mapPayload);
+                renderTrend(trendPayload);
+                markUpdatedTime();
             } catch (err) {
                 statusText.textContent = `加载失败：${err.message}`;
             }
         }
 
-        queryBtn.addEventListener('click', loadData);
+        function setupAutoRefresh() {
+            if (refreshTimer) {
+                clearInterval(refreshTimer);
+                refreshTimer = null;
+            }
+            if (autoRefresh.checked) {
+                refreshTimer = setInterval(loadAll, 10 * 60 * 1000);
+            }
+        }
+
+        queryBtn.addEventListener('click', loadAll);
         channelInput.addEventListener('keydown', function (event) {
             if (event.key === 'Enter') {
-                loadData();
+                loadAll();
             }
         });
-        window.addEventListener('resize', () => myChart.resize());
+        daysSelect.addEventListener('change', loadAll);
+        autoRefresh.addEventListener('change', setupAutoRefresh);
+        window.addEventListener('resize', () => {
+            mapChart.resize();
+            trendChart.resize();
+        });
 
-        loadData();
+        setupAutoRefresh();
+        loadAll();
     </script>
 </body>
 </html>
