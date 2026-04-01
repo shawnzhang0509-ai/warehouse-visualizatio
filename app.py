@@ -56,6 +56,45 @@ GROUP BY w.Name, LEFT(p.SKU, 3)
 DAILY_CHANNEL_TREND_SQL = None
 SNAPSHOT_FILE = Path(__file__).with_name("data").joinpath("daily_snapshots.json")
 
+# 这些仓库不参与任何体积计算（总量/渠道/趋势）
+EXCLUDED_WAREHOUSE_NAMES = [
+    "Missing/To be located",
+    "LV Warehouse(all dummy stock)",
+    "Onehunga warehouse(No longer available)",
+    "To be repaired",
+    "East Tamaki -Luo(No longer available)",
+    "123 Jef",
+    "East Tamaki temp warehouse",
+    "Otahuhu-Large",
+    "Monahan Rd Warehouse(No longer available)",
+    "Hamilton Old Display (No longer available)",
+    "No Inventory",
+    "test1",
+    "Presale-In Store Only(No longer available)",
+    "[Action Request]",
+    "Grabone",
+    "Melbourne Stock",
+    "CHCH Temp",
+    "Discontinued",
+    "Tauranga In Transit",
+    "APEX Center",
+    "China_Admin Supplies",
+    "SleepLAB-Onehunga",
+]
+
+
+def _normalize_warehouse_key(name):
+    return "".join(ch.lower() for ch in str(name) if ch.isalnum())
+
+
+EXCLUDED_WAREHOUSE_KEYS = {
+    _normalize_warehouse_key(name) for name in EXCLUDED_WAREHOUSE_NAMES
+}
+
+
+def _is_excluded_warehouse(name):
+    return _normalize_warehouse_key(name) in EXCLUDED_WAREHOUSE_KEYS
+
 
 def _parse_coords(coords_text):
     """CSV 内坐标是 '纬度, 经度'，前端 ECharts 需要 [经度, 纬度]。"""
@@ -103,6 +142,8 @@ def _load_base_rows_from_csv():
             name = (row.get("WarehouseName") or "").strip()
             if not name:
                 continue
+            if _is_excluded_warehouse(name):
+                continue
             volume_raw = row.get("TotalOccupiedVolume")
             volume = float(volume_raw) if volume_raw not in (None, "") else 0.0
             rows.append(
@@ -144,6 +185,8 @@ def _snapshot_rows_to_map(rows):
         name = (_row_get(row, "WarehouseName", "") or "").strip()
         if not name:
             continue
+        if _is_excluded_warehouse(name):
+            continue
         mapped[name] = float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
     return mapped
 
@@ -155,6 +198,8 @@ def _snapshot_channel_rows_to_map(rows):
         warehouse = (_row_get(row, "WarehouseName", "") or "").strip()
         volume = float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
         if not channel or not warehouse:
+            continue
+        if _is_excluded_warehouse(warehouse):
             continue
         channel_key = channel.upper()
         if channel_key not in mapped:
@@ -217,7 +262,13 @@ def _build_snapshot_trend(days, channel_filters, store):
     items = store.get("days", [])
     if not items:
         return []
-    selected = items[-days:]
+    # 同一天如果有多次刷新的记录，仅保留最新一条，避免折线重复累加。
+    latest_by_date = {}
+    for item in items:
+        date_text = item.get("date")
+        if date_text:
+            latest_by_date[date_text] = item
+    selected = [latest_by_date[d] for d in sorted(latest_by_date.keys())][-days:]
     points = []
     for item in selected:
         date_text = item.get("date")
@@ -261,6 +312,8 @@ def _refresh_daily_snapshot(force=False):
     if not channel_map:
         channel_map = {"ALL": base_map}
 
+    # force 刷新同一天时，先覆盖当天旧快照，避免趋势重复日期累计。
+    store["days"] = [item for item in store.get("days", []) if item.get("date") != today]
     store["days"].append(
         {
             "date": today,
@@ -283,12 +336,15 @@ def _csv_total_volume():
 def _sum_rows_total(rows):
     total = 0.0
     for row in rows:
+        warehouse_name = (_row_get(row, "WarehouseName", "") or "").strip()
+        if warehouse_name and _is_excluded_warehouse(warehouse_name):
+            continue
         total += float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
     return total
 
 
 def _normalize_name(name):
-    return "".join(ch.lower() for ch in str(name) if ch.isalnum())
+    return _normalize_warehouse_key(name)
 
 
 def _get_warehouse_meta(warehouse_name):
@@ -340,6 +396,16 @@ def _build_channel_sql(channel_filters):
     GROUP BY WarehouseName
     ORDER BY TotalOccupiedVolume DESC
     """
+
+
+def _filter_rows_by_excluded_warehouses(rows):
+    filtered = []
+    for row in rows:
+        name = (_row_get(row, "WarehouseName", "") or "").strip()
+        if not name or _is_excluded_warehouse(name):
+            continue
+        filtered.append(row)
+    return filtered
 
 
 def _parse_days():
@@ -491,6 +557,8 @@ def get_data():
         unmapped = []
         for row in rows:
             name = (_row_get(row, "WarehouseName", "") or "").strip()
+            if _is_excluded_warehouse(name):
+                continue
             volume = float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
             meta = _get_warehouse_meta(name)
             coords = meta.get("coords")
