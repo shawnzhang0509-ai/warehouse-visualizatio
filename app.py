@@ -2,8 +2,11 @@ import csv
 import os
 from pathlib import Path
 
-import pyodbc
 from flask import Flask, jsonify, render_template_string, request
+try:
+    import pyodbc
+except ImportError:
+    pyodbc = None
 
 app = Flask(__name__)
 
@@ -58,7 +61,7 @@ def _load_warehouse_meta():
     if not csv_path.exists():
         return meta
 
-    with csv_path.open("r", encoding="utf-8") as f:
+    with csv_path.open("r", encoding="utf-8-sig") as f:
         reader = csv.DictReader(f)
         for row in reader:
             name = (row.get("WarehouseName") or "").strip()
@@ -73,6 +76,29 @@ def _load_warehouse_meta():
 
 
 WAREHOUSE_META = _load_warehouse_meta()
+
+
+def _load_base_rows_from_csv():
+    rows = []
+    csv_path = Path(__file__).with_name("data.csv")
+    if not csv_path.exists():
+        return rows
+    with csv_path.open("r", encoding="utf-8-sig") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            name = (row.get("WarehouseName") or "").strip()
+            if not name:
+                continue
+            volume_raw = row.get("TotalOccupiedVolume")
+            volume = float(volume_raw) if volume_raw not in (None, "") else 0.0
+            rows.append(
+                {
+                    "WarehouseName": name,
+                    "TotalOccupiedVolume": volume,
+                }
+            )
+    rows.sort(key=lambda item: item["TotalOccupiedVolume"], reverse=True)
+    return rows
 
 
 def _normalize_name(name):
@@ -96,6 +122,8 @@ def _get_warehouse_meta(warehouse_name):
 
 
 def _run_query(sql, params=None):
+    if pyodbc is None:
+        raise RuntimeError("数据库驱动不可用（pyodbc / libodbc 未安装）")
     conn = None
     cursor = None
     try:
@@ -137,6 +165,12 @@ def _parse_channel_filters():
     return [ch.strip() for ch in channels if ch and ch.strip()]
 
 
+def _row_get(row, key, default=None):
+    if isinstance(row, dict):
+        return row.get(key, default)
+    return getattr(row, key, default)
+
+
 try:
     with open("index.html", "r", encoding="utf-8") as f:
         html_content = f.read()
@@ -153,19 +187,27 @@ def index():
 def get_data():
     try:
         channel_filters = _parse_channel_filters()
+        fallback_used = False
+        fallback_reason = None
 
         if channel_filters:
             sql_query = _build_channel_sql(channel_filters)
             rows = _run_query(sql_query, channel_filters)
         else:
-            rows = _run_query(BASE_VOLUME_SQL)
+            try:
+                rows = _run_query(BASE_VOLUME_SQL)
+            except Exception as db_error:
+                # 无数据库驱动或数据库不可达时，回退到 CSV，保证地图可用。
+                rows = _load_base_rows_from_csv()
+                fallback_used = True
+                fallback_reason = str(db_error)
 
         result = []
         total_volume = 0.0
         unmapped = []
         for row in rows:
-            name = (row.WarehouseName or "").strip()
-            volume = float(row.TotalOccupiedVolume or 0)
+            name = (_row_get(row, "WarehouseName", "") or "").strip()
+            volume = float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
             meta = _get_warehouse_meta(name)
             coords = meta.get("coords")
             capacity = meta.get("capacity")
@@ -189,6 +231,11 @@ def get_data():
                 "data": result,
                 "total": total_volume,
                 "unmappedWarehouses": unmapped,
+                "fallback": {
+                    "used": fallback_used,
+                    "source": "csv" if fallback_used else "database",
+                    "reason": fallback_reason,
+                },
             }
         )
     except Exception as e:
