@@ -78,6 +78,34 @@
             margin: 2px 0;
             line-height: 1.35;
         }
+        #warehouseCoordTable {
+            max-height: 130px;
+            overflow: auto;
+            border: 1px solid #eee;
+            border-radius: 6px;
+            padding: 6px 8px;
+            margin-top: 8px;
+            font-size: 12px;
+            color: #333;
+            background: #fff;
+        }
+        #warehouseCoordTable table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+        #warehouseCoordTable th, #warehouseCoordTable td {
+            border-bottom: 1px solid #f0f0f0;
+            padding: 4px 2px;
+            text-align: left;
+            white-space: nowrap;
+        }
+        #warehouseCoordTable th {
+            position: sticky;
+            top: 0;
+            background: #fff;
+            z-index: 1;
+            font-weight: 600;
+        }
         #dashboard {
             display: grid;
             grid-template-rows: 60vh 40vh;
@@ -111,6 +139,7 @@
         </div>
         <div id="statusText">正在加载地图...</div>
         <div id="warehouseSummary"></div>
+        <div id="warehouseCoordTable"></div>
     </div>
     <div id="dashboard">
         <div id="warehouse-map"></div>
@@ -126,6 +155,7 @@
         const autoRefresh = document.getElementById('autoRefresh');
         const lastUpdated = document.getElementById('lastUpdated');
         const warehouseSummary = document.getElementById('warehouseSummary');
+        const warehouseCoordTable = document.getElementById('warehouseCoordTable');
         const queryBtn = document.getElementById('queryBtn');
         const mapChart = echarts.init(mapDom);
         const trendChart = echarts.init(trendDom);
@@ -380,8 +410,8 @@
                             borderWidth: 1,
                             borderRadius: 4,
                             padding: [2, 4],
-                            width: 220,
-                            overflow: 'truncate',
+                            width: null,
+                            overflow: 'none',
                             lineHeight: 13
                         },
                         itemStyle: {
@@ -429,6 +459,19 @@
             warehouseSummary.innerHTML = `
                 <div class="title">仓库容量与占用（实时，含坐标）</div>
                 <ul>${summaryItems.join('')}</ul>
+            `;
+
+            const coordRows = mapped
+                .slice()
+                .sort((a, b) => a.name.localeCompare(b.name))
+                .map(item => `<tr><td>${item.name}</td><td>${formatCoords(item.coords, 5)}</td></tr>`)
+                .join('');
+            warehouseCoordTable.innerHTML = `
+                <div class="title" style="font-weight:600;margin-bottom:4px;">仓库坐标清单（常显）</div>
+                <table>
+                    <thead><tr><th>仓库</th><th>坐标(lat, lng)</th></tr></thead>
+                    <tbody>${coordRows}</tbody>
+                </table>
             `;
         }
 
