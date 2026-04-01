@@ -79,7 +79,8 @@
             line-height: 1.35;
         }
         #warehouseCoordTable {
-            max-height: 130px;
+            height: 220px;
+            min-height: 120px;
             overflow: auto;
             border: 1px solid #eee;
             border-radius: 6px;
@@ -88,6 +89,7 @@
             font-size: 12px;
             color: #333;
             background: #fff;
+            resize: vertical;
         }
         #coordTableHead {
             display: flex;
@@ -637,7 +639,7 @@
                     <tbody>${sortedProfiles}</tbody>
                 </table>
                 <div id="coordSizeWrap">
-                    <span>清单高度</span>
+                    <span>清单高度（也可拖拽右下角）</span>
                     <select id="coordSizeSelect">
                         <option value="130">小</option>
                         <option value="220" selected>中</option>
@@ -647,12 +649,12 @@
             `;
             const sizeSelect = warehouseCoordTable.querySelector('#coordSizeSelect');
             if (sizeSelect) {
-                const current = String(parseInt(warehouseCoordTable.style.maxHeight || '130', 10));
+                const current = String(parseInt(warehouseCoordTable.style.height || getComputedStyle(warehouseCoordTable).height || '220', 10));
                 if (['130', '220', '320'].includes(current)) {
                     sizeSelect.value = current;
                 }
                 sizeSelect.addEventListener('change', function () {
-                    warehouseCoordTable.style.maxHeight = `${this.value}px`;
+                    warehouseCoordTable.style.height = `${this.value}px`;
                 });
             }
             const saveBtn = warehouseCoordTable.querySelector('#coordSaveBtn');
