@@ -756,6 +756,22 @@ def _build_flat_trend(days, total):
     return points
 
 
+def _db_trend_total_volume(channel_filters):
+    """当前库存总量（货柜口径），与 /get-data 一致；用于趋势在无时序表时的按日拉平。"""
+    if channel_filters and CHANNEL_VOLUME_SQL:
+        channel_rows = _convert_rows_to_containers(_run_query(CHANNEL_VOLUME_SQL))
+        matched_channels = {ch.upper() for ch in channel_filters}
+        filtered = []
+        for row in channel_rows:
+            channel = (_row_get(row, "ChannelName", "") or "").strip().upper()
+            warehouse = (_row_get(row, "WarehouseName", "") or "").strip()
+            if channel in matched_channels and not _is_excluded_warehouse(warehouse):
+                filtered.append(row)
+        return _sum_rows_total(filtered)
+    base_rows = _convert_rows_to_containers(_run_query(BASE_VOLUME_SQL))
+    return _sum_rows_total(base_rows)
+
+
 def _latest_snapshot_entry():
     store = _load_snapshot_store()
     days = store.get("days", [])
@@ -907,40 +923,32 @@ def get_trend_data():
         days = _parse_days()
         fallback_used = False
         fallback_reason = None
-        source = "snapshot_daily"
         store = _load_snapshot_store()
         refreshed = False
 
         rows = None
         used_db_for_trend = False
-        if channel_filters and CHANNEL_VOLUME_SQL:
-            # 渠道筛选优先尝试实时数据库，避免快照缺少渠道维度时误判为 0。
-            try:
-                channel_rows = _convert_rows_to_containers(_run_query(CHANNEL_VOLUME_SQL))
-                filtered = []
-                matched_channels = {ch.upper() for ch in channel_filters}
-                for row in channel_rows:
-                    channel = (_row_get(row, "ChannelName", "") or "").strip().upper()
-                    warehouse = (_row_get(row, "WarehouseName", "") or "").strip()
-                    if channel in matched_channels and not _is_excluded_warehouse(warehouse):
-                        filtered.append(row)
-                total = _sum_rows_total(filtered)
-                rows = _build_flat_trend(days, total)
+        source = "snapshot_daily"
+
+        # 优先从数据库取当前总量并按日拉平（不依赖 daily_snapshots.json）。
+        try:
+            total = _db_trend_total_volume(channel_filters)
+            rows = _build_flat_trend(days, total)
+            used_db_for_trend = True
+            if channel_filters and CHANNEL_VOLUME_SQL:
                 source = "database_channel_realtime_flat"
-                used_db_for_trend = True
-            except Exception as db_error:
-                fallback_used = True
-                fallback_reason = f"渠道趋势实时查询不可用，已使用快照：{db_error}"
-
-        if rows is None:
-            rows = _build_snapshot_trend(days, channel_filters, store)
-
-        if (not rows) and (not used_db_for_trend):
+            else:
+                source = "database_realtime_flat"
+        except Exception as db_error:
             fallback_used = True
-            rows = _build_flat_trend(days, _csv_total_volume())
-            source = "flat:csv_snapshot"
-            if not fallback_reason:
-                fallback_reason = "静态快照为空，已退化为单值趋势"
+            fallback_reason = f"数据库趋势不可用，已回退快照或 CSV：{db_error}"
+            rows = _build_snapshot_trend(days, channel_filters, store)
+            if rows:
+                source = "snapshot_daily"
+            else:
+                rows = _build_flat_trend(days, _csv_total_volume())
+                source = "flat:csv_snapshot"
+                fallback_reason = f"{fallback_reason}；静态快照为空，已退化为 CSV 单值趋势"
 
         trend_data = []
         totals_by_date = {}
