@@ -323,6 +323,41 @@
             return url.toString();
         }
 
+        function trendTotalsAreFlat(totals) {
+            const list = Array.isArray(totals) ? totals : [];
+            if (list.length < 2) return true;
+            const v0 = Number(list[0].volume);
+            return list.every((item) => Number(item.volume) === v0);
+        }
+
+        function trendSourceLabel(source) {
+            const labels = {
+                database_realtime_flat: '数据库（当前总量×多天）',
+                database_channel_realtime_flat: '数据库渠道（当前总量×多天）',
+                snapshot_daily: 'daily_snapshots.json 多日快照',
+                flat:csv_snapshot: 'data.csv 静态总量（数据库不可用时的回退）',
+            };
+            return labels[source] || (source ? String(source) : '未知');
+        }
+
+        function buildTrendStatusSuffix(trendPayload) {
+            if (!trendPayload || trendPayload.status !== 'success') {
+                const msg = trendPayload && trendPayload.message ? trendPayload.message : '未知错误';
+                return `；趋势图：失败（${msg}）`;
+            }
+            const src = trendSourceLabel(trendPayload.source);
+            const fb = trendPayload.fallback || {};
+            const flat = trendTotalsAreFlat(trendPayload.totals);
+            let s = `；趋势图：${src}`;
+            if (fb.used && fb.reason) {
+                s += `；${fb.reason}`;
+            }
+            if (flat) {
+                s += '。提示：多日纵坐标相同，是因为没有「按日历史库存」表，接口用「当前一个总数」复制到每一天；要起伏需连上 Azure SQL 并长期写快照，或提供按日 SQL。';
+            }
+            return s;
+        }
+
         function distanceDeg(a, b) {
             const dx = Number(a[0]) - Number(b[0]);
             const dy = Number(a[1]) - Number(b[1]);
@@ -778,13 +813,19 @@
             const topChannels = Array.isArray(payload.channelTotals)
                 ? payload.channelTotals.slice(0, 5)
                 : [];
+            const flat = trendTotalsAreFlat(totals);
+            const subtext = flat
+                ? '（无历史日时各日相同：来自当前总量或 CSV 回退，非真实逐日变化）'
+                : '';
 
             trendChart.setOption({
                 title: {
                     text: `每日货柜趋势（${payload.filters?.days || 30}天）`,
+                    subtext,
                     left: 'center',
                     top: 10,
-                    textStyle: { fontSize: 16 }
+                    textStyle: { fontSize: 16 },
+                    subtextStyle: { fontSize: 11, color: '#888' },
                 },
                 tooltip: {
                     trigger: 'axis',
@@ -884,6 +925,7 @@
                 renderChart(mapPayload);
                 if (trendPayload.status === 'success') {
                     renderTrend(trendPayload);
+                    statusText.textContent += buildTrendStatusSuffix(trendPayload);
                 } else {
                     statusText.textContent = `地图已更新；趋势图查询失败：${trendPayload.message || '未知错误'}`;
                 }
