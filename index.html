@@ -1,941 +1,599 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
-    <meta charset="utf-8">
-    <title>新西兰仓库可视化</title>
-    <script src="https://cdn.jsdelivr.net/npm/echarts/dist/echarts.min.js"></script>
-    <style>
-        body { margin: 0; font-family: Arial, sans-serif; background: #f5f6fa; }
-        #toolbar {
-            position: fixed;
-            left: 16px;
-            top: 16px;
-            z-index: 10;
-            background: #fff;
-            padding: 12px;
-            border-radius: 8px;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
-            width: 500px;
-        }
-        #toolbar .row { display: flex; gap: 8px; margin-bottom: 8px; }
-        #toolbar label { font-size: 13px; color: #333; }
-        #channelInput {
-            flex: 1;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            padding: 6px 8px;
-            font-size: 13px;
-        }
-        #queryBtn {
-            border: none;
-            border-radius: 4px;
-            padding: 6px 12px;
-            font-size: 13px;
-            cursor: pointer;
-            color: #fff;
-            background: #1677ff;
-        }
-        #daysSelect {
-            width: 90px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            padding: 6px 8px;
-            font-size: 13px;
-            background: #fff;
-        }
-        #autoRefreshWrap {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            font-size: 12px;
-            color: #444;
-        }
-        #statusText {
-            font-size: 12px;
-            color: #666;
-            line-height: 1.4;
-            min-height: 34px;
-        }
-        #warehouseSummary {
-            max-height: 150px;
-            overflow: auto;
-            border: 1px solid #eee;
-            border-radius: 6px;
-            padding: 6px 8px;
-            font-size: 12px;
-            color: #333;
-            background: #fafafa;
-        }
-        #warehouseSummary .title {
-            font-weight: 600;
-            margin-bottom: 4px;
-        }
-        #warehouseSummary ul {
-            margin: 0;
-            padding-left: 16px;
-        }
-        #warehouseSummary li {
-            margin: 2px 0;
-            line-height: 1.35;
-        }
-        #warehouseCoordTable {
-            height: 220px;
-            min-height: 120px;
-            overflow: auto;
-            border: 1px solid #eee;
-            border-radius: 6px;
-            padding: 6px 8px;
-            margin-top: 8px;
-            font-size: 12px;
-            color: #333;
-            background: #fff;
-            resize: vertical;
-        }
-        #coordTableHead {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 4px;
-            gap: 8px;
-        }
-        #coordSaveBtn {
-            border: none;
-            border-radius: 4px;
-            padding: 4px 8px;
-            background: #1677ff;
-            color: #fff;
-            font-size: 12px;
-            cursor: pointer;
-        }
-        #coordSizeSelect {
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            font-size: 12px;
-            padding: 2px 4px;
-            background: #fff;
-        }
-        #coordSizeWrap {
-            display: flex;
-            align-items: center;
-            gap: 6px;
-            justify-content: flex-end;
-            margin-top: 6px;
-            font-size: 12px;
-            color: #666;
-        }
-        #warehouseCoordTable table {
-            width: 100%;
-            border-collapse: collapse;
-        }
-        #warehouseCoordTable th, #warehouseCoordTable td {
-            border-bottom: 1px solid #f0f0f0;
-            padding: 4px 2px;
-            text-align: left;
-            white-space: nowrap;
-        }
-        #warehouseCoordTable th {
-            position: sticky;
-            top: 0;
-            background: #fff;
-            z-index: 1;
-            font-weight: 600;
-        }
-        .coord-input {
-            width: 148px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            padding: 3px 5px;
-            font-size: 12px;
-        }
-        .coord-include-select {
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            padding: 2px 4px;
-            font-size: 12px;
-            background: #fff;
-        }
-        #editorModalMask {
-            position: fixed;
-            inset: 0;
-            background: rgba(0, 0, 0, 0.35);
-            display: none;
-            align-items: center;
-            justify-content: center;
-            z-index: 50;
-        }
-        #editorModal {
-            width: 760px;
-            max-width: 92vw;
-            max-height: 82vh;
-            overflow: auto;
-            background: #fff;
-            border-radius: 8px;
-            box-shadow: 0 10px 35px rgba(0, 0, 0, 0.2);
-            padding: 12px;
-        }
-        #editorModal .head {
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 8px;
-        }
-        #editorTable {
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 12px;
-        }
-        #editorTable th, #editorTable td {
-            border-bottom: 1px solid #f0f0f0;
-            padding: 6px 4px;
-            text-align: left;
-        }
-        #editorTable input[type="text"] {
-            width: 150px;
-            border: 1px solid #ddd;
-            border-radius: 4px;
-            padding: 4px 6px;
-            font-size: 12px;
-        }
-        #editorHint {
-            color: #666;
-            font-size: 12px;
-            margin-bottom: 8px;
-        }
-        #dashboard {
-            display: grid;
-            grid-template-rows: 60vh 40vh;
-            width: 100vw;
-            height: 100vh;
-        }
-        #warehouse-map { width: 100%; height: 100%; }
-        #volume-trend { width: 100%; height: 100%; background: #fff; }
-    </style>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>运营看板（Azure SQL）</title>
+  <script src="./echarts.min.js"></script>
+  <style>
+    :root {
+      --bg: #f3f6fb;
+      --panel: #ffffff;
+      --text: #1f2937;
+      --muted: #6b7280;
+      --primary: #2563eb;
+      --ok: #16a34a;
+      --warn: #f59e0b;
+      --err: #dc2626;
+      --border: #e5e7eb;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      color: var(--text);
+      background: var(--bg);
+    }
+    .container {
+      max-width: 1400px;
+      margin: 0 auto;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 14px 16px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.03);
+    }
+    .topbar {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+    .title {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 700;
+    }
+    .subtitle {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 6px;
+    }
+    .filters {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+    }
+    input[type="text"] {
+      width: 260px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 13px;
+    }
+    button {
+      border: 1px solid var(--border);
+      background: #fff;
+      border-radius: 8px;
+      padding: 8px 12px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--text);
+    }
+    button.primary {
+      background: var(--primary);
+      color: #fff;
+      border-color: var(--primary);
+    }
+    button:disabled {
+      opacity: 0.6;
+      cursor: default;
+    }
+    .dept-tabs {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .dept-tabs button.active {
+      background: #dbeafe;
+      border-color: #93c5fd;
+      color: #1e40af;
+      font-weight: 600;
+    }
+    .kpis {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(160px, 1fr));
+      gap: 10px;
+    }
+    .kpi {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 10px;
+      background: #fff;
+    }
+    .kpi .label {
+      font-size: 12px;
+      color: var(--muted);
+      margin-bottom: 6px;
+    }
+    .kpi .value {
+      font-size: 22px;
+      font-weight: 700;
+      line-height: 1.1;
+    }
+    .kpi .hint {
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .charts {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+    .chart-card {
+      min-height: 300px;
+      display: flex;
+      flex-direction: column;
+    }
+    .chart-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 8px;
+      gap: 8px;
+    }
+    .chart-title {
+      margin: 0;
+      font-size: 15px;
+    }
+    .chart-source {
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .chart {
+      flex: 1;
+      min-height: 250px;
+    }
+    .messages {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 13px;
+    }
+    .msg {
+      padding: 8px 10px;
+      border-radius: 8px;
+      border: 1px solid;
+      white-space: pre-wrap;
+    }
+    .msg.warning {
+      border-color: #fcd34d;
+      background: #fffbeb;
+      color: #92400e;
+    }
+    .msg.error {
+      border-color: #fca5a5;
+      background: #fef2f2;
+      color: #991b1b;
+    }
+    .footer-note {
+      font-size: 12px;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .hidden { display: none !important; }
+    @media (max-width: 1100px) {
+      .kpis { grid-template-columns: 1fr 1fr; }
+      .charts { grid-template-columns: 1fr; }
+      input[type="text"] { width: 100%; max-width: 360px; }
+    }
+  </style>
 </head>
 <body>
-    <div id="toolbar">
-        <label for="channelInput">渠道筛选（可选，多个渠道用逗号分隔）</label>
-        <div class="row">
-            <input id="channelInput" placeholder="例如：Retail,Online" autocomplete="off" />
-            <select id="daysSelect">
-                <option value="7">近7天</option>
-                <option value="14">近14天</option>
-                <option value="30" selected>近30天</option>
-                <option value="60">近60天</option>
-                <option value="90">近90天</option>
-            </select>
-            <button id="queryBtn">查询</button>
-            <button id="clearFilterBtn" style="border:none;border-radius:4px;padding:6px 10px;font-size:12px;cursor:pointer;background:#8c8c8c;color:#fff;">清空</button>
+  <div class="container">
+    <section class="panel topbar">
+      <div>
+        <h1 class="title">公司运营看板（Azure SQL）</h1>
+        <div id="subtitle" class="subtitle">按部门查看：供应链 / 店面 / 仓库。支持渠道过滤。</div>
+      </div>
+      <div class="filters">
+        <input id="channelInput" type="text" placeholder="渠道过滤（逗号分隔，例如 J96,130）">
+        <button id="queryBtn" class="primary">查询</button>
+        <button id="clearBtn">清空过滤</button>
+        <button id="testBtn">测试数据库连接</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="dept-tabs">
+        <button class="dept-btn active" data-dept="all">全部</button>
+        <button class="dept-btn" data-dept="supply">供应链</button>
+        <button class="dept-btn" data-dept="store">店面</button>
+        <button class="dept-btn" data-dept="warehouse">仓库</button>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="kpis">
+        <div class="kpi">
+          <div class="label">供应链有货率（Non-Discontinue）</div>
+          <div id="kpiSupply" class="value">-</div>
+          <div class="hint">各渠道平均</div>
         </div>
-        <div class="row" style="margin-top: -2px;">
-            <button id="openEditorBtn" style="border:none;border-radius:4px;padding:6px 10px;font-size:12px;cursor:pointer;background:#13c2c2;color:#fff;">
-                编辑仓库坐标/统计规则
-            </button>
+        <div class="kpi">
+          <div class="label">店面展示率（Non-Discontinue）</div>
+          <div id="kpiStore" class="value">-</div>
+          <div class="hint">各渠道平均</div>
         </div>
-        <div class="row" style="justify-content: space-between; align-items: center; margin-bottom: 4px;">
-            <div id="autoRefreshWrap">
-                <input id="autoRefresh" type="checkbox" />
-                <label for="autoRefresh">每10分钟自动刷新</label>
-            </div>
-            <span id="lastUpdated" style="font-size:12px;color:#888;"></span>
+        <div class="kpi">
+          <div class="label">仓库占用率</div>
+          <div id="kpiWarehouseOcc" class="value">-</div>
+          <div id="kpiWarehouseVolume" class="hint">- / - 柜</div>
         </div>
-        <div id="statusText">正在加载地图...</div>
-        <div id="warehouseSummary"></div>
-        <div id="warehouseCoordTable"></div>
-    </div>
-    <div id="dashboard">
-        <div id="warehouse-map"></div>
-        <div id="volume-trend"></div>
-    </div>
-    <div id="editorModalMask">
-        <div id="editorModal">
-            <div class="head">
-                <b>仓库主数据编辑（坐标 + 是否参与统计）</b>
-                <button id="closeEditorBtn" style="border:none;background:#f5f5f5;padding:4px 8px;border-radius:4px;cursor:pointer;">关闭</button>
-            </div>
-            <div id="editorHint">坐标格式：lat,lng（例如 -36.90829,174.81150）。保存后会立即刷新地图。</div>
-            <div id="editorBody"></div>
-            <div style="margin-top:10px;display:flex;gap:8px;justify-content:flex-end;">
-                <button id="saveEditorBtn" style="border:none;border-radius:4px;padding:6px 12px;background:#1677ff;color:#fff;cursor:pointer;">保存</button>
-            </div>
+        <div class="kpi">
+          <div class="label">在途总量</div>
+          <div id="kpiTransit" class="value">-</div>
+          <div class="hint">单位：柜（或 SQL 返回单位）</div>
         </div>
-    </div>
+        <div class="kpi">
+          <div class="label">预计总量</div>
+          <div id="kpiForecast" class="value">-</div>
+          <div class="hint">预测窗口汇总</div>
+        </div>
+      </div>
+    </section>
 
-    <script>
-        const mapDom = document.getElementById('warehouse-map');
-        const trendDom = document.getElementById('volume-trend');
-        const statusText = document.getElementById('statusText');
-        const channelInput = document.getElementById('channelInput');
-        const daysSelect = document.getElementById('daysSelect');
-        const autoRefresh = document.getElementById('autoRefresh');
-        const lastUpdated = document.getElementById('lastUpdated');
-        const warehouseSummary = document.getElementById('warehouseSummary');
-        const warehouseCoordTable = document.getElementById('warehouseCoordTable');
-        const queryBtn = document.getElementById('queryBtn');
-        const clearFilterBtn = document.getElementById('clearFilterBtn');
-        const openEditorBtn = document.getElementById('openEditorBtn');
-        const editorModalMask = document.getElementById('editorModalMask');
-        const closeEditorBtn = document.getElementById('closeEditorBtn');
-        const saveEditorBtn = document.getElementById('saveEditorBtn');
-        const editorBody = document.getElementById('editorBody');
-        const mapChart = echarts.init(mapDom);
-        const trendChart = echarts.init(trendDom);
+    <section id="messagePanel" class="panel hidden">
+      <div id="messages" class="messages"></div>
+    </section>
 
-        let mapReady = false;
-        let refreshTimer = null;
-        let latestProfiles = [];
-        let filterTouched = false;
+    <section class="charts">
+      <div class="panel chart-card" data-dept="supply">
+        <div class="chart-head">
+          <h3 class="chart-title">供应链：渠道有货率</h3>
+          <span id="srcSupply" class="chart-source">数据源：-</span>
+        </div>
+        <div id="chartSupply" class="chart"></div>
+      </div>
+      <div class="panel chart-card" data-dept="store">
+        <div class="chart-head">
+          <h3 class="chart-title">店面：渠道展示率</h3>
+          <span id="srcStore" class="chart-source">数据源：-</span>
+        </div>
+        <div id="chartStore" class="chart"></div>
+      </div>
+      <div class="panel chart-card" data-dept="warehouse">
+        <div class="chart-head">
+          <h3 class="chart-title">仓库：占用与容量（货柜）</h3>
+          <span id="srcWarehouse" class="chart-source">数据源：-</span>
+        </div>
+        <div id="chartWarehouse" class="chart"></div>
+      </div>
+      <div class="panel chart-card" data-dept="supply">
+        <div class="chart-head">
+          <h3 class="chart-title">供应链：各渠道在途</h3>
+          <span id="srcTransit" class="chart-source">数据源：-</span>
+        </div>
+        <div id="chartTransit" class="chart"></div>
+      </div>
+      <div class="panel chart-card" data-dept="warehouse">
+        <div class="chart-head">
+          <h3 class="chart-title">仓库：在途预计趋势</h3>
+          <span id="srcForecast" class="chart-source">数据源：-</span>
+        </div>
+        <div id="chartForecast" class="chart"></div>
+      </div>
+    </section>
 
-        function formatNumber(num) {
-            return Number(num || 0).toLocaleString(undefined, { maximumFractionDigits: 2 });
-        }
+    <section class="panel footer-note">
+      SQL 配置文件：<code>/workspace/dashboard_queries.json</code><br>
+      你把各指标 SQL 填进去后，点“查询”即可实时出图。后端会自动识别常见列名，并把 <code>*_m3</code> 字段按 /69 转成货柜数。
+    </section>
+  </div>
 
-        function formatCoords(coords, digits = 5) {
-            if (!Array.isArray(coords) || coords.length < 2) return 'N/A';
-            const lng = Number(coords[0]).toFixed(digits);
-            const lat = Number(coords[1]).toFixed(digits);
-            return `${lat}, ${lng}`;
-        }
+  <script>
+    const state = {
+      dept: 'all',
+      channels: [],
+      charts: {},
+      loading: false
+    };
 
-        function parseBlockedIpFromReason(reason) {
-            if (!reason) return null;
-            const m = String(reason).match(/IP address '([^']+)' is not allowed/);
-            return m ? m[1] : null;
-        }
+    const refs = {
+      subtitle: document.getElementById('subtitle'),
+      channelInput: document.getElementById('channelInput'),
+      queryBtn: document.getElementById('queryBtn'),
+      clearBtn: document.getElementById('clearBtn'),
+      testBtn: document.getElementById('testBtn'),
+      messagePanel: document.getElementById('messagePanel'),
+      messages: document.getElementById('messages'),
+      kpiSupply: document.getElementById('kpiSupply'),
+      kpiStore: document.getElementById('kpiStore'),
+      kpiWarehouseOcc: document.getElementById('kpiWarehouseOcc'),
+      kpiWarehouseVolume: document.getElementById('kpiWarehouseVolume'),
+      kpiTransit: document.getElementById('kpiTransit'),
+      kpiForecast: document.getElementById('kpiForecast'),
+      srcSupply: document.getElementById('srcSupply'),
+      srcStore: document.getElementById('srcStore'),
+      srcWarehouse: document.getElementById('srcWarehouse'),
+      srcTransit: document.getElementById('srcTransit'),
+      srcForecast: document.getElementById('srcForecast')
+    };
 
-        function getChannelsFromInput() {
-            if (!filterTouched) return [];
-            return channelInput.value
-                .split(',')
-                .map(item => item.trim())
-                .filter(Boolean);
-        }
+    function fmtNum(v, digits = 1) {
+      if (v === null || v === undefined || Number.isNaN(Number(v))) return '-';
+      return Number(v).toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits });
+    }
 
-        function buildDataUrl(channels) {
-            const url = new URL('/get-data', window.location.origin);
-            channels.forEach(ch => url.searchParams.append('channel', ch));
-            return url.toString();
-        }
+    function fmtPct(v) {
+      if (v === null || v === undefined || Number.isNaN(Number(v))) return '-';
+      return `${fmtNum(v, 1)}%`;
+    }
 
-        function buildTrendUrl(channels, days) {
-            const url = new URL('/trend-data', window.location.origin);
-            channels.forEach(ch => url.searchParams.append('channel', ch));
-            url.searchParams.set('days', String(days));
-            return url.toString();
-        }
+    function parseChannels() {
+      const txt = refs.channelInput.value || '';
+      return txt.split(',')
+        .map(v => v.trim())
+        .filter(Boolean);
+    }
 
-        function distanceDeg(a, b) {
-            const dx = Number(a[0]) - Number(b[0]);
-            const dy = Number(a[1]) - Number(b[1]);
-            return Math.sqrt(dx * dx + dy * dy);
-        }
+    function setLoading(v) {
+      state.loading = v;
+      refs.queryBtn.disabled = v;
+      refs.clearBtn.disabled = v;
+      refs.testBtn.disabled = v;
+      refs.queryBtn.textContent = v ? '查询中...' : '查询';
+    }
 
-        function buildDisplayPoints(items) {
-            const threshold = 0.12; // 近邻阈值（经纬度）
-            const spreadRadius = 0.1; // 错位半径
-            const visited = new Array(items.length).fill(false);
-            const pointData = [];
-            const lineData = [];
+    function sourceLabel(metric) {
+      if (!metric) return '数据源：-';
+      if (metric.source === 'database') return '数据源：数据库';
+      if (metric.source === 'sample') return '数据源：示例';
+      if (metric.source === 'error') return '数据源：失败';
+      return `数据源：${metric.source || '-'}`;
+    }
 
-            for (let i = 0; i < items.length; i += 1) {
-                if (visited[i]) continue;
-                visited[i] = true;
-                const cluster = [i];
+    function renderMessages(items) {
+      if (!items || !items.length) {
+        refs.messagePanel.classList.add('hidden');
+        refs.messages.innerHTML = '';
+        return;
+      }
+      refs.messagePanel.classList.remove('hidden');
+      refs.messages.innerHTML = '';
+      for (const item of items) {
+        const div = document.createElement('div');
+        div.className = `msg ${item.level === 'error' ? 'error' : 'warning'}`;
+        div.textContent = `[${item.metric}] ${item.message}`;
+        refs.messages.appendChild(div);
+      }
+    }
 
-                for (let j = i + 1; j < items.length; j += 1) {
-                    if (visited[j]) continue;
-                    if (distanceDeg(items[i].coords, items[j].coords) <= threshold) {
-                        visited[j] = true;
-                        cluster.push(j);
-                    }
-                }
+    function setNoData(chart, title, subtitle) {
+      chart.setOption({
+        title: { text: title, subtext: subtitle, left: 'center', top: 'center' },
+        xAxis: { show: false },
+        yAxis: { show: false },
+        series: []
+      }, true);
+    }
 
-                if (cluster.length === 1) {
-                    const item = items[cluster[0]];
-                    pointData.push({
-                        name: item.name,
-                        value: [item.coords[0], item.coords[1], Number(item.volume || 0)],
-                        raw: item,
-                        originalCoords: item.coords
-                    });
-                    continue;
-                }
+    function renderSupply(rows) {
+      const chart = state.charts.supply;
+      if (!rows.length) return setNoData(chart, '无数据', '请检查 SQL 或渠道过滤');
+      chart.setOption({
+        tooltip: { trigger: 'axis' },
+        grid: { left: 50, right: 20, top: 30, bottom: 50 },
+        xAxis: { type: 'category', data: rows.map(r => r.channel) },
+        yAxis: { type: 'value', min: 0, max: 100, axisLabel: { formatter: '{value}%' } },
+        series: [{
+          type: 'bar',
+          data: rows.map(r => r.in_stock_rate),
+          itemStyle: { color: '#2563eb' },
+          label: { show: true, position: 'top', formatter: '{c}%' }
+        }]
+      }, true);
+    }
 
-                let centerLng = 0;
-                let centerLat = 0;
-                cluster.forEach((idx) => {
-                    centerLng += Number(items[idx].coords[0]);
-                    centerLat += Number(items[idx].coords[1]);
-                });
-                centerLng /= cluster.length;
-                centerLat /= cluster.length;
+    function renderStore(rows) {
+      const chart = state.charts.store;
+      if (!rows.length) return setNoData(chart, '无数据', '请检查 SQL 或渠道过滤');
+      chart.setOption({
+        tooltip: { trigger: 'axis' },
+        grid: { left: 50, right: 20, top: 30, bottom: 50 },
+        xAxis: { type: 'category', data: rows.map(r => r.channel) },
+        yAxis: { type: 'value', min: 0, max: 100, axisLabel: { formatter: '{value}%' } },
+        series: [{
+          type: 'bar',
+          data: rows.map(r => r.display_rate),
+          itemStyle: { color: '#16a34a' },
+          label: { show: true, position: 'top', formatter: '{c}%' }
+        }]
+      }, true);
+    }
 
-                const n = cluster.length;
-                cluster.forEach((idx, order) => {
-                    const item = items[idx];
-                    const angle = (-Math.PI / 2) + (2 * Math.PI * order) / n;
-                    const displayCoords = [
-                        centerLng + spreadRadius * Math.cos(angle),
-                        centerLat + spreadRadius * Math.sin(angle) * 0.7
-                    ];
-                    let labelPos = 'top';
-                    if (Math.abs(Math.cos(angle)) > Math.abs(Math.sin(angle))) {
-                        labelPos = Math.cos(angle) >= 0 ? 'right' : 'left';
-                    } else {
-                        labelPos = Math.sin(angle) >= 0 ? 'bottom' : 'top';
-                    }
-                    pointData.push({
-                        name: item.name,
-                        value: [displayCoords[0], displayCoords[1], Number(item.volume || 0)],
-                        raw: item,
-                        originalCoords: item.coords,
-                        labelPos: labelPos
-                    });
-                    lineData.push({
-                        coords: [displayCoords, item.coords]
-                    });
-                });
-            }
+    function renderWarehouse(rows) {
+      const chart = state.charts.warehouse;
+      if (!rows.length) return setNoData(chart, '无数据', '请检查 SQL 输出列');
+      chart.setOption({
+        tooltip: { trigger: 'axis' },
+        legend: { data: ['占用', '容量'] },
+        grid: { left: 50, right: 20, top: 30, bottom: 70 },
+        xAxis: {
+          type: 'category',
+          data: rows.map(r => r.warehouse),
+          axisLabel: { rotate: 20 }
+        },
+        yAxis: { type: 'value', name: '柜' },
+        series: [
+          {
+            name: '占用',
+            type: 'bar',
+            data: rows.map(r => r.used_containers),
+            itemStyle: { color: '#f59e0b' }
+          },
+          {
+            name: '容量',
+            type: 'bar',
+            data: rows.map(r => r.total_containers),
+            itemStyle: { color: '#94a3b8' }
+          }
+        ]
+      }, true);
+    }
 
-            return { pointData, lineData };
-        }
+    function renderTransit(rows) {
+      const chart = state.charts.transit;
+      if (!rows.length) return setNoData(chart, '无数据', '请检查 SQL 或渠道过滤');
+      chart.setOption({
+        tooltip: { trigger: 'axis' },
+        grid: { left: 50, right: 20, top: 30, bottom: 50 },
+        xAxis: { type: 'category', data: rows.map(r => r.channel) },
+        yAxis: { type: 'value', name: '柜' },
+        series: [{
+          type: 'bar',
+          data: rows.map(r => r.in_transit_qty),
+          itemStyle: { color: '#7c3aed' },
+          label: { show: true, position: 'top' }
+        }]
+      }, true);
+    }
 
-        function renderChart(payload) {
-            const list = Array.isArray(payload.data) ? payload.data : [];
-            const profiles = Array.isArray(payload.warehouseProfiles) ? payload.warehouseProfiles : [];
-            const channels = payload.filters && Array.isArray(payload.filters.channels)
-                ? payload.filters.channels
-                : [];
-            const channelLabel = channels.length ? channels.join(', ') : '全部';
-            latestProfiles = profiles.slice();
-            const includedForVolume = profiles.filter(p => p.includeInVolume);
-            const includedWithCoords = includedForVolume.filter(
-                p => Array.isArray(p.coords) && p.coords.length === 2
-            );
-            const mapped = list.filter(item => item.displayOnMap && Array.isArray(item.coords) && item.coords.length === 2);
+    function renderForecast(rows) {
+      const chart = state.charts.forecast;
+      if (!rows.length) return setNoData(chart, '无数据', '请检查 SQL 输出列');
+      const buckets = {};
+      for (const row of rows) {
+        if (!buckets[row.date]) buckets[row.date] = 0;
+        buckets[row.date] += Number(row.expected_qty || 0);
+      }
+      const dates = Object.keys(buckets).sort();
+      const values = dates.map(d => Number(buckets[d].toFixed(2)));
+      chart.setOption({
+        tooltip: { trigger: 'axis' },
+        grid: { left: 50, right: 20, top: 30, bottom: 50 },
+        xAxis: { type: 'category', data: dates },
+        yAxis: { type: 'value', name: '柜' },
+        series: [{
+          type: 'line',
+          data: values,
+          smooth: true,
+          symbolSize: 8,
+          lineStyle: { width: 3, color: '#dc2626' },
+          itemStyle: { color: '#dc2626' }
+        }]
+      }, true);
+    }
 
-            // 按体积排序，优先显示体积较大的标签，减轻重叠
-            mapped.sort((a, b) => Number(b.volume || 0) - Number(a.volume || 0));
-            const { pointData, lineData } = buildDisplayPoints(mapped);
-            const anchorData = mapped.map(item => ({
-                value: [Number(item.coords[0]), Number(item.coords[1]), Number(item.volume || 0)],
-                raw: item
-            }));
+    function applyDeptVisibility() {
+      const cards = document.querySelectorAll('.chart-card');
+      for (const card of cards) {
+        const dept = card.dataset.dept;
+        const show = state.dept === 'all' || dept === state.dept;
+        card.classList.toggle('hidden', !show);
+      }
+      document.querySelectorAll('.dept-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.dept === state.dept);
+      });
+    }
 
-            const capacityBubbleData = pointData.map(item => ({
-                value: [item.value[0], item.value[1], Number(item.raw.capacity || 0)],
-                raw: item.raw
-            }));
+    function render(payload) {
+      const summary = payload.summary || {};
+      refs.kpiSupply.textContent = fmtPct(summary.supply_in_stock_rate);
+      refs.kpiStore.textContent = fmtPct(summary.store_display_rate);
+      refs.kpiWarehouseOcc.textContent = fmtPct(summary.warehouse_occupancy_rate);
+      refs.kpiWarehouseVolume.textContent = `${fmtNum(summary.warehouse_used_containers)} / ${fmtNum(summary.warehouse_total_containers)} 柜`;
+      refs.kpiTransit.textContent = fmtNum(summary.in_transit_total);
+      refs.kpiForecast.textContent = fmtNum(summary.forecast_total);
 
-            const option = {
-                title: {
-                    text: `新西兰仓库占用货柜分布（渠道 ${channelLabel}，总计 ${formatNumber(payload.total)} 柜）`,
-                    left: 'center',
-                    top: 12
-                },
-                tooltip: {
-                    trigger: 'item',
-                    formatter: function (params) {
-                        const raw = params.data.raw;
-                        const volume = Number(raw.volume || 0);
-                        const capacity = raw.capacity == null ? null : Number(raw.capacity);
-                        const ratio = capacity ? ((volume / capacity) * 100).toFixed(1) : 'N/A';
-                        const coordsText = `${params.value[1].toFixed(6)}, ${params.value[0].toFixed(6)}`;
-                        return [
-                            `<b>${raw.name}</b>`,
-                            `坐标(纬度, 经度): ${coordsText}`,
-                            `货柜数: ${formatNumber(volume)} 柜`,
-                            `容量: ${capacity == null ? 'N/A' : `${formatNumber(capacity)} 柜`}`,
-                            `占用率: ${ratio === 'N/A' ? 'N/A' : `${ratio}%`}`
-                        ].join('<br/>');
-                    }
-                },
-                geo: {
-                    map: 'NZ',
-                    roam: true,
-                    zoom: 4.1,
-                    center: [173.5, -41.2],
-                    itemStyle: {
-                        areaColor: '#ffe58f',
-                        borderColor: '#b08900',
-                        borderWidth: 1
-                    },
-                    emphasis: {
-                        itemStyle: {
-                            areaColor: '#ffd666'
-                        }
-                    }
-                },
-                series: [
-                    {
-                        name: '真实坐标锚点',
-                        type: 'scatter',
-                        coordinateSystem: 'geo',
-                        data: anchorData,
-                        silent: true,
-                        zlevel: 0,
-                        symbol: 'circle',
-                        symbolSize: 6,
-                        itemStyle: {
-                            color: '#262626',
-                            opacity: 0.9
-                        },
-                        label: { show: false }
-                    },
-                    {
-                        name: '仓库偏移引导线',
-                        type: 'lines',
-                        coordinateSystem: 'geo',
-                        data: lineData,
-                        polyline: false,
-                        silent: true,
-                        zlevel: 1,
-                        lineStyle: {
-                            color: '#8c8c8c',
-                            width: 1,
-                            opacity: 0.55,
-                            type: 'dashed'
-                        }
-                    },
-                    {
-                        name: '仓库容量线',
-                        type: 'scatter',
-                        coordinateSystem: 'geo',
-                        data: capacityBubbleData,
-                        silent: true,
-                        zlevel: 2,
-                        symbol: 'circle',
-                        symbolSize: function (val) {
-                            const cap = Number(val[2] || 0);
-                            if (cap <= 0) return 0;
-                            return Math.max(34, Math.sqrt(cap) * 2.6);
-                        },
-                        itemStyle: {
-                            color: 'rgba(0,0,0,0)',
-                            borderColor: '#0958d9',
-                            borderWidth: 3,
-                            shadowColor: 'rgba(9,88,217,0.25)',
-                            shadowBlur: 4
-                        },
-                        label: {
-                            show: false
-                        }
-                    },
-                    {
-                        name: '仓库体积',
-                        type: 'scatter',
-                        coordinateSystem: 'geo',
-                        data: pointData,
-                        symbolSize: function (val) {
-                            return Math.max(14, Math.sqrt(val[2]) * 8);
-                        },
-                        label: {
-                            show: true,
-                            position: function (params) {
-                                const data = params.data || {};
-                                return data.labelPos || 'top';
-                            },
-                            distance: 10,
-                            formatter: function (params) {
-                                const volume = Number(params.data.raw.volume || 0);
-                                const capacity = Number(params.data.raw.capacity || 0);
-                                const ratio = capacity > 0 ? ((volume / capacity) * 100).toFixed(1) : 'N/A';
-                                const coordText = formatCoords(params.data.raw.coords || params.data.originalCoords, 4);
-                                return `${params.name}\n${formatNumber(volume)} / ${formatNumber(capacity)} 柜 (${ratio}%)\n坐标:${coordText}`;
-                            },
-                            color: '#333',
-                            fontSize: 10,
-                            backgroundColor: 'rgba(255,255,255,0.82)',
-                            borderColor: '#e6e6e6',
-                            borderWidth: 1,
-                            borderRadius: 4,
-                            padding: [2, 4],
-                            width: null,
-                            overflow: 'none',
-                            lineHeight: 13
-                        },
-                        itemStyle: {
-                            color: '#ff4d4f',
-                            borderColor: '#fff',
-                            borderWidth: 1.5
-                        },
-                        emphasis: {
-                            label: {
-                                show: true,
-                                width: null,
-                                overflow: 'none'
-                            }
-                        }
-                    }
-                ]
-            };
+      const metrics = payload.metrics || {};
+      refs.srcSupply.textContent = sourceLabel(metrics.supply_availability);
+      refs.srcStore.textContent = sourceLabel(metrics.store_display_rate);
+      refs.srcWarehouse.textContent = sourceLabel(metrics.warehouse_capacity);
+      refs.srcTransit.textContent = sourceLabel(metrics.in_transit_by_channel);
+      refs.srcForecast.textContent = sourceLabel(metrics.forecast_in_transit);
 
-            mapChart.setOption(option);
+      const channels = (payload.filters && payload.filters.channels) || [];
+      refs.subtitle.textContent = channels.length
+        ? `当前渠道过滤：${channels.join(', ')} | 更新时间：${payload.asOf || '-'}`
+        : `当前渠道过滤：全部 | 更新时间：${payload.asOf || '-'}`;
 
-            const channelText = channels.length ? `渠道: ${channels.join(', ')}` : '渠道: 全部';
-            const unmapped = Array.isArray(payload.unmappedWarehouses) ? payload.unmappedWarehouses : [];
-            const unmappedLabel = unmapped.length
-                ? `；缺少坐标: ${unmapped.join(', ')}`
-                : '';
-            const snapshotLabel = payload.snapshotDate ? `；快照日期: ${payload.snapshotDate}` : '';
-            const fallbackReason = payload.fallback && payload.fallback.reason
-                ? `；${payload.fallback.reason}`
-                : '';
-            const noHitLabel = channels.length && Number(payload.total || 0) === 0
-                ? '；当前渠道无命中数据'
-                : '';
-            const blockedIp = parseBlockedIpFromReason(payload.fallback && payload.fallback.reason);
-            const blockedIpLabel = blockedIp
-                ? `；SQL防火墙未放行云端IP: ${blockedIp}`
-                : '';
-            const statusSummary = `已展示 ${pointData.length}/${includedWithCoords.length} 个仓库（参与统计 ${includedForVolume.length}；有坐标 ${includedWithCoords.length}）`;
-            statusText.textContent = `${channelText}；${statusSummary}（橙色=货柜数，蓝色圈=总容量/爆仓线）${noHitLabel}${blockedIpLabel}${snapshotLabel}${unmappedLabel}${fallbackReason}`;
+      renderMessages(payload.diagnostics || []);
+      renderSupply((metrics.supply_availability && metrics.supply_availability.rows) || []);
+      renderStore((metrics.store_display_rate && metrics.store_display_rate.rows) || []);
+      renderWarehouse((metrics.warehouse_capacity && metrics.warehouse_capacity.rows) || []);
+      renderTransit((metrics.in_transit_by_channel && metrics.in_transit_by_channel.rows) || []);
+      renderForecast((metrics.forecast_in_transit && metrics.forecast_in_transit.rows) || []);
+    }
 
-            const summaryItems = mapped
-                .slice()
-                .sort((a, b) => Number(b.volume || 0) - Number(a.volume || 0))
-                .map(item => {
-                    const vol = Number(item.volume || 0);
-                    const cap = Number(item.capacity || 0);
-                    const ratio = cap > 0 ? ((vol / cap) * 100).toFixed(1) : 'N/A';
-                    const coordText = formatCoords(item.coords, 5);
-                    return `<li><b>${item.name}</b><br/>坐标: ${coordText}<br/>${formatNumber(vol)} / ${formatNumber(cap)} 柜 (${ratio}%)</li>`;
-                });
-            warehouseSummary.innerHTML = `
-                <div class="title">仓库容量与占用（实时，含坐标）</div>
-                <ul>${summaryItems.join('')}</ul>
-            `;
+    async function loadMetrics() {
+      setLoading(true);
+      state.channels = parseChannels();
+      const params = new URLSearchParams();
+      if (state.channels.length) params.set('channels', state.channels.join(','));
+      const url = `/api/metrics${params.toString() ? `?${params.toString()}` : ''}`;
+      try {
+        const res = await fetch(url);
+        const payload = await res.json();
+        render(payload);
+      } catch (err) {
+        renderMessages([{ metric: 'network', level: 'error', message: err.message || String(err) }]);
+      } finally {
+        setLoading(false);
+      }
+    }
 
-            const sortedProfiles = profiles
-                .slice()
-                .sort((a, b) => a.name.localeCompare(b.name))
-                .map(item => {
-                    const coordText = formatCoords(item.coords, 5);
-                    const coordInputVal = coordText === 'N/A'
-                        ? ''
-                        : `${Number(item.coords[1]).toFixed(6)},${Number(item.coords[0]).toFixed(6)}`;
-                    return `
-                        <tr>
-                            <td>${item.name}</td>
-                            <td>
-                                <input class="coord-input" data-name="${item.name}" data-field="coords" value="${coordInputVal}" placeholder="lat,lng" />
-                            </td>
-                            <td>
-                                <select class="coord-include-select" data-name="${item.name}" data-field="include">
-                                    <option value="1" ${item.includeInVolume ? 'selected' : ''}>参与</option>
-                                    <option value="0" ${item.includeInVolume ? '' : 'selected'}>排除</option>
-                                </select>
-                            </td>
-                        </tr>
-                    `;
-                })
-                .join('');
-            warehouseCoordTable.innerHTML = `
-                <div id="coordTableHead">
-                    <div class="title" style="font-weight:600;">仓库主数据清单（可编辑）</div>
-                    <button id="coordSaveBtn">保存清单修改</button>
-                </div>
-                <table>
-                    <thead><tr><th>仓库</th><th>坐标(lat, lng)</th><th>体积统计</th></tr></thead>
-                    <tbody>${sortedProfiles}</tbody>
-                </table>
-                <div id="coordSizeWrap">
-                    <span>清单高度（也可拖拽右下角）</span>
-                    <select id="coordSizeSelect">
-                        <option value="130">小</option>
-                        <option value="220" selected>中</option>
-                        <option value="320">大</option>
-                    </select>
-                </div>
-            `;
-            const sizeSelect = warehouseCoordTable.querySelector('#coordSizeSelect');
-            if (sizeSelect) {
-                const current = String(parseInt(warehouseCoordTable.style.height || getComputedStyle(warehouseCoordTable).height || '220', 10));
-                if (['130', '220', '320'].includes(current)) {
-                    sizeSelect.value = current;
-                }
-                sizeSelect.addEventListener('change', function () {
-                    warehouseCoordTable.style.height = `${this.value}px`;
-                });
-            }
-            const saveBtn = warehouseCoordTable.querySelector('#coordSaveBtn');
-            if (saveBtn) {
-                saveBtn.addEventListener('click', saveInlineCoordTable);
-            }
-        }
+    async function testConnection() {
+      setLoading(true);
+      try {
+        const res = await fetch('/api/connection-test');
+        const data = await res.json();
+        const level = data.status === 'success' ? 'warning' : 'error';
+        renderMessages([{
+          metric: 'connection-test',
+          level,
+          message: JSON.stringify(data, null, 2)
+        }]);
+      } catch (err) {
+        renderMessages([{ metric: 'connection-test', level: 'error', message: err.message || String(err) }]);
+      } finally {
+        setLoading(false);
+      }
+    }
 
-        async function saveInlineCoordTable() {
-            try {
-                const rows = latestProfiles
-                    .slice()
-                    .sort((a, b) => a.name.localeCompare(b.name))
-                    .map(item => {
-                        const coordsEl = warehouseCoordTable.querySelector(`input[data-name="${item.name}"][data-field="coords"]`);
-                        const includeEl = warehouseCoordTable.querySelector(`select[data-name="${item.name}"][data-field="include"]`);
-                        const parsed = parseCoordInput(coordsEl ? coordsEl.value : '');
-                        if (parsed === undefined) {
-                            throw new Error(`仓库 ${item.name} 的坐标格式错误，应为 lat,lng`);
-                        }
-                        return {
-                            name: item.name,
-                            coords: parsed,
-                            includeInVolume: includeEl ? includeEl.value === '1' : !!item.includeInVolume,
-                        };
-                    });
-
-                const res = await fetch('/warehouse-profiles', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ profiles: rows }),
-                });
-                const payload = await res.json();
-                if (payload.status !== 'success') {
-                    throw new Error(payload.message || '保存失败');
-                }
-                statusText.textContent = '仓库主数据保存成功，正在刷新图表...';
-                await loadAll();
-            } catch (err) {
-                statusText.textContent = `保存失败：${err.message}`;
-            }
-        }
-
-        function openEditor() {
-            const rows = latestProfiles
-                .slice()
-                .sort((a, b) => a.name.localeCompare(b.name))
-                .map((item, idx) => {
-                    const coordText = formatCoords(item.coords, 6) === 'N/A' ? '' : `${Number(item.coords[1]).toFixed(6)},${Number(item.coords[0]).toFixed(6)}`;
-                    return `
-                        <tr>
-                            <td>${item.name}</td>
-                            <td><input type="text" data-row="${idx}" data-field="coords" value="${coordText}" placeholder="lat,lng" /></td>
-                            <td><input type="checkbox" data-row="${idx}" data-field="include" ${item.includeInVolume ? 'checked' : ''} /></td>
-                        </tr>
-                    `;
-                }).join('');
-            editorBody.innerHTML = `
-                <table id="editorTable">
-                    <thead><tr><th>仓库</th><th>坐标(lat,lng)</th><th>参与统计</th></tr></thead>
-                    <tbody>${rows}</tbody>
-                </table>
-            `;
-            editorModalMask.style.display = 'flex';
-        }
-
-        function closeEditor() {
-            editorModalMask.style.display = 'none';
-        }
-
-        function parseCoordInput(text) {
-            const t = (text || '').trim();
-            if (!t) return null;
-            const parts = t.split(',').map(s => s.trim());
-            if (parts.length !== 2) return undefined;
-            const lat = Number(parts[0]);
-            const lng = Number(parts[1]);
-            if (!Number.isFinite(lat) || !Number.isFinite(lng)) return undefined;
-            return [lng, lat];
-        }
-
-        async function saveEditor() {
-            try {
-                const data = latestProfiles
-                    .slice()
-                    .sort((a, b) => a.name.localeCompare(b.name))
-                    .map((item, idx) => {
-                        const coordsEl = editorBody.querySelector(`input[data-row="${idx}"][data-field="coords"]`);
-                        const includeEl = editorBody.querySelector(`input[data-row="${idx}"][data-field="include"]`);
-                        const parsed = parseCoordInput(coordsEl ? coordsEl.value : '');
-                        if (parsed === undefined) {
-                            throw new Error(`仓库 ${item.name} 的坐标格式错误，应为 lat,lng`);
-                        }
-                        return {
-                            name: item.name,
-                            coords: parsed,
-                            includeInVolume: !!(includeEl && includeEl.checked),
-                        };
-                    });
-
-                const res = await fetch('/warehouse-profiles', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ profiles: data }),
-                });
-                const payload = await res.json();
-                if (payload.status !== 'success') {
-                    throw new Error(payload.message || '保存失败');
-                }
-                closeEditor();
-                await loadAll();
-            } catch (err) {
-                statusText.textContent = `保存失败：${err.message}`;
-            }
-        }
-
-        function renderTrend(payload) {
-            const totals = Array.isArray(payload.totals) ? payload.totals : [];
-            const xData = totals.map(item => item.date);
-            const yData = totals.map(item => Number(item.volume || 0));
-            const topChannels = Array.isArray(payload.channelTotals)
-                ? payload.channelTotals.slice(0, 5)
-                : [];
-
-            trendChart.setOption({
-                title: {
-                    text: `每日货柜趋势（${payload.filters?.days || 30}天）`,
-                    left: 'center',
-                    top: 10,
-                    textStyle: { fontSize: 16 }
-                },
-                tooltip: {
-                    trigger: 'axis',
-                    formatter: function (params) {
-                        if (!params.length) return '';
-                        const p = params[0];
-                        return `${p.axisValue}<br/>总货柜数: ${formatNumber(p.data)} 柜`;
-                    }
-                },
-                grid: { left: 60, right: 30, top: 50, bottom: 40 },
-                xAxis: {
-                    type: 'category',
-                    data: xData,
-                    boundaryGap: false
-                },
-                yAxis: {
-                    type: 'value',
-                    name: '柜'
-                },
-                series: [
-                    {
-                        name: '总货柜数',
-                        type: 'line',
-                        smooth: true,
-                        areaStyle: {},
-                        data: yData,
-                        lineStyle: { width: 2, color: '#1677ff' },
-                        itemStyle: { color: '#1677ff' }
-                    }
-                ],
-                graphic: topChannels.length ? [
-                    {
-                        type: 'text',
-                        right: 16,
-                        top: 12,
-                        style: {
-                            text: `Top渠道: ${topChannels.map(c => `${c.channel}(${formatNumber(c.total)})`).join(' / ')}`,
-                            fontSize: 12,
-                            fill: '#666'
-                        }
-                    }
-                ] : []
-            });
-        }
-
-        function markUpdatedTime() {
-            const now = new Date();
-            const hh = String(now.getHours()).padStart(2, '0');
-            const mm = String(now.getMinutes()).padStart(2, '0');
-            const ss = String(now.getSeconds()).padStart(2, '0');
-            lastUpdated.textContent = `更新: ${hh}:${mm}:${ss}`;
-        }
-
-        async function loadMap() {
-            const mapCandidates = [
-                '/static/nz.json',
-                '/nz.json',
-                'https://raw.githubusercontent.com/johan/world.geo.json/master/countries/NZL.geo.json'
-            ];
-            let lastErr = null;
-            for (const url of mapCandidates) {
-                try {
-                    const response = await fetch(url);
-                    if (!response.ok) {
-                        lastErr = new Error(`地图文件加载失败: ${url} (${response.status})`);
-                        continue;
-                    }
-                    const mapData = await response.json();
-                    echarts.registerMap('NZ', mapData);
-                    mapReady = true;
-                    return;
-                } catch (err) {
-                    lastErr = err;
-                }
-            }
-            throw new Error(`地图底图加载失败，请检查 nz.json（${lastErr ? lastErr.message : 'unknown error'}）`);
-        }
-
-        async function loadAll() {
-            try {
-                if (!mapReady) {
-                    statusText.textContent = '正在加载地图底图...';
-                    await loadMap();
-                }
-                statusText.textContent = '正在查询地图和趋势数据...';
-                const channels = getChannelsFromInput();
-                const days = Number(daysSelect.value || 30);
-                const [mapRes, trendRes] = await Promise.all([
-                    fetch(buildDataUrl(channels)),
-                    fetch(buildTrendUrl(channels, days))
-                ]);
-                const mapPayload = await mapRes.json();
-                const trendPayload = await trendRes.json();
-                if (mapPayload.status !== 'success') {
-                    throw new Error(mapPayload.message || '地图接口返回异常');
-                }
-                renderChart(mapPayload);
-                if (trendPayload.status === 'success') {
-                    renderTrend(trendPayload);
-                } else {
-                    statusText.textContent = `地图已更新；趋势图查询失败：${trendPayload.message || '未知错误'}`;
-                }
-                markUpdatedTime();
-            } catch (err) {
-                statusText.textContent = `加载失败：${err.message}`;
-            }
-        }
-
-        function setupAutoRefresh() {
-            if (refreshTimer) {
-                clearInterval(refreshTimer);
-                refreshTimer = null;
-            }
-            if (autoRefresh.checked) {
-                refreshTimer = setInterval(loadAll, 10 * 60 * 1000);
-            }
-        }
-
-        queryBtn.addEventListener('click', function () {
-            filterTouched = true;
-            loadAll();
+    function initEvents() {
+      refs.queryBtn.addEventListener('click', loadMetrics);
+      refs.clearBtn.addEventListener('click', () => {
+        refs.channelInput.value = '';
+        loadMetrics();
+      });
+      refs.testBtn.addEventListener('click', testConnection);
+      refs.channelInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') loadMetrics();
+      });
+      document.querySelectorAll('.dept-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          state.dept = btn.dataset.dept;
+          applyDeptVisibility();
+          Object.values(state.charts).forEach(chart => chart.resize());
         });
-        clearFilterBtn.addEventListener('click', function () {
-            filterTouched = false;
-            channelInput.value = '';
-            loadAll();
-        });
-        openEditorBtn.addEventListener('click', openEditor);
-        closeEditorBtn.addEventListener('click', closeEditor);
-        saveEditorBtn.addEventListener('click', saveEditor);
-        editorModalMask.addEventListener('click', function (e) {
-            if (e.target === editorModalMask) closeEditor();
-        });
-        channelInput.addEventListener('input', function () {
-            filterTouched = true;
-        });
-        channelInput.addEventListener('keydown', function (event) {
-            if (event.key === 'Enter') {
-                filterTouched = true;
-                loadAll();
-            }
-        });
-        daysSelect.addEventListener('change', loadAll);
-        autoRefresh.addEventListener('change', setupAutoRefresh);
-        window.addEventListener('resize', () => {
-            mapChart.resize();
-            trendChart.resize();
-        });
+      });
+      window.addEventListener('resize', () => {
+        Object.values(state.charts).forEach(chart => chart.resize());
+      });
+    }
 
-        setupAutoRefresh();
-        loadAll();
-    </script>
+    function initCharts() {
+      state.charts.supply = echarts.init(document.getElementById('chartSupply'));
+      state.charts.store = echarts.init(document.getElementById('chartStore'));
+      state.charts.warehouse = echarts.init(document.getElementById('chartWarehouse'));
+      state.charts.transit = echarts.init(document.getElementById('chartTransit'));
+      state.charts.forecast = echarts.init(document.getElementById('chartForecast'));
+    }
+
+    initCharts();
+    initEvents();
+    applyDeptVisibility();
+    loadMetrics();
+  </script>
 </body>
 </html>

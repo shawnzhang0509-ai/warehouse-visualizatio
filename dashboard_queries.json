@@ -1,0 +1,7 @@
+{
+  "supply_availability": "-- TODO_SQL: non-discontinue 产品各渠道有货率\n-- REQUIRED COLUMNS: channel, in_stock_rate\nSELECT TOP 1 'Retail' AS channel, 0.95 AS in_stock_rate;",
+  "store_display_rate": "-- TODO_SQL: non-discontinue 产品店面展示率\n-- REQUIRED COLUMNS: channel, display_rate\nSELECT TOP 1 'Retail' AS channel, 0.88 AS display_rate;",
+  "warehouse_capacity": "-- TODO_SQL: 仓库容积（占用与总容量）\n-- REQUIRED COLUMNS: warehouse, used_volume_m3, total_capacity_m3\nSELECT TOP 1 'Main Warehouse' AS warehouse, 5000.0 AS used_volume_m3, 8000.0 AS total_capacity_m3;",
+  "in_transit_by_channel": "-- TODO_SQL: 各渠道在途（推荐返回货柜数）\n-- REQUIRED COLUMNS: channel, in_transit_containers (or in_transit_m3)\nSELECT TOP 1 'Retail' AS channel, 23.0 AS in_transit_containers;",
+  "forecast_in_transit": "-- TODO_SQL: 在途预计趋势\n-- REQUIRED COLUMNS: forecast_date, expected_containers (or expected_m3), channel(optional)\nSELECT CAST(GETDATE() AS date) AS forecast_date, 25.0 AS expected_containers, 'Retail' AS channel;"
+}
