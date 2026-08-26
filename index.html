@@ -3,597 +3,634 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>运营看板（Azure SQL）</title>
-  <script src="./echarts.min.js"></script>
+  <title>多地区 SQL 执行器</title>
   <style>
     :root {
-      --bg: #f3f6fb;
+      --bg: #f5f7fb;
       --panel: #ffffff;
+      --line: #d8dee9;
       --text: #1f2937;
       --muted: #6b7280;
-      --primary: #2563eb;
+      --blue: #2f7bd9;
+      --blue-dark: #1f63b5;
       --ok: #16a34a;
       --warn: #f59e0b;
       --err: #dc2626;
-      --border: #e5e7eb;
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-      color: var(--text);
       background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
     }
     .container {
-      max-width: 1400px;
-      margin: 0 auto;
-      padding: 16px;
+      width: min(1200px, calc(100% - 24px));
+      margin: 12px auto 24px;
       display: flex;
       flex-direction: column;
       gap: 12px;
     }
     .panel {
       background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      padding: 14px 16px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.03);
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      padding: 12px;
     }
-    .topbar {
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: space-between;
-      align-items: center;
-      gap: 12px;
-    }
-    .title {
-      margin: 0;
-      font-size: 22px;
+    .panel-title {
+      margin: 0 0 10px;
+      font-size: 18px;
       font-weight: 700;
     }
-    .subtitle {
+    .hint {
       color: var(--muted);
-      font-size: 13px;
-      margin-top: 6px;
+      font-size: 12px;
     }
-    .filters {
+    .row {
       display: flex;
-      flex-wrap: wrap;
       align-items: center;
-      gap: 8px;
+      gap: 10px;
+      flex-wrap: wrap;
     }
-    input[type="text"] {
-      width: 260px;
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 8px 10px;
-      font-size: 13px;
+    .region-checks {
+      display: flex;
+      gap: 18px;
+      flex-wrap: wrap;
+      margin-top: 4px;
+    }
+    .region-check {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 14px;
+    }
+    .config-grid {
+      display: grid;
+      grid-template-columns: 120px 1fr auto;
+      gap: 10px 12px;
+      align-items: center;
+    }
+    .label {
+      font-size: 14px;
+      color: #374151;
+    }
+    select,
+    input[type="text"],
+    input[type="number"],
+    textarea {
+      width: 100%;
+      border: 1px solid #bfc7d4;
+      border-radius: 2px;
+      padding: 7px 8px;
+      font-size: 14px;
+      color: #111827;
+      background: #fff;
+    }
+    textarea {
+      min-height: 62px;
+      resize: vertical;
+      line-height: 1.35;
     }
     button {
-      border: 1px solid var(--border);
+      border: 1px solid #bfc7d4;
       background: #fff;
-      border-radius: 8px;
+      color: var(--text);
+      font-size: 14px;
+      border-radius: 2px;
       padding: 8px 12px;
       cursor: pointer;
-      font-size: 13px;
-      color: var(--text);
+      transition: 0.12s ease;
     }
+    button:hover { border-color: #96a3b8; }
     button.primary {
-      background: var(--primary);
+      background: var(--blue);
       color: #fff;
-      border-color: var(--primary);
+      border-color: var(--blue);
+    }
+    button.primary:hover {
+      background: var(--blue-dark);
+      border-color: var(--blue-dark);
     }
     button:disabled {
       opacity: 0.6;
       cursor: default;
     }
-    .dept-tabs {
+    .btn-group {
       display: flex;
-      gap: 8px;
+      gap: 10px;
       flex-wrap: wrap;
     }
-    .dept-tabs button.active {
-      background: #dbeafe;
-      border-color: #93c5fd;
-      color: #1e40af;
-      font-weight: 600;
-    }
-    .kpis {
-      display: grid;
-      grid-template-columns: repeat(5, minmax(160px, 1fr));
-      gap: 10px;
-    }
-    .kpi {
-      border: 1px solid var(--border);
-      border-radius: 8px;
-      padding: 10px;
-      background: #fff;
-    }
-    .kpi .label {
-      font-size: 12px;
-      color: var(--muted);
-      margin-bottom: 6px;
-    }
-    .kpi .value {
-      font-size: 22px;
-      font-weight: 700;
-      line-height: 1.1;
-    }
-    .kpi .hint {
-      margin-top: 4px;
-      color: var(--muted);
-      font-size: 12px;
-    }
-    .charts {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 12px;
-    }
-    .chart-card {
-      min-height: 300px;
+    .status-line {
       display: flex;
-      flex-direction: column;
-    }
-    .chart-head {
-      display: flex;
-      justify-content: space-between;
       align-items: center;
-      margin-bottom: 8px;
-      gap: 8px;
+      justify-content: space-between;
+      gap: 10px;
+      flex-wrap: wrap;
+      font-size: 14px;
     }
-    .chart-title {
-      margin: 0;
-      font-size: 15px;
+    .status-dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 99px;
+      background: #9ca3af;
+      display: inline-block;
+      margin-right: 6px;
     }
-    .chart-source {
-      font-size: 12px;
-      color: var(--muted);
+    .status-dot.ok { background: var(--ok); }
+    .status-dot.warn { background: var(--warn); }
+    .status-dot.err { background: var(--err); }
+    .progress-wrap {
+      width: 100%;
+      border: 1px solid #c7cfdb;
+      background: #f3f4f6;
+      border-radius: 2px;
+      height: 26px;
+      overflow: hidden;
+      position: relative;
     }
-    .chart {
-      flex: 1;
-      min-height: 250px;
+    .progress-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #93c5fd, #3b82f6);
+      transition: width 0.25s ease;
     }
-    .messages {
+    .progress-text {
+      position: absolute;
+      top: 0;
+      right: 8px;
+      height: 100%;
       display: flex;
-      flex-direction: column;
-      gap: 6px;
+      align-items: center;
       font-size: 13px;
+      color: #111827;
+      text-shadow: 0 0 2px rgba(255,255,255,0.8);
     }
-    .msg {
-      padding: 8px 10px;
-      border-radius: 8px;
-      border: 1px solid;
+    .log-box {
+      margin-top: 8px;
+      background: #0f172a;
+      color: #e5e7eb;
+      border: 1px solid #1e293b;
+      border-radius: 4px;
+      padding: 10px;
+      min-height: 240px;
+      max-height: 360px;
+      overflow: auto;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+      font-size: 12px;
+      line-height: 1.45;
       white-space: pre-wrap;
     }
-    .msg.warning {
-      border-color: #fcd34d;
-      background: #fffbeb;
-      color: #92400e;
+    .template-list {
+      margin-top: 8px;
+      border: 1px solid #e5e7eb;
+      border-radius: 4px;
+      padding: 8px;
+      background: #fafafa;
+      font-size: 13px;
+      max-height: 140px;
+      overflow: auto;
     }
-    .msg.error {
-      border-color: #fca5a5;
-      background: #fef2f2;
-      color: #991b1b;
+    .template-item {
+      padding: 2px 0;
     }
-    .footer-note {
-      font-size: 12px;
-      color: var(--muted);
-      line-height: 1.6;
-    }
-    .hidden { display: none !important; }
-    @media (max-width: 1100px) {
-      .kpis { grid-template-columns: 1fr 1fr; }
-      .charts { grid-template-columns: 1fr; }
-      input[type="text"] { width: 100%; max-width: 360px; }
+    @media (max-width: 900px) {
+      .config-grid {
+        grid-template-columns: 1fr;
+      }
+      .config-grid > .label {
+        margin-top: 4px;
+      }
     }
   </style>
 </head>
 <body>
   <div class="container">
-    <section class="panel topbar">
-      <div>
-        <h1 class="title">公司运营看板（Azure SQL）</h1>
-        <div id="subtitle" class="subtitle">按部门查看：供应链 / 店面 / 仓库。支持渠道过滤。</div>
+    <section class="panel">
+      <h1 class="panel-title">多地区 SQL 执行器（txt 模板）</h1>
+      <div class="hint">支持直接填写 mssql+pymssql 连接串；SQL 模板仅读取 <strong>.txt</strong> 文件。</div>
+    </section>
+
+    <section class="panel">
+      <div class="label"><strong>这次要跑的地区（可多选，一次执行）</strong></div>
+      <div id="regionChecks" class="region-checks"></div>
+    </section>
+
+    <section class="panel">
+      <div class="label"><strong>地区配置（每个地区自己的连接串 / TXT SQL目录 / 输出目录）</strong></div>
+      <div class="row" style="margin: 10px 0 12px;">
+        <span class="label">正在编辑</span>
+        <select id="editRegionSelect" style="max-width: 220px;"></select>
+        <span id="configSavedHint" class="hint"></span>
       </div>
-      <div class="filters">
-        <input id="channelInput" type="text" placeholder="渠道过滤（逗号分隔，例如 J96,130）">
-        <button id="queryBtn" class="primary">查询</button>
-        <button id="clearBtn">清空过滤</button>
-        <button id="testBtn">测试数据库连接</button>
+
+      <div class="config-grid">
+        <div class="label">数据库连接</div>
+        <textarea id="connInput" spellcheck="false"></textarea>
+        <button id="testConnBtn">测试连接</button>
+
+        <div class="label">TXT 模板目录</div>
+        <input id="templateDirInput" type="text" placeholder="例如 Data-NZ">
+        <button id="scanTemplateBtn">读取TXT</button>
+
+        <div class="label">输出文件夹</div>
+        <input id="outputDirInput" type="text" placeholder="例如 Output-NZ">
+        <button id="openOutputHintBtn">提示路径</button>
+      </div>
+
+      <div id="templateList" class="template-list">尚未读取模板目录。</div>
+    </section>
+
+    <section class="panel">
+      <div class="label"><strong>自动调度设置（页面打开时生效）</strong></div>
+      <div class="row" style="margin: 10px 0;">
+        <span class="label">执行频率</span>
+        <input id="freqValueInput" type="number" min="1" value="30" style="max-width: 90px;">
+        <select id="freqUnitSelect" style="max-width: 110px;">
+          <option value="minute">分钟</option>
+          <option value="hour">小时</option>
+        </select>
+        <span class="label">下次执行</span>
+        <span id="nextRunText" class="hint">未调度</span>
+      </div>
+
+      <div class="btn-group">
+        <button id="runNowBtn" class="primary">立即执行一次</button>
+        <button id="startScheduleBtn" class="primary">开始自动调度</button>
+        <button id="stopScheduleBtn">停止自动调度</button>
+        <button id="saveConfigBtn">保存配置</button>
       </div>
     </section>
 
     <section class="panel">
-      <div class="dept-tabs">
-        <button class="dept-btn active" data-dept="all">全部</button>
-        <button class="dept-btn" data-dept="supply">供应链</button>
-        <button class="dept-btn" data-dept="store">店面</button>
-        <button class="dept-btn" data-dept="warehouse">仓库</button>
+      <div class="status-line">
+        <div>
+          <span id="statusDot" class="status-dot"></span>
+          <span id="statusText">就绪</span>
+        </div>
+        <div id="summaryText" class="hint">尚未执行任务</div>
+      </div>
+      <div class="progress-wrap" style="margin-top: 10px;">
+        <div id="progressBar" class="progress-bar"></div>
+        <div id="progressText" class="progress-text">0%</div>
       </div>
     </section>
 
     <section class="panel">
-      <div class="kpis">
-        <div class="kpi">
-          <div class="label">供应链有货率（Non-Discontinue）</div>
-          <div id="kpiSupply" class="value">-</div>
-          <div class="hint">各渠道平均</div>
-        </div>
-        <div class="kpi">
-          <div class="label">店面展示率（Non-Discontinue）</div>
-          <div id="kpiStore" class="value">-</div>
-          <div class="hint">各渠道平均</div>
-        </div>
-        <div class="kpi">
-          <div class="label">仓库占用率</div>
-          <div id="kpiWarehouseOcc" class="value">-</div>
-          <div id="kpiWarehouseVolume" class="hint">- / - 柜</div>
-        </div>
-        <div class="kpi">
-          <div class="label">在途总量</div>
-          <div id="kpiTransit" class="value">-</div>
-          <div class="hint">单位：柜（或 SQL 返回单位）</div>
-        </div>
-        <div class="kpi">
-          <div class="label">预计总量</div>
-          <div id="kpiForecast" class="value">-</div>
-          <div class="hint">预测窗口汇总</div>
-        </div>
-      </div>
-    </section>
-
-    <section id="messagePanel" class="panel hidden">
-      <div id="messages" class="messages"></div>
-    </section>
-
-    <section class="charts">
-      <div class="panel chart-card" data-dept="supply">
-        <div class="chart-head">
-          <h3 class="chart-title">供应链：渠道有货率</h3>
-          <span id="srcSupply" class="chart-source">数据源：-</span>
-        </div>
-        <div id="chartSupply" class="chart"></div>
-      </div>
-      <div class="panel chart-card" data-dept="store">
-        <div class="chart-head">
-          <h3 class="chart-title">店面：渠道展示率</h3>
-          <span id="srcStore" class="chart-source">数据源：-</span>
-        </div>
-        <div id="chartStore" class="chart"></div>
-      </div>
-      <div class="panel chart-card" data-dept="warehouse">
-        <div class="chart-head">
-          <h3 class="chart-title">仓库：占用与容量（货柜）</h3>
-          <span id="srcWarehouse" class="chart-source">数据源：-</span>
-        </div>
-        <div id="chartWarehouse" class="chart"></div>
-      </div>
-      <div class="panel chart-card" data-dept="supply">
-        <div class="chart-head">
-          <h3 class="chart-title">供应链：各渠道在途</h3>
-          <span id="srcTransit" class="chart-source">数据源：-</span>
-        </div>
-        <div id="chartTransit" class="chart"></div>
-      </div>
-      <div class="panel chart-card" data-dept="warehouse">
-        <div class="chart-head">
-          <h3 class="chart-title">仓库：在途预计趋势</h3>
-          <span id="srcForecast" class="chart-source">数据源：-</span>
-        </div>
-        <div id="chartForecast" class="chart"></div>
-      </div>
-    </section>
-
-    <section class="panel footer-note">
-      SQL 配置文件：<code>/workspace/dashboard_queries.json</code><br>
-      你把各指标 SQL 填进去后，点“查询”即可实时出图。后端会自动识别常见列名，并把 <code>*_m3</code> 字段按 /69 转成货柜数。
+      <div class="label"><strong>执行日志</strong></div>
+      <div id="logBox" class="log-box">等待执行...</div>
     </section>
   </div>
 
   <script>
     const state = {
-      dept: 'all',
-      channels: [],
-      charts: {},
-      loading: false
+      config: null,
+      regionOrder: ["NZ", "AU", "CA"],
+      editRegion: "NZ",
+      selectedRegions: new Set(["NZ"]),
+      busy: false,
+      timer: null
     };
 
     const refs = {
-      subtitle: document.getElementById('subtitle'),
-      channelInput: document.getElementById('channelInput'),
-      queryBtn: document.getElementById('queryBtn'),
-      clearBtn: document.getElementById('clearBtn'),
-      testBtn: document.getElementById('testBtn'),
-      messagePanel: document.getElementById('messagePanel'),
-      messages: document.getElementById('messages'),
-      kpiSupply: document.getElementById('kpiSupply'),
-      kpiStore: document.getElementById('kpiStore'),
-      kpiWarehouseOcc: document.getElementById('kpiWarehouseOcc'),
-      kpiWarehouseVolume: document.getElementById('kpiWarehouseVolume'),
-      kpiTransit: document.getElementById('kpiTransit'),
-      kpiForecast: document.getElementById('kpiForecast'),
-      srcSupply: document.getElementById('srcSupply'),
-      srcStore: document.getElementById('srcStore'),
-      srcWarehouse: document.getElementById('srcWarehouse'),
-      srcTransit: document.getElementById('srcTransit'),
-      srcForecast: document.getElementById('srcForecast')
+      regionChecks: document.getElementById("regionChecks"),
+      editRegionSelect: document.getElementById("editRegionSelect"),
+      connInput: document.getElementById("connInput"),
+      templateDirInput: document.getElementById("templateDirInput"),
+      outputDirInput: document.getElementById("outputDirInput"),
+      scanTemplateBtn: document.getElementById("scanTemplateBtn"),
+      openOutputHintBtn: document.getElementById("openOutputHintBtn"),
+      testConnBtn: document.getElementById("testConnBtn"),
+      saveConfigBtn: document.getElementById("saveConfigBtn"),
+      runNowBtn: document.getElementById("runNowBtn"),
+      startScheduleBtn: document.getElementById("startScheduleBtn"),
+      stopScheduleBtn: document.getElementById("stopScheduleBtn"),
+      freqValueInput: document.getElementById("freqValueInput"),
+      freqUnitSelect: document.getElementById("freqUnitSelect"),
+      nextRunText: document.getElementById("nextRunText"),
+      configSavedHint: document.getElementById("configSavedHint"),
+      templateList: document.getElementById("templateList"),
+      logBox: document.getElementById("logBox"),
+      statusDot: document.getElementById("statusDot"),
+      statusText: document.getElementById("statusText"),
+      summaryText: document.getElementById("summaryText"),
+      progressBar: document.getElementById("progressBar"),
+      progressText: document.getElementById("progressText")
     };
 
-    function fmtNum(v, digits = 1) {
-      if (v === null || v === undefined || Number.isNaN(Number(v))) return '-';
-      return Number(v).toLocaleString(undefined, { maximumFractionDigits: digits, minimumFractionDigits: digits });
+    function nowText() {
+      return new Date().toLocaleTimeString();
     }
 
-    function fmtPct(v) {
-      if (v === null || v === undefined || Number.isNaN(Number(v))) return '-';
-      return `${fmtNum(v, 1)}%`;
+    function appendLog(text) {
+      refs.logBox.textContent += `\n[${nowText()}] ${text}`;
+      refs.logBox.scrollTop = refs.logBox.scrollHeight;
     }
 
-    function parseChannels() {
-      const txt = refs.channelInput.value || '';
-      return txt.split(',')
-        .map(v => v.trim())
-        .filter(Boolean);
+    function clearLog(text) {
+      refs.logBox.textContent = `[${nowText()}] ${text}`;
     }
 
-    function setLoading(v) {
-      state.loading = v;
-      refs.queryBtn.disabled = v;
-      refs.clearBtn.disabled = v;
-      refs.testBtn.disabled = v;
-      refs.queryBtn.textContent = v ? '查询中...' : '查询';
+    function setBusy(flag) {
+      state.busy = flag;
+      const disabled = flag;
+      refs.scanTemplateBtn.disabled = disabled;
+      refs.testConnBtn.disabled = disabled;
+      refs.saveConfigBtn.disabled = disabled;
+      refs.runNowBtn.disabled = disabled;
+      refs.startScheduleBtn.disabled = disabled;
     }
 
-    function sourceLabel(metric) {
-      if (!metric) return '数据源：-';
-      if (metric.source === 'database') return '数据源：数据库';
-      if (metric.source === 'sample') return '数据源：示例';
-      if (metric.source === 'error') return '数据源：失败';
-      return `数据源：${metric.source || '-'}`;
+    function setStatus(kind, text) {
+      refs.statusDot.className = "status-dot";
+      if (kind === "ok") refs.statusDot.classList.add("ok");
+      if (kind === "warn") refs.statusDot.classList.add("warn");
+      if (kind === "err") refs.statusDot.classList.add("err");
+      refs.statusText.textContent = text;
     }
 
-    function renderMessages(items) {
-      if (!items || !items.length) {
-        refs.messagePanel.classList.add('hidden');
-        refs.messages.innerHTML = '';
-        return;
-      }
-      refs.messagePanel.classList.remove('hidden');
-      refs.messages.innerHTML = '';
-      for (const item of items) {
-        const div = document.createElement('div');
-        div.className = `msg ${item.level === 'error' ? 'error' : 'warning'}`;
-        div.textContent = `[${item.metric}] ${item.message}`;
-        refs.messages.appendChild(div);
-      }
+    function setProgress(value) {
+      const safe = Math.max(0, Math.min(100, Number(value) || 0));
+      refs.progressBar.style.width = `${safe}%`;
+      refs.progressText.textContent = `${safe.toFixed(0)}%`;
     }
 
-    function setNoData(chart, title, subtitle) {
-      chart.setOption({
-        title: { text: title, subtext: subtitle, left: 'center', top: 'center' },
-        xAxis: { show: false },
-        yAxis: { show: false },
-        series: []
-      }, true);
+    function currentRegionConfig() {
+      if (!state.config) return null;
+      return state.config.regions[state.editRegion];
     }
 
-    function renderSupply(rows) {
-      const chart = state.charts.supply;
-      if (!rows.length) return setNoData(chart, '无数据', '请检查 SQL 或渠道过滤');
-      chart.setOption({
-        tooltip: { trigger: 'axis' },
-        grid: { left: 50, right: 20, top: 30, bottom: 50 },
-        xAxis: { type: 'category', data: rows.map(r => r.channel) },
-        yAxis: { type: 'value', min: 0, max: 100, axisLabel: { formatter: '{value}%' } },
-        series: [{
-          type: 'bar',
-          data: rows.map(r => r.in_stock_rate),
-          itemStyle: { color: '#2563eb' },
-          label: { show: true, position: 'top', formatter: '{c}%' }
-        }]
-      }, true);
-    }
-
-    function renderStore(rows) {
-      const chart = state.charts.store;
-      if (!rows.length) return setNoData(chart, '无数据', '请检查 SQL 或渠道过滤');
-      chart.setOption({
-        tooltip: { trigger: 'axis' },
-        grid: { left: 50, right: 20, top: 30, bottom: 50 },
-        xAxis: { type: 'category', data: rows.map(r => r.channel) },
-        yAxis: { type: 'value', min: 0, max: 100, axisLabel: { formatter: '{value}%' } },
-        series: [{
-          type: 'bar',
-          data: rows.map(r => r.display_rate),
-          itemStyle: { color: '#16a34a' },
-          label: { show: true, position: 'top', formatter: '{c}%' }
-        }]
-      }, true);
-    }
-
-    function renderWarehouse(rows) {
-      const chart = state.charts.warehouse;
-      if (!rows.length) return setNoData(chart, '无数据', '请检查 SQL 输出列');
-      chart.setOption({
-        tooltip: { trigger: 'axis' },
-        legend: { data: ['占用', '容量'] },
-        grid: { left: 50, right: 20, top: 30, bottom: 70 },
-        xAxis: {
-          type: 'category',
-          data: rows.map(r => r.warehouse),
-          axisLabel: { rotate: 20 }
-        },
-        yAxis: { type: 'value', name: '柜' },
-        series: [
-          {
-            name: '占用',
-            type: 'bar',
-            data: rows.map(r => r.used_containers),
-            itemStyle: { color: '#f59e0b' }
-          },
-          {
-            name: '容量',
-            type: 'bar',
-            data: rows.map(r => r.total_containers),
-            itemStyle: { color: '#94a3b8' }
+    function renderRegionChecks() {
+      refs.regionChecks.innerHTML = "";
+      state.regionOrder.forEach((region) => {
+        const cfg = state.config.regions[region] || {};
+        const label = cfg.label || region;
+        const wrap = document.createElement("label");
+        wrap.className = "region-check";
+        const check = document.createElement("input");
+        check.type = "checkbox";
+        check.checked = state.selectedRegions.has(region);
+        check.addEventListener("change", () => {
+          if (check.checked) state.selectedRegions.add(region);
+          else state.selectedRegions.delete(region);
+          if (!state.selectedRegions.size) {
+            state.selectedRegions.add(region);
+            check.checked = true;
           }
-        ]
-      }, true);
-    }
-
-    function renderTransit(rows) {
-      const chart = state.charts.transit;
-      if (!rows.length) return setNoData(chart, '无数据', '请检查 SQL 或渠道过滤');
-      chart.setOption({
-        tooltip: { trigger: 'axis' },
-        grid: { left: 50, right: 20, top: 30, bottom: 50 },
-        xAxis: { type: 'category', data: rows.map(r => r.channel) },
-        yAxis: { type: 'value', name: '柜' },
-        series: [{
-          type: 'bar',
-          data: rows.map(r => r.in_transit_qty),
-          itemStyle: { color: '#7c3aed' },
-          label: { show: true, position: 'top' }
-        }]
-      }, true);
-    }
-
-    function renderForecast(rows) {
-      const chart = state.charts.forecast;
-      if (!rows.length) return setNoData(chart, '无数据', '请检查 SQL 输出列');
-      const buckets = {};
-      for (const row of rows) {
-        if (!buckets[row.date]) buckets[row.date] = 0;
-        buckets[row.date] += Number(row.expected_qty || 0);
-      }
-      const dates = Object.keys(buckets).sort();
-      const values = dates.map(d => Number(buckets[d].toFixed(2)));
-      chart.setOption({
-        tooltip: { trigger: 'axis' },
-        grid: { left: 50, right: 20, top: 30, bottom: 50 },
-        xAxis: { type: 'category', data: dates },
-        yAxis: { type: 'value', name: '柜' },
-        series: [{
-          type: 'line',
-          data: values,
-          smooth: true,
-          symbolSize: 8,
-          lineStyle: { width: 3, color: '#dc2626' },
-          itemStyle: { color: '#dc2626' }
-        }]
-      }, true);
-    }
-
-    function applyDeptVisibility() {
-      const cards = document.querySelectorAll('.chart-card');
-      for (const card of cards) {
-        const dept = card.dataset.dept;
-        const show = state.dept === 'all' || dept === state.dept;
-        card.classList.toggle('hidden', !show);
-      }
-      document.querySelectorAll('.dept-btn').forEach(btn => {
-        btn.classList.toggle('active', btn.dataset.dept === state.dept);
+        });
+        const text = document.createElement("span");
+        text.textContent = `${label} (${region})`;
+        wrap.appendChild(check);
+        wrap.appendChild(text);
+        refs.regionChecks.appendChild(wrap);
       });
     }
 
-    function render(payload) {
-      const summary = payload.summary || {};
-      refs.kpiSupply.textContent = fmtPct(summary.supply_in_stock_rate);
-      refs.kpiStore.textContent = fmtPct(summary.store_display_rate);
-      refs.kpiWarehouseOcc.textContent = fmtPct(summary.warehouse_occupancy_rate);
-      refs.kpiWarehouseVolume.textContent = `${fmtNum(summary.warehouse_used_containers)} / ${fmtNum(summary.warehouse_total_containers)} 柜`;
-      refs.kpiTransit.textContent = fmtNum(summary.in_transit_total);
-      refs.kpiForecast.textContent = fmtNum(summary.forecast_total);
-
-      const metrics = payload.metrics || {};
-      refs.srcSupply.textContent = sourceLabel(metrics.supply_availability);
-      refs.srcStore.textContent = sourceLabel(metrics.store_display_rate);
-      refs.srcWarehouse.textContent = sourceLabel(metrics.warehouse_capacity);
-      refs.srcTransit.textContent = sourceLabel(metrics.in_transit_by_channel);
-      refs.srcForecast.textContent = sourceLabel(metrics.forecast_in_transit);
-
-      const channels = (payload.filters && payload.filters.channels) || [];
-      refs.subtitle.textContent = channels.length
-        ? `当前渠道过滤：${channels.join(', ')} | 更新时间：${payload.asOf || '-'}`
-        : `当前渠道过滤：全部 | 更新时间：${payload.asOf || '-'}`;
-
-      renderMessages(payload.diagnostics || []);
-      renderSupply((metrics.supply_availability && metrics.supply_availability.rows) || []);
-      renderStore((metrics.store_display_rate && metrics.store_display_rate.rows) || []);
-      renderWarehouse((metrics.warehouse_capacity && metrics.warehouse_capacity.rows) || []);
-      renderTransit((metrics.in_transit_by_channel && metrics.in_transit_by_channel.rows) || []);
-      renderForecast((metrics.forecast_in_transit && metrics.forecast_in_transit.rows) || []);
+    function renderEditRegionOptions() {
+      refs.editRegionSelect.innerHTML = "";
+      state.regionOrder.forEach((region) => {
+        const cfg = state.config.regions[region] || {};
+        const opt = document.createElement("option");
+        opt.value = region;
+        opt.textContent = `${region} ${cfg.label || ""}`.trim();
+        refs.editRegionSelect.appendChild(opt);
+      });
+      refs.editRegionSelect.value = state.editRegion;
     }
 
-    async function loadMetrics() {
-      setLoading(true);
-      state.channels = parseChannels();
-      const params = new URLSearchParams();
-      if (state.channels.length) params.set('channels', state.channels.join(','));
-      const url = `/api/metrics${params.toString() ? `?${params.toString()}` : ''}`;
+    function renderRegionForm() {
+      const cfg = currentRegionConfig() || {};
+      refs.connInput.value = cfg.connection_uri || "";
+      refs.templateDirInput.value = cfg.template_dir || "";
+      refs.outputDirInput.value = cfg.output_dir || "";
+      refs.templateList.textContent = "尚未读取模板目录。";
+    }
+
+    function syncFormToState() {
+      const cfg = currentRegionConfig();
+      if (!cfg) return;
+      cfg.connection_uri = refs.connInput.value.trim();
+      cfg.template_dir = refs.templateDirInput.value.trim();
+      cfg.output_dir = refs.outputDirInput.value.trim();
+      refs.configSavedHint.textContent = "有未保存改动";
+    }
+
+    async function fetchConfig() {
+      const res = await fetch("/api/runner-config");
+      const data = await res.json();
+      if (!res.ok || data.status !== "success") {
+        throw new Error(data.message || "读取配置失败");
+      }
+      state.config = data.data;
+      if (state.config.settings) {
+        refs.freqValueInput.value = state.config.settings.frequency_value || 30;
+        refs.freqUnitSelect.value = state.config.settings.frequency_unit || "minute";
+      }
+      refs.nextRunText.textContent = data.data.meta?.nextRunHint || "未调度";
+      renderRegionChecks();
+      renderEditRegionOptions();
+      renderRegionForm();
+      refs.configSavedHint.textContent = "已加载";
+      setStatus("ok", "配置已加载");
+    }
+
+    async function saveConfig() {
+      syncFormToState();
+      state.config.settings = state.config.settings || {};
+      state.config.settings.frequency_value = Number(refs.freqValueInput.value || 30);
+      state.config.settings.frequency_unit = refs.freqUnitSelect.value;
+
+      setBusy(true);
       try {
-        const res = await fetch(url);
-        const payload = await res.json();
-        render(payload);
+        const res = await fetch("/api/runner-config", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(state.config)
+        });
+        const data = await res.json();
+        if (!res.ok || data.status !== "success") {
+          throw new Error(data.message || "保存失败");
+        }
+        state.config = data.data;
+        refs.configSavedHint.textContent = "已保存";
+        appendLog("配置保存成功。");
+        setStatus("ok", "配置已保存");
       } catch (err) {
-        renderMessages([{ metric: 'network', level: 'error', message: err.message || String(err) }]);
+        appendLog(`配置保存失败: ${err.message || err}`);
+        setStatus("err", "配置保存失败");
       } finally {
-        setLoading(false);
+        setBusy(false);
+      }
+    }
+
+    async function scanTemplates() {
+      syncFormToState();
+      setBusy(true);
+      try {
+        const url = `/api/runner/templates?region=${encodeURIComponent(state.editRegion)}`;
+        const res = await fetch(url);
+        const data = await res.json();
+        if (!res.ok || data.status !== "success") {
+          throw new Error(data.message || "读取模板失败");
+        }
+        if (!data.files.length) {
+          refs.templateList.textContent = `目录 ${data.templateDir} 下没有 .txt 模板。`;
+        } else {
+          refs.templateList.innerHTML = data.files.map(name => `<div class="template-item">${name}</div>`).join("");
+        }
+        appendLog(`[${state.editRegion}] 找到 ${data.count} 个 txt 模板。`);
+        setStatus("ok", "模板读取成功");
+      } catch (err) {
+        refs.templateList.textContent = `读取失败：${err.message || err}`;
+        appendLog(`[${state.editRegion}] 模板读取失败: ${err.message || err}`);
+        setStatus("err", "模板读取失败");
+      } finally {
+        setBusy(false);
       }
     }
 
     async function testConnection() {
-      setLoading(true);
+      syncFormToState();
+      setBusy(true);
       try {
-        const res = await fetch('/api/connection-test');
+        const res = await fetch("/api/runner/test-connection", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ region: state.editRegion })
+        });
         const data = await res.json();
-        const level = data.status === 'success' ? 'warning' : 'error';
-        renderMessages([{
-          metric: 'connection-test',
-          level,
-          message: JSON.stringify(data, null, 2)
-        }]);
+        if (data.status !== "success") {
+          throw new Error(data.message || "连接失败");
+        }
+        appendLog(`[${state.editRegion}] 连接成功。驱动: ${(data.drivers || []).join(", ") || "-"}`);
+        setStatus("ok", "连接测试成功");
       } catch (err) {
-        renderMessages([{ metric: 'connection-test', level: 'error', message: err.message || String(err) }]);
+        appendLog(`[${state.editRegion}] 连接测试失败: ${err.message || err}`);
+        setStatus("err", "连接测试失败");
       } finally {
-        setLoading(false);
+        setBusy(false);
       }
     }
 
-    function initEvents() {
-      refs.queryBtn.addEventListener('click', loadMetrics);
-      refs.clearBtn.addEventListener('click', () => {
-        refs.channelInput.value = '';
-        loadMetrics();
-      });
-      refs.testBtn.addEventListener('click', testConnection);
-      refs.channelInput.addEventListener('keydown', (e) => {
-        if (e.key === 'Enter') loadMetrics();
-      });
-      document.querySelectorAll('.dept-btn').forEach(btn => {
-        btn.addEventListener('click', () => {
-          state.dept = btn.dataset.dept;
-          applyDeptVisibility();
-          Object.values(state.charts).forEach(chart => chart.resize());
+    function selectedRegionList() {
+      return Array.from(state.selectedRegions);
+    }
+
+    function applyRunSummary(payload) {
+      const summary = payload.summary || {};
+      refs.summaryText.textContent = `地区: ${summary.regions || 0} | 成功: ${summary.success || 0} | 部分成功: ${summary.partial || 0} | 警告: ${summary.warning || 0} | 失败: ${summary.error || 0}`;
+      if (payload.status === "success") setStatus("ok", "执行完成");
+      else if (payload.status === "partial") setStatus("warn", "执行部分成功");
+      else setStatus("err", "执行失败");
+    }
+
+    async function runNow(fromSchedule = false) {
+      syncFormToState();
+      const regions = selectedRegionList();
+      if (!regions.length) {
+        setStatus("err", "请至少选择一个地区");
+        return;
+      }
+
+      setBusy(true);
+      setStatus("warn", fromSchedule ? "自动调度执行中..." : "执行中...");
+      setProgress(15);
+      clearLog(`开始执行地区: ${regions.join(", ")}`);
+      try {
+        const res = await fetch("/api/runner/run", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ regions })
         });
+        setProgress(70);
+        const data = await res.json();
+        if (!res.ok) {
+          throw new Error(data.message || "执行失败");
+        }
+
+        (data.results || []).forEach((regionResult) => {
+          appendLog(`=== ${regionResult.region} / ${regionResult.label} / ${regionResult.status} ===`);
+          (regionResult.logs || []).forEach((line) => appendLog(line));
+        });
+
+        applyRunSummary(data);
+        setProgress(100);
+      } catch (err) {
+        appendLog(`执行失败: ${err.message || err}`);
+        setStatus("err", "执行失败");
+        setProgress(100);
+      } finally {
+        setBusy(false);
+      }
+    }
+
+    function stopSchedule() {
+      if (state.timer) {
+        clearInterval(state.timer);
+        state.timer = null;
+      }
+      refs.nextRunText.textContent = "未调度";
+      appendLog("已停止自动调度。");
+      setStatus("ok", "已停止自动调度");
+    }
+
+    function nextRunAtText() {
+      const value = Math.max(1, Number(refs.freqValueInput.value || 30));
+      const unit = refs.freqUnitSelect.value;
+      const ms = unit === "hour" ? value * 3600 * 1000 : value * 60 * 1000;
+      return new Date(Date.now() + ms).toLocaleString();
+    }
+
+    function startSchedule() {
+      const value = Math.max(1, Number(refs.freqValueInput.value || 30));
+      const unit = refs.freqUnitSelect.value;
+      const ms = unit === "hour" ? value * 3600 * 1000 : value * 60 * 1000;
+
+      stopSchedule();
+      refs.nextRunText.textContent = nextRunAtText();
+      appendLog(`自动调度已启动，每 ${value} ${unit === "hour" ? "小时" : "分钟"}执行一次。`);
+      setStatus("ok", "自动调度运行中");
+      state.timer = setInterval(async () => {
+        refs.nextRunText.textContent = nextRunAtText();
+        await runNow(true);
+      }, ms);
+    }
+
+    function bindEvents() {
+      refs.editRegionSelect.addEventListener("change", () => {
+        syncFormToState();
+        state.editRegion = refs.editRegionSelect.value;
+        renderRegionForm();
       });
-      window.addEventListener('resize', () => {
-        Object.values(state.charts).forEach(chart => chart.resize());
+      refs.connInput.addEventListener("input", syncFormToState);
+      refs.templateDirInput.addEventListener("input", syncFormToState);
+      refs.outputDirInput.addEventListener("input", syncFormToState);
+      refs.scanTemplateBtn.addEventListener("click", scanTemplates);
+      refs.testConnBtn.addEventListener("click", testConnection);
+      refs.saveConfigBtn.addEventListener("click", saveConfig);
+      refs.runNowBtn.addEventListener("click", () => runNow(false));
+      refs.startScheduleBtn.addEventListener("click", startSchedule);
+      refs.stopScheduleBtn.addEventListener("click", stopSchedule);
+      refs.openOutputHintBtn.addEventListener("click", () => {
+        const cfg = currentRegionConfig();
+        appendLog(`[${state.editRegion}] 当前输出目录: ${cfg?.output_dir || "-"}`);
       });
     }
 
-    function initCharts() {
-      state.charts.supply = echarts.init(document.getElementById('chartSupply'));
-      state.charts.store = echarts.init(document.getElementById('chartStore'));
-      state.charts.warehouse = echarts.init(document.getElementById('chartWarehouse'));
-      state.charts.transit = echarts.init(document.getElementById('chartTransit'));
-      state.charts.forecast = echarts.init(document.getElementById('chartForecast'));
+    async function init() {
+      setProgress(0);
+      setStatus("warn", "初始化中...");
+      bindEvents();
+      try {
+        await fetchConfig();
+        clearLog("系统就绪，等待执行。");
+        setProgress(0);
+      } catch (err) {
+        clearLog(`初始化失败: ${err.message || err}`);
+        setStatus("err", "初始化失败");
+      }
     }
 
-    initCharts();
-    initEvents();
-    applyDeptVisibility();
-    loadMetrics();
+    init();
   </script>
 </body>
 </html>

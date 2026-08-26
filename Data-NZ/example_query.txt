@@ -1,0 +1,3 @@
+-- 这里写你的查询，文件后缀保持 .txt
+-- 示例：SELECT TOP 10 * FROM dbo.Warehouses;
+SELECT GETDATE() AS run_time;
