@@ -1,0 +1,17 @@
+{
+  "name": "Warehouse Visualization",
+  "install": "pip3 install --user -r requirements.txt",
+  "terminals": [
+    {
+      "name": "dashboard",
+      "command": "python3 app.py",
+      "description": "Flask dashboard server on http://localhost:5000 (serves index.html and the /api/* endpoints)."
+    }
+  ],
+  "ports": [
+    {
+      "name": "dashboard",
+      "port": 5000
+    }
+  ]
+}
