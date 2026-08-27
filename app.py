@@ -4,7 +4,7 @@ from datetime import datetime
 from pathlib import Path
 from statistics import mean
 
-from flask import Flask, jsonify, request, send_file
+from flask import Flask, jsonify, request, send_file, send_from_directory
 
 try:
     import pyodbc
@@ -436,6 +436,21 @@ def _collect_diagnostics(metrics):
 @app.route("/")
 def index():
     return send_file(ROOT_DIR / "index.html")
+
+
+@app.route("/echarts.min.js")
+def echarts_lib():
+    return send_from_directory(ROOT_DIR, "echarts.min.js")
+
+
+@app.route("/css/<path:filename>")
+def css_assets(filename):
+    return send_from_directory(ROOT_DIR / "css", filename)
+
+
+@app.route("/js/<path:filename>")
+def js_assets(filename):
+    return send_from_directory(ROOT_DIR / "js", filename)
 
 
 @app.route("/api/health")
