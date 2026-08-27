@@ -1,11 +1,11 @@
 import csv
 import json
 import os
-from datetime import date, timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
-from threading import Lock
+from urllib.parse import unquote, urlparse
 
-from flask import Flask, jsonify, render_template_string, request, send_file
+from flask import Flask, jsonify, request, send_file
 
 try:
     import pyodbc
@@ -14,697 +14,292 @@ except ImportError:
 
 app = Flask(__name__)
 
-# 1) 数据库连接信息（优先读取环境变量，便于部署）
-DEFAULT_CONN_STR = (
-    "DRIVER={ODBC Driver 18 for SQL Server};"
-    "SERVER=if-akl-live.database.windows.net;"
-    "DATABASE=nz_ierp_live;"
-    "UID=nzlivepooluser;"
-    "PWD=iFur3RP@5sc^l^t3!;"
-)
-CONN_STR = os.getenv("WAREHOUSE_DB_CONN_STR", DEFAULT_CONN_STR)
+ROOT_DIR = Path(__file__).parent
+RUNNER_CONFIG_FILE = ROOT_DIR / "region_runner_config.json"
 
-# 2) 仓库体积（全量）SQL：按仓库汇总
-BASE_VOLUME_SQL = """
-SELECT
-    w.Name AS WarehouseName,
-    SUM(s.Quantity * ISNULL(p.VolumeWithBox, 0)) AS TotalOccupiedVolume
-FROM dbo.Stocks s
-LEFT JOIN dbo.Products p ON s.ProductId = p.Id
-LEFT JOIN dbo.Warehouses w ON s.WarehouseId = w.Id
-GROUP BY w.Name
-ORDER BY TotalOccupiedVolume DESC
-"""
+DEFAULT_REGION_CONFIG = {
+    "NZ": {
+        "label": "新西兰",
+        "connection_uri": "mssql+pymssql://nzlivepooluser:iFur3RP%405sc%5El%5Et3%21@if-akl-live.database.windows.net:1433/nz_ierp_live?charset=utf8",
+        "template_dir": "Data-NZ",
+        "output_dir": "Output-NZ",
+    },
+    "AU": {
+        "label": "澳洲",
+        "connection_uri": "mssql+pymssql://appuserau:Ifurn1tureAuA7p5sc%5El%5Et@if-au-live.database.windows.net:1433/au_ierp_live?charset=utf8",
+        "template_dir": "Data-AU",
+        "output_dir": "Output-AU",
+    },
+    "CA": {
+        "label": "加拿大",
+        "connection_uri": "mssql+pymssql://capool:IfurnitureCA3sc%5El%5Et3@ca-sql-pool-server.database.windows.net:1433/ca_ierp_live?charset=utf8",
+        "template_dir": "Data-CA",
+        "output_dir": "Output-CA",
+    },
+}
 
-# 3) 渠道体积 SQL（来自 SKU 前三位渠道）
-# 输出字段固定为：
-#   WarehouseName | ChannelName | TotalOccupiedVolume
-CHANNEL_VOLUME_SQL = """
-SELECT
-    w.Name AS WarehouseName,
-    LEFT(p.SKU, 3) AS ChannelName,
-    SUM(s.Quantity * ISNULL(p.VolumeWithBox, 0)) AS TotalOccupiedVolume
-FROM dbo.Stocks s
-LEFT JOIN dbo.Products p ON s.ProductId = p.Id
-LEFT JOIN dbo.Warehouses w ON s.WarehouseId = w.Id
-WHERE p.SKU IS NOT NULL
-GROUP BY w.Name, LEFT(p.SKU, 3)
-"""
-
-DAILY_CHANNEL_TREND_SQL = None
-SNAPSHOT_FILE = Path(__file__).with_name("data").joinpath("daily_snapshots.json")
-MASTER_FILE = Path(__file__).with_name("warehouse_master.csv")
-CONTAINER_VOLUME_M3 = 69.0
-MASTER_LOCK = Lock()
-
-# 默认不参与体积统计的仓库
-EXCLUDED_WAREHOUSE_NAMES = [
-    "Missing/To be located",
-    "LV Warehouse(all dummy stock)",
-    "Onehunga warehouse(No longer available)",
-    "To be repaired",
-    "East Tamaki -Luo(No longer available)",
-    "123 Jef",
-    "East Tamaki temp warehouse",
-    "Otahuhu-Large",
-    "Monahan Rd Warehouse(No longer available)",
-    "Hamilton Old Display (No longer available)",
-    "No Inventory",
-    "test1",
-    "Presale-In Store Only(No longer available)",
-    "[Action Request]",
-    "Grabone",
-    "Melbourne Stock",
-    "CHCH Temp",
-    "Discontinued",
-    "Tauranga In Transit",
-    "APEX Center",
-    "China_Admin Supplies",
-    "SleepLAB-Onehunga",
-]
-def _row_get(row, key, default=None):
-    if isinstance(row, dict):
-        return row.get(key, default)
-    return getattr(row, key, default)
-
-
-def _normalize_warehouse_key(name):
-    return "".join(ch.lower() for ch in str(name) if ch.isalnum())
-
-
-EXCLUDED_WAREHOUSE_KEYS = {
-    _normalize_warehouse_key(name) for name in EXCLUDED_WAREHOUSE_NAMES
+DEFAULT_APP_SETTINGS = {
+    "frequency_value": 30,
+    "frequency_unit": "minute",
 }
 
 
-EXCLUDED_WAREHOUSE_KEYS = {
-    _normalize_warehouse_key(name) for name in EXCLUDED_WAREHOUSE_NAMES
-}
+def _utc_iso():
+    return datetime.utcnow().isoformat() + "Z"
 
 
-def _parse_bool(value, default=True):
-    if value is None:
-        return default
-    text = str(value).strip().lower()
-    if text in {"1", "true", "yes", "y"}:
-        return True
-    if text in {"0", "false", "no", "n"}:
-        return False
-    return default
+def _ensure_default_template_dirs(regions):
+    sample_sql = (
+        "-- 这里写你的查询，文件后缀保持 .txt\n"
+        "-- 示例：SELECT TOP 10 * FROM dbo.Warehouses;\n"
+        "SELECT GETDATE() AS run_time;"
+    )
+    for cfg in regions.values():
+        template_dir = _resolve_path(cfg.get("template_dir"))
+        if template_dir is None:
+            continue
+        template_dir.mkdir(parents=True, exist_ok=True)
+        has_txt = any(p.is_file() and p.suffix.lower() == ".txt" for p in template_dir.iterdir())
+        if not has_txt:
+            sample_file = template_dir / "example_query.txt"
+            sample_file.write_text(sample_sql, encoding="utf-8")
 
 
-def _m3_to_container(value):
-    return float(value or 0) / CONTAINER_VOLUME_M3
+def _ensure_runner_config():
+    if not RUNNER_CONFIG_FILE.exists():
+        payload = {"regions": DEFAULT_REGION_CONFIG, "settings": DEFAULT_APP_SETTINGS}
+        with RUNNER_CONFIG_FILE.open("w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2)
+        _ensure_default_template_dirs(payload["regions"])
+        return
 
-
-def _parse_coords(coords_text):
-    # 输入格式 "lat, lng"；返回 [lng, lat]
-    if not coords_text:
-        return None
-    parts = [p.strip() for p in str(coords_text).split(",")]
-    if len(parts) != 2:
-        return None
-    lat = float(parts[0])
-    lng = float(parts[1])
-    return [lng, lat]
-
-
-def _format_coords_for_csv(coords):
-    if not isinstance(coords, list) or len(coords) != 2:
-        return ""
-    return f"{coords[1]}, {coords[0]}"
-
-
-def _load_seed_from_data_csv():
-    seed = {}
-    csv_path = Path(__file__).with_name("data.csv")
-    if not csv_path.exists():
-        return seed
-
-    with csv_path.open("r", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            name = (row.get("WarehouseName") or "").strip()
-            if not name:
-                continue
-            cap_raw = row.get("Capacity")
-            cap_m3 = float(cap_raw) if cap_raw not in (None, "") else None
-            seed[name] = {
-                "coords": _parse_coords(row.get("zuobiao")),
-                "include_in_volume": True,
-                "capacity": _m3_to_container(cap_m3) if cap_m3 is not None else None,
-            }
-    return seed
-
-
-def _save_warehouse_master(master):
-    with MASTER_FILE.open("w", encoding="utf-8") as f:
-        writer = csv.writer(f)
-        writer.writerow(["WarehouseName", "Coords", "IncludeInVolume", "CapacityM3"])
-        for name in sorted(master.keys()):
-            item = master[name]
-            include = "1" if item.get("include_in_volume", True) else "0"
-            capacity_containers = item.get("capacity")
-            if capacity_containers is None:
-                cap_m3_text = ""
-            else:
-                cap_m3_text = f"{float(capacity_containers) * CONTAINER_VOLUME_M3:.6f}".rstrip("0").rstrip(".")
-            writer.writerow(
-                [
-                    name,
-                    _format_coords_for_csv(item.get("coords")),
-                    include,
-                    cap_m3_text,
-                ]
-            )
-
-
-def _load_warehouse_master():
-    master = {}
-    if not MASTER_FILE.exists():
-        return master
-
-    with MASTER_FILE.open("r", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            name = (row.get("WarehouseName") or "").strip()
-            if not name:
-                continue
-            include = _parse_bool(row.get("IncludeInVolume"), default=True)
-            coords = _parse_coords(row.get("Coords"))
-            cap_raw = row.get("CapacityM3")
-            cap_m3 = float(cap_raw) if cap_raw not in (None, "") else None
-            master[name] = {
-                "coords": coords,
-                "include_in_volume": include,
-                "capacity": _m3_to_container(cap_m3) if cap_m3 is not None else None,
-            }
-    return master
-
-
-def _ensure_warehouse_master():
-    master = _load_warehouse_master()
-    if not master:
-        master = _load_seed_from_data_csv()
-        for name in EXCLUDED_WAREHOUSE_NAMES:
-            if name not in master:
-                master[name] = {
-                    "coords": None,
-                    "include_in_volume": False,
-                    "capacity": None,
-                }
-            else:
-                master[name]["include_in_volume"] = False
-        if master:
-            _save_warehouse_master(master)
-        return master
-
-    # master 已存在，但保证排除仓库都在表里
+    data = _load_runner_config()
     changed = False
-    for name in EXCLUDED_WAREHOUSE_NAMES:
-        if name not in master:
-            master[name] = {
-                "coords": None,
-                "include_in_volume": False,
-                "capacity": None,
-            }
+    regions = data.get("regions", {})
+    settings = data.get("settings", {})
+
+    for region_key, region_config in DEFAULT_REGION_CONFIG.items():
+        if region_key not in regions:
+            regions[region_key] = dict(region_config)
             changed = True
+            continue
+        for field, value in region_config.items():
+            if field not in regions[region_key]:
+                regions[region_key][field] = value
+                changed = True
+
+    for key, value in DEFAULT_APP_SETTINGS.items():
+        if key not in settings:
+            settings[key] = value
+            changed = True
+
     if changed:
-        _save_warehouse_master(master)
-    return master
+        data["regions"] = regions
+        data["settings"] = settings
+        _save_runner_config(data)
+
+    _ensure_default_template_dirs(regions)
 
 
-WAREHOUSE_MASTER = _ensure_warehouse_master()
+def _load_runner_config():
+    if not RUNNER_CONFIG_FILE.exists():
+        _ensure_runner_config()
+    with RUNNER_CONFIG_FILE.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+    if not isinstance(data, dict):
+        data = {}
+    data.setdefault("regions", {})
+    data.setdefault("settings", {})
+    return data
 
 
-def _master_entry(name):
-    if not name:
+def _save_runner_config(payload):
+    with RUNNER_CONFIG_FILE.open("w", encoding="utf-8") as f:
+        json.dump(payload, f, ensure_ascii=False, indent=2)
+
+
+def _resolve_path(path_text):
+    raw = (path_text or "").strip()
+    if not raw:
         return None
-    if name in WAREHOUSE_MASTER:
-        return WAREHOUSE_MASTER[name]
-    target = _normalize_warehouse_key(name)
-    for key, val in WAREHOUSE_MASTER.items():
-        n = _normalize_warehouse_key(key)
-        if n == target:
-            return val
-    return None
+    path = Path(raw)
+    if not path.is_absolute():
+        path = ROOT_DIR / path
+    return path.resolve()
 
 
-def _is_excluded_warehouse(name):
-    entry = _master_entry(name)
-    if entry is None:
-        return _normalize_warehouse_key(name) in EXCLUDED_WAREHOUSE_KEYS
-    return not bool(entry.get("include_in_volume", False))
+def _parse_mssql_uri(uri):
+    if not uri:
+        raise ValueError("连接串为空。")
 
+    parsed = urlparse(uri)
+    if not parsed.scheme.startswith("mssql"):
+        raise ValueError("仅支持 mssql+pymssql 格式连接串。")
 
-def _warehouse_meta(name):
-    entry = _master_entry(name)
-    if entry is None:
-        include = _normalize_warehouse_key(name) not in EXCLUDED_WAREHOUSE_KEYS
-        return {
-            "coords": None,
-            "capacity": None,
-            "includeInVolume": include,
-        }
+    if not parsed.hostname:
+        raise ValueError("连接串缺少主机名。")
+
+    database = parsed.path.lstrip("/")
+    if not database:
+        raise ValueError("连接串缺少数据库名。")
+
     return {
-        "coords": entry.get("coords"),
-        "capacity": entry.get("capacity"),
-        "includeInVolume": bool(entry.get("include_in_volume", False)),
+        "driver": os.getenv("SQLSERVER_ODBC_DRIVER", "ODBC Driver 18 for SQL Server"),
+        "host": parsed.hostname,
+        "port": parsed.port or 1433,
+        "database": database,
+        "username": unquote(parsed.username or ""),
+        "password": unquote(parsed.password or ""),
     }
 
 
-def _warehouse_master_profiles(extra_names=None):
-    names = set(WAREHOUSE_MASTER.keys())
-    if extra_names:
-        for n in extra_names:
-            if n:
-                names.add(n)
-    profiles = []
-    for name in sorted(names):
-        meta = _warehouse_meta(name)
-        profiles.append(
-            {
-                "name": name,
-                "coords": meta["coords"],
-                "includeInVolume": meta["includeInVolume"],
-            }
-        )
-    return profiles
-
-
-def _canonical_master_name(name):
-    if name in WAREHOUSE_MASTER:
-        return name
-    target = _normalize_warehouse_key(name)
-    if not target:
-        return name
-    best = None
-    best_score = None
-    for key in WAREHOUSE_MASTER.keys():
-        normalized = _normalize_warehouse_key(key)
-        if normalized == target:
-            return key
-        if normalized and (target in normalized or normalized in target):
-            score = abs(len(normalized) - len(target))
-            if best is None or score < best_score:
-                best = key
-                best_score = score
-    return best or name
-
-
-def _parse_optional_float(value):
-    if value is None:
-        return None
-    if isinstance(value, str) and value.strip() == "":
-        return None
-    return float(value)
-
-
-def _parse_update_coords(payload):
-    lat = _parse_optional_float(payload.get("lat"))
-    lng = _parse_optional_float(payload.get("lng"))
-    if lat is None and lng is None:
-        return None
-    if lat is None or lng is None:
-        raise ValueError("坐标需同时提供纬度和经度，或同时留空。")
-    if not (-90 <= lat <= 90 and -180 <= lng <= 180):
-        raise ValueError("坐标超出合法范围。")
-    return [lng, lat]
-
-
-def _parse_coords_payload(value):
-    """支持 None / [lng, lat] / {'lat': x, 'lng': y} / 'lat,lng'。"""
-    if value is None:
-        return None
-
-    if isinstance(value, list):
-        if len(value) != 2:
-            raise ValueError("坐标数组格式应为 [lng, lat]。")
-        lng = _parse_optional_float(value[0])
-        lat = _parse_optional_float(value[1])
-    elif isinstance(value, dict):
-        lat = _parse_optional_float(value.get("lat"))
-        lng = _parse_optional_float(value.get("lng"))
-    elif isinstance(value, str):
-        text = value.strip()
-        if text == "":
-            return None
-        parsed = _parse_coords(text)
-        if parsed is None:
-            raise ValueError("坐标字符串格式应为 lat,lng。")
-        lng, lat = parsed[0], parsed[1]
-    else:
-        raise ValueError("不支持的坐标类型。")
-
-    if lat is None or lng is None:
-        raise ValueError("坐标需同时提供纬度和经度。")
-    if not (-90 <= float(lat) <= 90 and -180 <= float(lng) <= 180):
-        raise ValueError("坐标超出合法范围。")
-    return [float(lng), float(lat)]
-
-
-def _save_profiles_batch(profiles):
-    if not isinstance(profiles, list) or not profiles:
-        raise ValueError("profiles 必须是非空数组。")
-
-    for item in profiles:
-        if not isinstance(item, dict):
-            raise ValueError("profiles 中每一项必须是对象。")
-        name = (item.get("name") or "").strip()
-        if not name:
-            raise ValueError("仓库名称不能为空。")
-        canonical_name = _canonical_master_name(name)
-        existing = WAREHOUSE_MASTER.get(canonical_name, {})
-
-        if "coords" in item:
-            coords = _parse_coords_payload(item.get("coords"))
-        else:
-            coords = existing.get("coords")
-
-        if "includeInVolume" in item:
-            include = _parse_bool(item.get("includeInVolume"), default=True)
-        else:
-            include = bool(existing.get("include_in_volume", True))
-
-        WAREHOUSE_MASTER[canonical_name] = {
-            "coords": coords,
-            "include_in_volume": include,
-            "capacity": existing.get("capacity"),
-        }
-
-    _save_warehouse_master(WAREHOUSE_MASTER)
-
-
-def _convert_row_to_containers(row):
-    if isinstance(row, dict):
-        mapped = dict(row)
-        mapped["TotalOccupiedVolume"] = _m3_to_container(mapped.get("TotalOccupiedVolume", 0))
-        return mapped
-
-    class _Obj:
-        pass
-
-    out = _Obj()
-    for key in dir(row):
-        if key.startswith("_"):
-            continue
-        try:
-            setattr(out, key, getattr(row, key))
-        except Exception:
-            continue
-    out.TotalOccupiedVolume = _m3_to_container(_row_get(row, "TotalOccupiedVolume", 0))
-    return out
-
-
-def _convert_rows_to_containers(rows):
-    return [_convert_row_to_containers(row) for row in rows]
-
-
-def _load_base_rows_from_csv():
-    rows = []
-    csv_path = Path(__file__).with_name("data.csv")
-    if not csv_path.exists():
-        return rows
-    with csv_path.open("r", encoding="utf-8-sig") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            name = (row.get("WarehouseName") or "").strip()
-            if not name or _is_excluded_warehouse(name):
-                continue
-            volume_raw = row.get("TotalOccupiedVolume")
-            rows.append(
-                {
-                    "WarehouseName": name,
-                    "TotalOccupiedVolume": _m3_to_container(float(volume_raw) if volume_raw not in (None, "") else 0.0),
-                }
-            )
-    rows.sort(key=lambda item: item["TotalOccupiedVolume"], reverse=True)
-    return rows
-
-
-def _load_snapshot_store():
-    if not SNAPSHOT_FILE.exists():
-        return {"last_updated": None, "days": []}
-    try:
-        with SNAPSHOT_FILE.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-            if not isinstance(data, dict):
-                return {"last_updated": None, "days": []}
-            if "days" not in data or not isinstance(data["days"], list):
-                data["days"] = []
-            if "last_updated" not in data:
-                data["last_updated"] = None
-            return data
-    except Exception:
-        return {"last_updated": None, "days": []}
-
-
-def _save_snapshot_store(store):
-    SNAPSHOT_FILE.parent.mkdir(parents=True, exist_ok=True)
-    with SNAPSHOT_FILE.open("w", encoding="utf-8") as f:
-        json.dump(store, f, ensure_ascii=False, indent=2)
-
-
-def _snapshot_needs_unit_fix(store):
-    """检测快照是否明显偏离 CSV 全量口径（例如重复 /69 或未 /69）。"""
-    days = store.get("days", [])
-    if not days:
-        return False
-    latest = days[-1]
-    base_map = latest.get("base", {}) if isinstance(latest.get("base"), dict) else {}
-    if not base_map:
-        return False
-
-    snapshot_total = sum(float(v or 0) for v in base_map.values())
-    csv_total = _csv_total_volume()
-    if csv_total <= 0:
-        return False
-
-    ratio = snapshot_total / csv_total if csv_total else 1.0
-    # 允许 15% 偏差；超出则视为单位口径错误，触发重建。
-    return not (0.85 <= ratio <= 1.15)
-
-
-def _fix_snapshot_units_if_needed():
-    store = _load_snapshot_store()
-    if not store.get("days"):
-        return False
-    if not _snapshot_needs_unit_fix(store):
-        return False
-    # 当前环境无法实时查库时，使用 CSV 口径就地校正，避免继续沿用错误单位。
-    latest = store.get("days", [])[-1] if store.get("days") else None
-    if latest and str(latest.get("source")) == "csv":
-        base_rows = _load_base_rows_from_csv()
-        base_map = _rows_to_snapshot_map(base_rows)
-        latest["base"] = base_map
-        latest["channels"] = {"ALL": dict(base_map)}
-        store["last_updated"] = latest.get("date") or store.get("last_updated")
-        _save_snapshot_store(store)
-        return True
-    # 能实时查库时，直接按当前口径重建快照。
-    _refresh_daily_snapshot(force=True)
-    return True
-
-
-def _snapshot_rows_to_map(rows):
-    mapped = {}
-    for row in rows:
-        name = (_row_get(row, "WarehouseName", "") or "").strip()
-        if not name or _is_excluded_warehouse(name):
-            continue
-        # rows 进入这里前已经是“货柜数”口径（DB 已转换，CSV 本身也已转换）
-        mapped[name] = float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
-    return mapped
-
-
-def _snapshot_channel_rows_to_map(rows):
-    mapped = {}
-    for row in rows:
-        channel = (_row_get(row, "ChannelName", "") or "").strip()
-        warehouse = (_row_get(row, "WarehouseName", "") or "").strip()
-        # rows 进入这里前已经是“货柜数”口径（避免重复 /69）
-        volume = float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
-        if not channel or not warehouse or _is_excluded_warehouse(warehouse):
-            continue
-        channel_key = channel.upper()
-        if channel_key not in mapped:
-            mapped[channel_key] = {}
-        mapped[channel_key][warehouse] = volume
-    return mapped
-
-
-def _snapshot_total_by_channel(channel_filters, channel_map):
-    if not channel_filters:
-        return sum(sum(float(v) for v in warehouses.values()) for warehouses in channel_map.values())
-    total = 0.0
-    matched = False
-    for channel in channel_filters:
-        warehouses = channel_map.get(channel.upper(), {})
-        if warehouses:
-            matched = True
-            total += sum(float(v) for v in warehouses.values())
-    # 渠道未命中时返回 0，避免把 ALL 误当成渠道结果
-    # 导致“地图显示0但总量/趋势仍有值”的口径错乱。
-    if not matched:
-        return 0.0
-    return total
-
-
-def _snapshot_map_rows(channel_filters, base_map, channel_map):
-    if not channel_filters:
-        if base_map:
-            return [{"WarehouseName": name, "TotalOccupiedVolume": volume} for name, volume in base_map.items()]
-        if "ALL" in channel_map:
-            return [{"WarehouseName": name, "TotalOccupiedVolume": volume} for name, volume in channel_map["ALL"].items()]
-        return []
-    aggregate = {}
-    for channel in channel_filters:
-        for name, volume in channel_map.get(channel.upper(), {}).items():
-            aggregate[name] = aggregate.get(name, 0.0) + float(volume)
-    if aggregate:
-        return [{"WarehouseName": name, "TotalOccupiedVolume": volume} for name, volume in aggregate.items()]
-    # 渠道未命中时返回空集合，而不是回退 ALL
-    # 这样地图和趋势都能准确反映“该渠道当前无数据”。
-    if channel_filters:
-        return []
-    if "ALL" in channel_map:
-        return [{"WarehouseName": name, "TotalOccupiedVolume": volume} for name, volume in channel_map["ALL"].items()]
-    return []
-
-
-def _build_snapshot_trend(days, channel_filters, store):
-    items = store.get("days", [])
-    if not items:
-        return []
-    latest_by_date = {}
-    for item in items:
-        date_text = item.get("date")
-        if date_text:
-            latest_by_date[date_text] = item
-    selected = [latest_by_date[d] for d in sorted(latest_by_date.keys())][-days:]
-    points = []
-    for item in selected:
-        date_text = item.get("date")
-        if not date_text:
-            continue
-        channel_map = item.get("channels", {}) if isinstance(item.get("channels"), dict) else {}
-        volume = _snapshot_total_by_channel(channel_filters, channel_map)
-        points.append({"date": date_text, "channel": "ALL", "volume": float(volume)})
-    return points
-
-
-def _refresh_daily_snapshot(force=False):
-    today = date.today().isoformat()
-    store = _load_snapshot_store()
-    if not force and store.get("days") and store["days"][-1].get("date") == today:
-        return store, False
-
-    source = "database"
-    try:
-        base_rows = _convert_rows_to_containers(_run_query(BASE_VOLUME_SQL))
-    except Exception:
-        source = "csv"
-        base_rows = _load_base_rows_from_csv()
-
-    base_map = _snapshot_rows_to_map(base_rows)
-    channel_map = {}
-    if source == "database":
-        try:
-            channel_rows = _convert_rows_to_containers(_run_query(CHANNEL_VOLUME_SQL))
-            channel_map = _snapshot_channel_rows_to_map(channel_rows)
-        except Exception:
-            channel_map = {}
-    if not channel_map:
-        channel_map = {"ALL": base_map}
-
-    store["days"] = [item for item in store.get("days", []) if item.get("date") != today]
-    store["days"].append(
-        {
-            "date": today,
-            "source": source,
-            "base": base_map,
-            "channels": channel_map,
-        }
-    )
-    store["days"] = store["days"][-366:]
-    store["last_updated"] = today
-    _save_snapshot_store(store)
-    return store, True
-
-
-def _normalize_snapshot_units():
-    # 直接以当前代码口径重建当日快照，彻底消除历史单位污染。
-    store, _created = _refresh_daily_snapshot(force=True)
-    return store
-
-
-def _csv_total_volume():
-    return sum(item["TotalOccupiedVolume"] for item in _load_base_rows_from_csv())
-
-
-def _sum_rows_total(rows):
-    total = 0.0
-    for row in rows:
-        warehouse_name = (_row_get(row, "WarehouseName", "") or "").strip()
-        if warehouse_name and _is_excluded_warehouse(warehouse_name):
-            continue
-        total += float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
-    return total
-
-
-def _rows_to_snapshot_map(rows):
-    mapped = {}
-    for row in rows:
-        name = (_row_get(row, "WarehouseName", "") or "").strip()
-        if not name or _is_excluded_warehouse(name):
-            continue
-        mapped[name] = mapped.get(name, 0.0) + float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
-    return mapped
-
-
-def _rows_to_map_rows(rows):
-    mapped = _rows_to_snapshot_map(rows)
-    out = [{"WarehouseName": name, "TotalOccupiedVolume": volume} for name, volume in mapped.items()]
-    out.sort(key=lambda item: float(item.get("TotalOccupiedVolume", 0) or 0), reverse=True)
-    return out
-
-
-def _normalize_snapshot_units():
-    store = _load_snapshot_store()
-    changed = False
-    for day in store.get("days", []):
-        base_map = day.get("base")
-        if isinstance(base_map, dict):
-            for key, value in list(base_map.items()):
-                fv = float(value or 0)
-                if fv > 50:
-                    base_map[key] = fv / CONTAINER_VOLUME_M3
-                    changed = True
-        channel_map = day.get("channels")
-        if isinstance(channel_map, dict):
-            for ch, wmap in channel_map.items():
-                if not isinstance(wmap, dict):
-                    continue
-                for wname, value in list(wmap.items()):
-                    fv = float(value or 0)
-                    if fv > 50:
-                        channel_map[ch][wname] = fv / CONTAINER_VOLUME_M3
-                        changed = True
-    if changed:
-        _save_snapshot_store(store)
-    return changed
-
-
-def _run_query(sql, params=None):
+def _choose_driver(expected_driver):
     if pyodbc is None:
-        raise RuntimeError("数据库驱动不可用（pyodbc / libodbc 未安装）")
+        return expected_driver
+
+    installed = []
+    try:
+        installed = pyodbc.drivers()
+    except Exception:
+        installed = []
+
+    if expected_driver in installed:
+        return expected_driver
+
+    preferred = [d for d in installed if "ODBC Driver" in d and "SQL Server" in d]
+    if preferred:
+        preferred.sort(reverse=True)
+        return preferred[0]
+    return expected_driver
+
+
+def _odbc_conn_str_from_uri(uri):
+    parsed = _parse_mssql_uri(uri)
+    driver = _choose_driver(parsed["driver"])
+    return (
+        f"DRIVER={{{driver}}};"
+        f"SERVER={parsed['host']},{parsed['port']};"
+        f"DATABASE={parsed['database']};"
+        f"UID={parsed['username']};"
+        f"PWD={parsed['password']};"
+        "Encrypt=yes;"
+        "TrustServerCertificate=no;"
+        "Connection Timeout=30;"
+    )
+
+
+def _list_txt_templates(template_dir):
+    path = _resolve_path(template_dir)
+    if path is None:
+        raise ValueError("SQL 模板目录为空。")
+    if not path.exists():
+        raise FileNotFoundError(f"模板目录不存在: {path}")
+    if not path.is_dir():
+        raise NotADirectoryError(f"模板目录不是文件夹: {path}")
+    files = [p for p in path.iterdir() if p.is_file() and p.suffix.lower() == ".txt"]
+    files.sort(key=lambda p: p.name.lower())
+    return files
+
+
+def _read_sql_file(path):
+    last_err = None
+    for encoding in ("utf-8-sig", "utf-8", "gbk", "latin-1"):
+        try:
+            return path.read_text(encoding=encoding).strip()
+        except Exception as exc:
+            last_err = exc
+    raise RuntimeError(f"读取 SQL 文件失败: {path} ({last_err})")
+
+
+def _load_sql_templates(template_dir):
+    templates = []
+    for file_path in _list_txt_templates(template_dir):
+        sql_text = _read_sql_file(file_path)
+        if not sql_text:
+            continue
+        templates.append({"name": file_path.name, "sql": sql_text})
+    return templates
+
+
+def _csv_output_path(output_dir, region_key, sql_file_name, batch_label):
+    output_root = _resolve_path(output_dir)
+    if output_root is None:
+        raise ValueError("输出目录为空。")
+    safe_name = Path(sql_file_name).stem.replace(" ", "_")
+    target = output_root / batch_label / f"{region_key}_{safe_name}.csv"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    return target
+
+
+def _write_csv(path, columns, rows):
+    with path.open("w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        if columns:
+            writer.writerow(columns)
+        for row in rows:
+            writer.writerow(list(row))
+
+
+def _run_single_template(cursor, template):
+    cursor.execute(template["sql"])
+    if not cursor.description:
+        return {
+            "columns": [],
+            "rows": [],
+            "row_count": max(cursor.rowcount, 0),
+            "has_result_set": False,
+        }
+    columns = [col[0] for col in cursor.description]
+    rows = cursor.fetchall()
+    return {
+        "columns": columns,
+        "rows": rows,
+        "row_count": len(rows),
+        "has_result_set": True,
+    }
+
+
+def _pyodbc_drivers():
+    if pyodbc is None:
+        return []
+    try:
+        return pyodbc.drivers()
+    except Exception:
+        return []
+
+
+def _region_label(region_key, config):
+    return config.get("label") or region_key
+
+
+def _test_connection(uri):
+    if pyodbc is None:
+        return {
+            "status": "error",
+            "message": "pyodbc 不可用，请先安装 ODBC 运行环境。",
+            "drivers": [],
+        }
+    conn_str = _odbc_conn_str_from_uri(uri)
     conn = None
     cursor = None
     try:
-        conn = pyodbc.connect(CONN_STR)
+        conn = pyodbc.connect(conn_str, timeout=15)
         cursor = conn.cursor()
-        cursor.execute(sql, params or [])
-        return cursor.fetchall()
+        cursor.execute("SELECT 1 AS ok")
+        probe = cursor.fetchone()
+        value = probe[0] if probe else 1
+        return {
+            "status": "success",
+            "message": "连接成功。",
+            "probe": value,
+            "drivers": _pyodbc_drivers(),
+        }
+    except Exception as exc:
+        return {
+            "status": "error",
+            "message": str(exc),
+            "drivers": _pyodbc_drivers(),
+        }
     finally:
         if cursor:
             cursor.close()
@@ -712,410 +307,296 @@ def _run_query(sql, params=None):
             conn.close()
 
 
-def _build_channel_sql(channel_filters):
-    placeholders = ",".join("?" for _ in channel_filters)
-    return f"""
-    WITH ChannelVolume AS (
-        {CHANNEL_VOLUME_SQL}
-    )
-    SELECT
-        WarehouseName,
-        SUM(TotalOccupiedVolume) AS TotalOccupiedVolume
-    FROM ChannelVolume
-    WHERE ChannelName IN ({placeholders})
-    GROUP BY WarehouseName
-    ORDER BY TotalOccupiedVolume DESC
-    """
+def _execute_region(region_key, region_config):
+    label = _region_label(region_key, region_config)
+    logs = [f"[{region_key}] 开始执行：{label}"]
+    started_at = _utc_iso()
+    templates = _load_sql_templates(region_config.get("template_dir"))
+    if not templates:
+        return {
+            "region": region_key,
+            "label": label,
+            "status": "warning",
+            "startedAt": started_at,
+            "finishedAt": _utc_iso(),
+            "templateCount": 0,
+            "successCount": 0,
+            "failCount": 0,
+            "outputs": [],
+            "logs": logs + [f"[{region_key}] 未找到可执行的 txt SQL 模板。"],
+        }
 
+    if pyodbc is None:
+        raise RuntimeError("pyodbc 不可用，请先安装 ODBC 运行环境。")
 
-def _parse_days():
-    raw = request.args.get("days", "30").strip()
+    batch_label = datetime.now().strftime("%Y%m%d_%H%M%S")
+    conn_str = _odbc_conn_str_from_uri(region_config.get("connection_uri", ""))
+    conn = None
+    cursor = None
+    outputs = []
+    success_count = 0
+    fail_count = 0
     try:
-        days = int(raw)
-    except ValueError:
-        days = 30
-    if days < 1:
-        return 30
-    return min(days, 365)
+        conn = pyodbc.connect(conn_str, timeout=30)
+        cursor = conn.cursor()
+
+        for template in templates:
+            tpl_name = template["name"]
+            logs.append(f"[{region_key}] 执行模板: {tpl_name}")
+            try:
+                result = _run_single_template(cursor, template)
+                if result["has_result_set"]:
+                    csv_path = _csv_output_path(
+                        region_config.get("output_dir"),
+                        region_key,
+                        tpl_name,
+                        batch_label,
+                    )
+                    _write_csv(csv_path, result["columns"], result["rows"])
+                    outputs.append(
+                        {
+                            "template": tpl_name,
+                            "rows": result["row_count"],
+                            "file": str(csv_path),
+                            "status": "success",
+                        }
+                    )
+                    logs.append(f"[{region_key}] 成功: {tpl_name} -> {csv_path} ({result['row_count']} 行)")
+                else:
+                    conn.commit()
+                    outputs.append(
+                        {
+                            "template": tpl_name,
+                            "rows": result["row_count"],
+                            "file": None,
+                            "status": "success",
+                            "note": "SQL 无结果集，已执行提交。",
+                        }
+                    )
+                    logs.append(f"[{region_key}] 成功: {tpl_name} (无结果集，影响 {result['row_count']} 行)")
+                success_count += 1
+            except Exception as exc:
+                fail_count += 1
+                outputs.append(
+                    {
+                        "template": tpl_name,
+                        "rows": 0,
+                        "file": None,
+                        "status": "error",
+                        "error": str(exc),
+                    }
+                )
+                logs.append(f"[{region_key}] 失败: {tpl_name} -> {exc}")
+
+        status = "success" if fail_count == 0 else ("partial" if success_count > 0 else "error")
+        return {
+            "region": region_key,
+            "label": label,
+            "status": status,
+            "startedAt": started_at,
+            "finishedAt": _utc_iso(),
+            "templateCount": len(templates),
+            "successCount": success_count,
+            "failCount": fail_count,
+            "outputs": outputs,
+            "logs": logs,
+        }
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
 
 
-def _parse_channel_filters():
-    channels = request.args.getlist("channel")
-    if not channels:
-        channels_csv = request.args.get("channels", "")
-        channels = channels_csv.split(",") if channels_csv else []
-    return [ch.strip() for ch in channels if ch and ch.strip()]
+def _normalize_region_payload(payload):
+    data = payload if isinstance(payload, dict) else {}
+    regions_payload = data.get("regions", {})
+    settings_payload = data.get("settings", {})
+    base = _load_runner_config()
+
+    regions = dict(base.get("regions", {}))
+    for key in DEFAULT_REGION_CONFIG.keys():
+        incoming = regions_payload.get(key, {})
+        current = regions.get(key, {})
+        regions[key] = {
+            "label": str(incoming.get("label", current.get("label", DEFAULT_REGION_CONFIG[key]["label"])) or ""),
+            "connection_uri": str(
+                incoming.get("connection_uri", current.get("connection_uri", DEFAULT_REGION_CONFIG[key]["connection_uri"]))
+                or ""
+            ).strip(),
+            "template_dir": str(
+                incoming.get("template_dir", current.get("template_dir", DEFAULT_REGION_CONFIG[key]["template_dir"])) or ""
+            ).strip(),
+            "output_dir": str(
+                incoming.get("output_dir", current.get("output_dir", DEFAULT_REGION_CONFIG[key]["output_dir"])) or ""
+            ).strip(),
+        }
+
+    settings = dict(base.get("settings", {}))
+    freq_value = settings_payload.get("frequency_value", settings.get("frequency_value", DEFAULT_APP_SETTINGS["frequency_value"]))
+    freq_unit = settings_payload.get("frequency_unit", settings.get("frequency_unit", DEFAULT_APP_SETTINGS["frequency_unit"]))
+    try:
+        freq_value = max(1, int(freq_value))
+    except Exception:
+        freq_value = DEFAULT_APP_SETTINGS["frequency_value"]
+    if freq_unit not in ("minute", "hour"):
+        freq_unit = DEFAULT_APP_SETTINGS["frequency_unit"]
+
+    settings["frequency_value"] = freq_value
+    settings["frequency_unit"] = freq_unit
+    return {"regions": regions, "settings": settings}
 
 
-def _build_flat_trend(days, total):
-    points = []
-    end = date.today()
-    for idx in range(days - 1, -1, -1):
-        d = end - timedelta(days=idx)
-        points.append({"date": d.isoformat(), "channel": "ALL", "volume": float(total)})
-    return points
-
-
-def _db_trend_total_volume(channel_filters):
-    """当前库存总量（货柜口径），与 /get-data 一致；用于趋势在无时序表时的按日拉平。"""
-    if channel_filters and CHANNEL_VOLUME_SQL:
-        channel_rows = _convert_rows_to_containers(_run_query(CHANNEL_VOLUME_SQL))
-        matched_channels = {ch.upper() for ch in channel_filters}
-        filtered = []
-        for row in channel_rows:
-            channel = (_row_get(row, "ChannelName", "") or "").strip().upper()
-            warehouse = (_row_get(row, "WarehouseName", "") or "").strip()
-            if channel in matched_channels and not _is_excluded_warehouse(warehouse):
-                filtered.append(row)
-        return _sum_rows_total(filtered)
-    base_rows = _convert_rows_to_containers(_run_query(BASE_VOLUME_SQL))
-    return _sum_rows_total(base_rows)
-
-
-def _latest_snapshot_entry():
-    store = _load_snapshot_store()
-    days = store.get("days", [])
-    if not days:
-        return store, None
-    return store, days[-1]
-
-
-def _rows_from_snapshot_store(channel_filters):
-    store, latest = _latest_snapshot_entry()
-    if not latest:
-        return None, None, store
-    base_map = latest.get("base", {}) if isinstance(latest.get("base"), dict) else {}
-    channel_map = latest.get("channels", {}) if isinstance(latest.get("channels"), dict) else {}
-    rows = _snapshot_map_rows(channel_filters, base_map, channel_map)
-    rows.sort(key=lambda item: float(item.get("TotalOccupiedVolume", 0) or 0), reverse=True)
-    return rows, latest.get("date"), store
-
-
-def _snapshot_has_channels(store, channel_filters):
-    if not channel_filters:
-        return True
-    normalized = {ch.upper() for ch in channel_filters}
-    for item in store.get("days", []):
-        channel_map = item.get("channels", {}) if isinstance(item.get("channels"), dict) else {}
-        if normalized.intersection(channel_map.keys()):
-            return True
-    return False
-
-
-try:
-    with open("index.html", "r", encoding="utf-8") as f:
-        html_content = f.read()
-except FileNotFoundError:
-    html_content = "<h1>Error: index.html not found</h1>"
+def _next_run_hint(settings):
+    now = datetime.utcnow()
+    value = int(settings.get("frequency_value", 30))
+    unit = settings.get("frequency_unit", "minute")
+    delta = timedelta(hours=value) if unit == "hour" else timedelta(minutes=value)
+    return (now + delta).isoformat() + "Z"
 
 
 @app.route("/")
 def index():
-    return render_template_string(html_content)
+    _ensure_runner_config()
+    return send_file(ROOT_DIR / "index.html")
 
 
-@app.route("/nz.json")
-def nz_geojson():
-    nz_path = Path(__file__).with_name("nz.json")
-    if not nz_path.exists():
-        return jsonify({"status": "error", "message": "nz.json not found"}), 404
-    return send_file(nz_path, mimetype="application/json")
-
-
-@app.route("/get-data")
-def get_data():
-    try:
-        _fix_snapshot_units_if_needed()
-        channel_filters = _parse_channel_filters()
-        fallback_used = False
-        fallback_reason = None
-        snapshot_date = None
-
-        snapshot_rows, snapshot_date, snapshot_store = _rows_from_snapshot_store(channel_filters)
-        rows = snapshot_rows
-        use_snapshot_rows = rows is not None and (
-            not channel_filters or _snapshot_has_channels(snapshot_store, channel_filters)
-        )
-        if not use_snapshot_rows:
-            if channel_filters:
-                try:
-                    rows = _convert_rows_to_containers(_run_query(_build_channel_sql(channel_filters), channel_filters))
-                    fallback_used = True
-                    fallback_reason = "静态快照未包含该渠道，已改用实时渠道查询"
-                    snapshot_date = None
-                except Exception as db_error:
-                    rows = snapshot_rows if snapshot_rows is not None else []
-                    fallback_used = True
-                    fallback_reason = f"静态快照未包含该渠道，且实时查询失败，按快照口径返回：{db_error}"
-            else:
-                try:
-                    rows = _convert_rows_to_containers(_run_query(BASE_VOLUME_SQL))
-                except Exception as db_error:
-                    rows = _load_base_rows_from_csv()
-                    fallback_used = True
-                    fallback_reason = f"静态快照缺失，回退 CSV：{db_error}"
-        else:
-            fallback_reason = f"已使用 {snapshot_date} 的静态快照数据" if snapshot_date else "已使用静态快照数据"
-
-        rows_by_name = {}
-        for row in rows:
-            name = (_row_get(row, "WarehouseName", "") or "").strip()
-            if not name:
-                continue
-            rows_by_name[name] = rows_by_name.get(name, 0.0) + float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
-
-        profiles = _warehouse_master_profiles(rows_by_name.keys())
-        result = []
-        total_volume = 0.0
-        unmapped = []
-
-        has_channel_filter = bool(channel_filters)
-        for profile in profiles:
-            name = profile["name"]
-            include = bool(profile["includeInVolume"])
-            coords = profile["coords"]
-            volume = float(rows_by_name.get(name, 0.0)) if include else 0.0
-            meta = _warehouse_meta(name)
-            capacity = meta.get("capacity")
-            if include:
-                total_volume += volume
-                if not coords:
-                    unmapped.append(name)
-                # 渠道筛选时仅展示命中仓库（volume>0），避免“全是0气泡”误导。
-                should_show = bool(coords) and (not has_channel_filter or volume > 0)
-                if should_show:
-                    result.append(
-                        {
-                            "name": name,
-                            "volume": volume,
-                            "capacity": capacity,
-                            "coords": coords,
-                            "includeInVolume": True,
-                            "displayOnMap": True,
-                        }
-                    )
-
-        return jsonify(
-            {
-                "status": "success",
-                "filters": {"channels": channel_filters},
-                "channelSqlConfigured": bool(CHANNEL_VOLUME_SQL),
-                "data": result,
-                "total": total_volume,
-                "warehouseProfiles": profiles,
-                "unmappedWarehouses": unmapped,
-                "snapshotDate": snapshot_date,
-                "fallback": {
-                    "used": fallback_used,
-                    "source": "snapshot" if snapshot_date else ("csv" if fallback_used else "database"),
-                    "reason": fallback_reason,
-                },
-            }
-        )
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)})
-
-
-@app.route("/trend-data")
-def get_trend_data():
-    try:
-        channel_filters = _parse_channel_filters()
-        days = _parse_days()
-        fallback_used = False
-        fallback_reason = None
-        store = _load_snapshot_store()
-        refreshed = False
-
-        rows = None
-        used_db_for_trend = False
-        source = "snapshot_daily"
-
-        # 优先从数据库取当前总量并按日拉平（不依赖 daily_snapshots.json）。
-        try:
-            total = _db_trend_total_volume(channel_filters)
-            rows = _build_flat_trend(days, total)
-            used_db_for_trend = True
-            if channel_filters and CHANNEL_VOLUME_SQL:
-                source = "database_channel_realtime_flat"
-            else:
-                source = "database_realtime_flat"
-        except Exception as db_error:
-            fallback_used = True
-            fallback_reason = f"数据库趋势不可用，已回退快照或 CSV：{db_error}"
-            rows = _build_snapshot_trend(days, channel_filters, store)
-            if rows:
-                source = "snapshot_daily"
-            else:
-                rows = _build_flat_trend(days, _csv_total_volume())
-                source = "flat:csv_snapshot"
-                fallback_reason = f"{fallback_reason}；静态快照为空，已退化为 CSV 单值趋势"
-
-        trend_data = []
-        totals_by_date = {}
-        channel_totals = {}
-
-        for row in rows:
-            date_text = row["date"] if isinstance(row, dict) and "date" in row else str(_row_get(row, "VolumeDate"))
-            channel = row["channel"] if isinstance(row, dict) and "channel" in row else ((_row_get(row, "ChannelName", "") or "").strip() or "UNK")
-            volume = float(row["volume"] if isinstance(row, dict) and "volume" in row else (_row_get(row, "TotalOccupiedVolume", 0) or 0))
-
-            trend_data.append({"date": date_text, "channel": channel, "volume": volume})
-            totals_by_date[date_text] = totals_by_date.get(date_text, 0.0) + volume
-            channel_totals[channel] = channel_totals.get(channel, 0.0) + volume
-
-        trend_data.sort(key=lambda x: (x["date"], x["channel"]))
-        totals = [{"date": d, "volume": totals_by_date[d]} for d in sorted(totals_by_date.keys())]
-        ranked_channels = sorted(
-            [{"channel": k, "total": v} for k, v in channel_totals.items()],
-            key=lambda x: x["total"],
-            reverse=True,
-        )
-
-        return jsonify(
-            {
-                "status": "success",
-                "filters": {"channels": channel_filters, "days": days},
-                "data": trend_data,
-                "totals": totals,
-                "channelTotals": ranked_channels,
-                "source": source,
-                "fallback": {"used": fallback_used, "reason": fallback_reason},
-                "snapshot": {"refreshedToday": refreshed, "lastUpdated": store.get("last_updated")},
-            }
-        )
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)})
-
-
-@app.route("/snapshot-refresh")
-def refresh_snapshot_legacy():
-    try:
-        force = request.args.get("force", "0") == "1"
-        store, refreshed = _refresh_daily_snapshot(force=force)
-        return jsonify(
-            {
-                "status": "success",
-                "refreshed": refreshed,
-                "lastUpdated": store.get("last_updated"),
-                "days": len(store.get("days", [])),
-            }
-        )
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)})
-
-
-@app.route("/snapshot/refresh")
-def refresh_snapshot():
-    try:
-        force = request.args.get("force", "0") == "1"
-        store, created = _refresh_daily_snapshot(force=force)
-        latest = store.get("days", [])[-1] if store.get("days") else None
-        return jsonify(
-            {
-                "status": "success",
-                "created": created,
-                "latestDate": latest.get("date") if latest else None,
-                "source": latest.get("source") if latest else None,
-                "daysStored": len(store.get("days", [])),
-            }
-        )
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)})
-
-
-@app.route("/snapshot/status")
-def snapshot_status():
-    store = _load_snapshot_store()
-    latest = store.get("days", [])[-1] if store.get("days") else None
+@app.route("/api/health")
+def health():
     return jsonify(
         {
-            "status": "success",
-            "lastUpdated": store.get("last_updated"),
-            "daysStored": len(store.get("days", [])),
-            "latestDate": latest.get("date") if latest else None,
-            "latestSource": latest.get("source") if latest else None,
+            "status": "ok",
+            "time": _utc_iso(),
+            "configFile": str(RUNNER_CONFIG_FILE),
+            "pyodbcInstalled": pyodbc is not None,
+            "drivers": _pyodbc_drivers(),
         }
     )
 
 
-@app.route("/snapshot/normalize")
-def normalize_snapshot():
-    try:
-        changed = _normalize_snapshot_units()
-        store = _load_snapshot_store()
-        latest = store.get("days", [])[-1] if store.get("days") else None
-        return jsonify(
-            {
-                "status": "success",
-                "normalized": bool(changed),
-                "lastUpdated": store.get("last_updated"),
-                "latestDate": latest.get("date") if latest else None,
-            }
-        )
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)})
-
-
-@app.route("/channels")
-def get_channels():
-    try:
-        sql = f"""
-        WITH ChannelVolume AS (
-            {CHANNEL_VOLUME_SQL}
-        )
-        SELECT DISTINCT ChannelName
-        FROM ChannelVolume
-        WHERE ChannelName IS NOT NULL AND LTRIM(RTRIM(ChannelName)) <> ''
-        ORDER BY ChannelName
-        """
-        rows = _run_query(sql)
-        return jsonify(
-            {
-                "status": "success",
-                "configured": True,
-                "data": [row.ChannelName for row in rows],
-            }
-        )
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)})
-
-
-@app.route("/warehouse-profile", methods=["POST"])
-def update_warehouse_profile():
-    try:
-        payload = request.get_json(silent=True) or {}
-        name = (payload.get("name") or "").strip()
-        if not name:
-            return jsonify({"status": "error", "message": "name 不能为空"}), 400
-
-        profiles = [
-            {
-                "name": name,
-                "coords": payload.get("coords"),
-                "includeInVolume": payload.get("includeInVolume"),
-            }
-        ]
-        _save_profiles_batch(profiles)
-        return jsonify({"status": "success"})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 400
-
-
-@app.route("/warehouse-profiles", methods=["GET", "POST"])
-def warehouse_profiles():
+@app.route("/api/runner-config", methods=["GET", "POST"])
+def runner_config():
+    _ensure_runner_config()
     if request.method == "GET":
-        profiles = _warehouse_master_profiles()
-        return jsonify({"status": "success", "total": len(profiles), "data": profiles})
+        data = _load_runner_config()
+        data["meta"] = {
+            "configFile": str(RUNNER_CONFIG_FILE),
+            "drivers": _pyodbc_drivers(),
+            "nextRunHint": _next_run_hint(data.get("settings", {})),
+        }
+        return jsonify({"status": "success", "data": data})
 
+    payload = request.get_json(silent=True) or {}
+    normalized = _normalize_region_payload(payload)
+    _save_runner_config(normalized)
+    return jsonify({"status": "success", "message": "配置已保存。", "data": normalized})
+
+
+@app.route("/api/runner/templates")
+def runner_templates():
+    _ensure_runner_config()
+    region = (request.args.get("region") or "").strip().upper()
+    config = _load_runner_config()
+    region_cfg = config.get("regions", {}).get(region)
+    if not region_cfg:
+        return jsonify({"status": "error", "message": f"未知地区: {region}"}), 400
     try:
-        payload = request.get_json(silent=True) or {}
-        profiles = payload.get("profiles")
-        _save_profiles_batch(profiles)
-        latest = _warehouse_master_profiles()
-        return jsonify({"status": "success", "total": len(latest), "data": latest})
-    except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 400
+        files = _list_txt_templates(region_cfg.get("template_dir"))
+        return jsonify(
+            {
+                "status": "success",
+                "region": region,
+                "templateDir": str(_resolve_path(region_cfg.get("template_dir"))),
+                "count": len(files),
+                "files": [f.name for f in files],
+            }
+        )
+    except Exception as exc:
+        return jsonify({"status": "error", "region": region, "message": str(exc)}), 400
+
+
+@app.route("/api/runner/test-connection", methods=["POST"])
+def runner_test_connection():
+    _ensure_runner_config()
+    payload = request.get_json(silent=True) or {}
+    region = str(payload.get("region", "")).strip().upper()
+    config = _load_runner_config()
+    region_cfg = config.get("regions", {}).get(region)
+    if not region_cfg:
+        return jsonify({"status": "error", "message": f"未知地区: {region}"}), 400
+
+    result = _test_connection(region_cfg.get("connection_uri"))
+    result["region"] = region
+    return jsonify(result), (200 if result.get("status") == "success" else 500)
+
+
+@app.route("/api/runner/run", methods=["POST"])
+def runner_run():
+    _ensure_runner_config()
+    payload = request.get_json(silent=True) or {}
+    requested_regions = payload.get("regions", [])
+    if not isinstance(requested_regions, list):
+        return jsonify({"status": "error", "message": "regions 必须是数组。"}), 400
+
+    requested_regions = [str(item).strip().upper() for item in requested_regions if str(item).strip()]
+    if not requested_regions:
+        return jsonify({"status": "error", "message": "至少选择一个地区。"}), 400
+
+    config = _load_runner_config()
+    all_regions = config.get("regions", {})
+    results = []
+    summary = {"regions": len(requested_regions), "success": 0, "partial": 0, "warning": 0, "error": 0}
+
+    for region in requested_regions:
+        region_cfg = all_regions.get(region)
+        if not region_cfg:
+            result = {
+                "region": region,
+                "label": region,
+                "status": "error",
+                "startedAt": _utc_iso(),
+                "finishedAt": _utc_iso(),
+                "templateCount": 0,
+                "successCount": 0,
+                "failCount": 0,
+                "outputs": [],
+                "logs": [f"[{region}] 未找到地区配置。"],
+            }
+        else:
+            try:
+                result = _execute_region(region, region_cfg)
+            except Exception as exc:
+                result = {
+                    "region": region,
+                    "label": _region_label(region, region_cfg),
+                    "status": "error",
+                    "startedAt": _utc_iso(),
+                    "finishedAt": _utc_iso(),
+                    "templateCount": 0,
+                    "successCount": 0,
+                    "failCount": 0,
+                    "outputs": [],
+                    "logs": [f"[{region}] 执行失败: {exc}"],
+                }
+        results.append(result)
+        summary[result["status"]] = summary.get(result["status"], 0) + 1
+
+    status = "success"
+    if summary["error"] > 0 and summary["success"] == 0 and summary["partial"] == 0 and summary["warning"] == 0:
+        status = "error"
+    elif summary["error"] > 0 or summary["partial"] > 0:
+        status = "partial"
+
+    return jsonify(
+        {
+            "status": status,
+            "executedAt": _utc_iso(),
+            "summary": summary,
+            "results": results,
+        }
+    )
 
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    _ensure_runner_config()
+    app.run(host="0.0.0.0", port=5000, debug=True)

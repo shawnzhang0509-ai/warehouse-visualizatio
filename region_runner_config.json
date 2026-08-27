@@ -1,0 +1,26 @@
+{
+  "regions": {
+    "NZ": {
+      "label": "新西兰",
+      "connection_uri": "mssql+pymssql://nzlivepooluser:iFur3RP%405sc%5El%5Et3%21@if-akl-live.database.windows.net:1433/nz_ierp_live?charset=utf8",
+      "template_dir": "Data-NZ",
+      "output_dir": "Output-NZ"
+    },
+    "AU": {
+      "label": "澳洲",
+      "connection_uri": "mssql+pymssql://appuserau:Ifurn1tureAuA7p5sc%5El%5Et@if-au-live.database.windows.net:1433/au_ierp_live?charset=utf8",
+      "template_dir": "Data-AU",
+      "output_dir": "Output-AU"
+    },
+    "CA": {
+      "label": "加拿大",
+      "connection_uri": "mssql+pymssql://capool:IfurnitureCA3sc%5El%5Et3@ca-sql-pool-server.database.windows.net:1433/ca_ierp_live?charset=utf8",
+      "template_dir": "Data-CA",
+      "output_dir": "Output-CA"
+    }
+  },
+  "settings": {
+    "frequency_value": 30,
+    "frequency_unit": "minute"
+  }
+}
