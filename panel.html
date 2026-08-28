@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>有货未展示看板</title>
+  <script src="./echarts.min.js"></script>
+  <style>
+    :root {
+      --bg: #f3f6fb; --panel: #fff; --text: #1f2937; --muted: #6b7280;
+      --primary: #2563eb; --ok: #16a34a; --warn: #f59e0b; --err: #dc2626; --border: #e5e7eb;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; color: var(--text); background: var(--bg); }
+    .container { max-width: 1280px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+    .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.03); }
+    .topbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; }
+    .title { margin: 0; font-size: 22px; font-weight: 700; }
+    .subtitle { color: var(--muted); font-size: 13px; margin-top: 6px; }
+    .btn { background: var(--primary); color: #fff; border: none; border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; }
+    .btn:disabled { opacity: .6; cursor: default; }
+    .badge { font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+    .badge.sample { background: #fff7ed; color: #b45309; border-color: #fed7aa; }
+    .badge.csv { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
+    .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+    .kpi { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+    .kpi .label { color: var(--muted); font-size: 13px; }
+    .kpi .value { font-size: 26px; font-weight: 700; margin-top: 6px; }
+    .kpi .hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
+    .kpi.alert .value { color: var(--err); }
+    #chart { height: 320px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
+    th { color: var(--muted); font-weight: 600; cursor: pointer; user-select: none; }
+    tr:hover td { background: #f9fafb; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; }
+    .row-tools { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    input[type="search"] { padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; min-width: 220px; }
+    .msg { border-radius: 8px; padding: 8px 12px; font-size: 13px; margin-top: 8px; }
+    .msg.warning { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
+    .msg.error { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
+    .logic { color: var(--muted); font-size: 12px; line-height: 1.6; }
+    .hidden { display: none; }
+    @media (max-width: 860px) { .kpis { grid-template-columns: repeat(2, 1fr); } }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="panel topbar">
+      <div>
+        <h1 class="title">有货未展示看板</h1>
+        <div class="subtitle" id="subtitle">用店面展示数据比对 non-discontinue 且有货的产品，找出有货但没展示的。</div>
+      </div>
+      <div class="row-tools">
+        <span class="badge" id="sourceBadge">数据源：-</span>
+        <button class="btn" id="refreshBtn">刷新</button>
+      </div>
+    </div>
+
+    <div class="kpis">
+      <div class="kpi"><div class="label">店铺有货率</div><div class="value" id="kpiInStock">-</div><div class="hint">有货未停产 / 全部未停产</div></div>
+      <div class="kpi"><div class="label">展示覆盖率</div><div class="value" id="kpiCoverage">-</div><div class="hint">已展示且有货 / 有货未停产</div></div>
+      <div class="kpi alert"><div class="label">有货未展示（个）</div><div class="value" id="kpiGap">-</div><div class="hint">有货未停产但未展示</div></div>
+      <div class="kpi"><div class="label">有货未停产（个）</div><div class="value" id="kpiInStockCount">-</div><div class="hint">纳入分析的产品总量</div></div>
+    </div>
+
+    <div class="panel">
+      <h3 style="margin:0 0 8px;">各系列：有货 vs 有货未展示</h3>
+      <div id="chart"></div>
+    </div>
+
+    <div class="panel">
+      <div class="row-tools" style="justify-content: space-between;">
+        <h3 style="margin:0;">有货未展示明细</h3>
+        <input type="search" id="search" placeholder="搜索编码 / 名称 / 系列...">
+      </div>
+      <div id="messages"></div>
+      <div style="overflow:auto; margin-top: 10px;">
+        <table id="gapTable">
+          <thead>
+            <tr>
+              <th data-key="code">产品编码</th>
+              <th data-key="name">名称</th>
+              <th data-key="family">系列</th>
+              <th data-key="stock_qty" class="num">库存</th>
+              <th data-key="price" class="num">价格</th>
+            </tr>
+          </thead>
+          <tbody id="gapBody"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel logic">
+      判定口径：<b>有货未展示</b> = 库存 &gt; 0 且未停产 (non-discontinue)，但产品编码不在店面展示清单中。<br>
+      数据源支持：环境变量 <code>INSTOCK_STOCK_CSV</code> / <code>INSTOCK_DISPLAY_CSV</code> 或 <code>INSTOCK_DATA_DIR</code> 指向的 CSV；默认使用 <code>sample_data/</code> 示例数据。
+      可直接用 Data-NZ 里的 SQL 导出结果作为 CSV，列名会自动模糊匹配。
+    </div>
+  </div>
+
+  <script>
+    const state = { rows: [], sortKey: "stock_qty", sortDir: -1, filter: "" };
+    let chart;
+
+    function fmtPct(v) { return (v === null || v === undefined) ? "-" : `${Number(v).toFixed(1)}%`; }
+    function fmtMoney(v) { return (v === null || v === undefined) ? "-" : Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+
+    function renderMessages(items) {
+      const box = document.getElementById("messages");
+      box.innerHTML = "";
+      (items || []).forEach(it => {
+        const d = document.createElement("div");
+        d.className = `msg ${it.level === "error" ? "error" : "warning"}`;
+        d.textContent = it.message;
+        box.appendChild(d);
+      });
+    }
+
+    function renderChart(byFamily) {
+      if (!chart) chart = echarts.init(document.getElementById("chart"));
+      const fams = byFamily.map(f => f.family);
+      chart.setOption({
+        tooltip: { trigger: "axis", axisPointer: { type: "shadow" } },
+        legend: { data: ["有货未展示", "有货(已展示)"] },
+        grid: { left: 50, right: 20, top: 40, bottom: 40 },
+        xAxis: { type: "category", data: fams },
+        yAxis: { type: "value", name: "产品数" },
+        series: [
+          { name: "有货未展示", type: "bar", stack: "t", data: byFamily.map(f => f.not_displayed_count), itemStyle: { color: "#dc2626" }, label: { show: true, position: "inside" } },
+          { name: "有货(已展示)", type: "bar", stack: "t", data: byFamily.map(f => Math.max(0, f.in_stock_count - f.not_displayed_count)), itemStyle: { color: "#16a34a" } }
+        ]
+      }, true);
+    }
+
+    function renderTable() {
+      const body = document.getElementById("gapBody");
+      const f = state.filter.trim().toLowerCase();
+      let rows = state.rows.filter(r =>
+        !f || `${r.code} ${r.name} ${r.family}`.toLowerCase().includes(f));
+      rows.sort((a, b) => {
+        const k = state.sortKey; let av = a[k], bv = b[k];
+        if (typeof av === "string" || typeof bv === "string") { av = String(av ?? ""); bv = String(bv ?? ""); return av.localeCompare(bv) * state.sortDir; }
+        return ((av ?? 0) - (bv ?? 0)) * state.sortDir;
+      });
+      body.innerHTML = "";
+      if (!rows.length) { body.innerHTML = `<tr><td colspan="5" style="color:var(--muted);padding:16px;">没有符合条件的记录。</td></tr>`; return; }
+      for (const r of rows) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td>${r.code}</td><td>${r.name || "-"}</td><td>${r.family}</td>` +
+          `<td class="num">${r.stock_qty}</td><td class="num">${fmtMoney(r.price)}</td>`;
+        body.appendChild(tr);
+      }
+    }
+
+    function render(data) {
+      const badge = document.getElementById("sourceBadge");
+      badge.className = `badge ${data.source === "sample" ? "sample" : "csv"}`;
+      badge.textContent = data.source === "sample" ? "数据源：示例数据" : "数据源：CSV";
+      document.getElementById("subtitle").textContent =
+        `更新时间：${data.asOf || "-"}　库存源：${(data.sources && data.sources.stock) || "-"}`;
+
+      const s = data.summary || {};
+      document.getElementById("kpiInStock").textContent = fmtPct(s.in_stock_rate);
+      document.getElementById("kpiCoverage").textContent = fmtPct(s.display_coverage_rate);
+      document.getElementById("kpiGap").textContent = s.not_displayed_count ?? "-";
+      document.getElementById("kpiInStockCount").textContent = s.in_stock_count ?? "-";
+
+      state.rows = data.not_displayed || [];
+      renderChart(data.by_family || []);
+      renderTable();
+      renderMessages(data.diagnostics);
+    }
+
+    async function load() {
+      const btn = document.getElementById("refreshBtn");
+      btn.disabled = true; btn.textContent = "加载中...";
+      try {
+        const res = await fetch("/api/gap");
+        const data = await res.json();
+        if (data.status !== "success") { renderMessages([{ level: "error", message: data.message || "加载失败" }]); return; }
+        render(data);
+      } catch (e) {
+        renderMessages([{ level: "error", message: String(e) }]);
+      } finally {
+        btn.disabled = false; btn.textContent = "刷新";
+      }
+    }
+
+    document.getElementById("refreshBtn").addEventListener("click", load);
+    document.getElementById("search").addEventListener("input", e => { state.filter = e.target.value; renderTable(); });
+    document.querySelectorAll("#gapTable th").forEach(th => th.addEventListener("click", () => {
+      const k = th.dataset.key;
+      if (state.sortKey === k) state.sortDir *= -1; else { state.sortKey = k; state.sortDir = 1; }
+      renderTable();
+    }));
+    window.addEventListener("resize", () => chart && chart.resize());
+    load();
+  </script>
+</body>
+</html>

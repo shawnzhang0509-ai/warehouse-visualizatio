@@ -1,0 +1,19 @@
+ProductCode,ProductName,Family,StockQty,Price,Discontinued
+SOF-1001,Roma 3-Seater Sofa,Sofa,12,1299.00,0
+SOF-1002,Milan Corner Sofa,Sofa,5,1899.00,0
+SOF-1003,Venice Recliner Sofa,Sofa,0,1599.00,0
+SOF-1004,Retro 2-Seater Sofa,Sofa,3,999.00,1
+BED-2001,Oslo Queen Bed,Bed,8,899.00,0
+BED-2002,Nordic King Bed,Bed,2,1099.00,0
+BED-2003,Kids Bunk Bed,Bed,0,699.00,0
+BED-2004,Classic Slat Bed,Bed,6,549.00,1
+DIN-3001,Oak Dining Table 6-Seat,Dining,4,1199.00,0
+DIN-3002,Marble Dining Table 8-Seat,Dining,1,2499.00,0
+DIN-3003,Compact Dining Set,Dining,9,749.00,0
+MAT-4001,CloudRest Queen Mattress,Mattress,20,799.00,0
+MAT-4002,OrthoFirm King Mattress,Mattress,7,1099.00,0
+MAT-4003,BudgetSleep Single Mattress,Mattress,0,299.00,0
+CHR-5001,Ergo Office Chair,Chair,15,349.00,0
+CHR-5002,Velvet Accent Chair,Chair,11,279.00,0
+CHR-5003,Folding Event Chair,Chair,40,49.00,1
+CHR-5004,Rattan Outdoor Chair,Chair,6,199.00,0
