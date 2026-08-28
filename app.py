@@ -197,7 +197,7 @@ def _list_txt_templates(template_dir):
         raise FileNotFoundError(f"模板目录不存在: {path}")
     if not path.is_dir():
         raise NotADirectoryError(f"模板目录不是文件夹: {path}")
-    files = [p for p in path.iterdir() if p.is_file() and p.suffix.lower() == ".txt"]
+    files = [p for p in path.iterdir() if p.is_file() and p.suffix.lower() in (".txt", ".sql")]
     files.sort(key=lambda p: p.name.lower())
     return files
 
