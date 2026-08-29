@@ -360,7 +360,7 @@ def test_connection(uri):
             conn.close()
 
 
-def execute_region(region_key, region_cfg, log=None):
+def execute_region(region_key, region_cfg, log=None, on_template_start=None, on_template_done=None):
     def _log(text):
         if callable(log):
             log(text)
@@ -397,6 +397,8 @@ def execute_region(region_key, region_cfg, log=None):
         cursor = conn.cursor()
         for tpl in templates:
             tpl_name = tpl["name"]
+            if callable(on_template_start):
+                on_template_start(tpl_name)
             _log(f"[{region_key}] 执行模板：{tpl_name}")
             try:
                 result = _run_single_template(cursor, tpl["sql"])
@@ -440,6 +442,9 @@ def execute_region(region_key, region_cfg, log=None):
                     }
                 )
                 _log(f"[{region_key}] 失败：{tpl_name} -> {exc}")
+            finally:
+                if callable(on_template_done):
+                    on_template_done(tpl_name)
     finally:
         if cursor:
             cursor.close()
@@ -460,13 +465,38 @@ def execute_region(region_key, region_cfg, log=None):
     }
 
 
-def run_regions(selected_regions, config, log=None):
+def _count_runnable_templates(selected_regions, config, log=None):
+    regions = config.get("regions", {})
+    total = 0
+    for region in selected_regions:
+        region_cfg = regions.get(region)
+        if region_cfg:
+            total += len(_load_sql_templates(region_cfg.get("template_dir"), log=log))
+    return max(total, 1)
+
+
+def run_regions(selected_regions, config, log=None, progress=None):
     regions = config.get("regions", {})
     results = []
     summary = {"regions": len(selected_regions), "success": 0, "partial": 0, "warning": 0, "error": 0}
+    total_steps = _count_runnable_templates(selected_regions, config, log=log)
+    current_step = 0
+
+    def _report(message):
+        if callable(progress):
+            progress(current_step, total_steps, message)
 
     for region in selected_regions:
         region_cfg = regions.get(region)
+
+        def _on_start(tpl_name, rk=region):
+            _report(f"[{rk}] 正在执行 {tpl_name} ...")
+
+        def _on_done(tpl_name, rk=region):
+            nonlocal current_step
+            current_step += 1
+            _report(f"[{rk}] 已完成 {tpl_name} ({current_step}/{total_steps})")
+
         if not region_cfg:
             if callable(log):
                 log(f"[{region}] 未找到地区配置。")
@@ -483,7 +513,13 @@ def run_regions(selected_regions, config, log=None):
             }
         else:
             try:
-                result = execute_region(region, region_cfg, log=log)
+                result = execute_region(
+                    region,
+                    region_cfg,
+                    log=log,
+                    on_template_start=_on_start,
+                    on_template_done=_on_done,
+                )
             except Exception as exc:
                 if callable(log):
                     log(f"[{region}] 执行失败：{exc}")
@@ -540,6 +576,7 @@ class DesktopRunnerApp:
         self.status_var = tk.StringVar(value="就绪")
         self.next_run_var = tk.StringVar(value="未调度")
         self.progress_var = tk.DoubleVar(value=0)
+        self.progress_text_var = tk.StringVar(value="")
         self.save_hint_var = tk.StringVar(value="已加载")
 
         self._build_ui()
@@ -641,8 +678,12 @@ class DesktopRunnerApp:
         self.summary_label = ttk.Label(status_frame, text="")
         self.summary_label.pack(side=tk.RIGHT)
 
-        self.progress = ttk.Progressbar(top, variable=self.progress_var, maximum=100)
-        self.progress.pack(fill=tk.X, pady=(0, 8))
+        progress_frame = ttk.Frame(top)
+        progress_frame.pack(fill=tk.X, pady=(0, 8))
+        self.progress_detail = ttk.Label(progress_frame, textvariable=self.progress_text_var, foreground="#4b5563")
+        self.progress_detail.pack(anchor=tk.W)
+        self.progress = ttk.Progressbar(progress_frame, variable=self.progress_var, maximum=100)
+        self.progress.pack(fill=tk.X, pady=(4, 0))
 
         log_frame = ttk.LabelFrame(top, text="执行日志", padding=8)
         log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
@@ -674,19 +715,35 @@ class DesktopRunnerApp:
     def _set_status(self, text):
         self.status_var.set(text)
 
-    def _set_busy(self, busy):
+    def _update_progress(self, current, total, message):
+        pct = (current / total * 100) if total else 0
+        self.progress_var.set(pct)
+        self.progress_text_var.set(message)
+
+    def _ui_progress_from_thread(self, current, total, message):
+        self.root.after(0, lambda: self._update_progress(current, total, message))
+
+    def _set_busy(self, busy, *, indeterminate=False):
         self.busy = busy
         state = tk.DISABLED if busy else tk.NORMAL
         for widget in (self.test_btn, self.scan_btn, self.save_btn, self.run_btn, self.schedule_start_btn, self.freq_spin, self.freq_combo):
             widget.configure(state=state)
         self.schedule_stop_btn.configure(state=tk.NORMAL)
         if busy:
-            self.progress.configure(mode="indeterminate")
-            self.progress.start(9)
+            if indeterminate:
+                self.progress.configure(mode="indeterminate")
+                self.progress.start(9)
+                self.progress_text_var.set("处理中...")
+            else:
+                self.progress.stop()
+                self.progress.configure(mode="determinate")
+                self.progress_var.set(0)
+                self.progress_text_var.set("准备中...")
         else:
             self.progress.stop()
             self.progress.configure(mode="determinate")
             self.progress_var.set(0)
+            self.progress_text_var.set("")
 
     def _mark_unsaved(self):
         self.save_hint_var.set("有未保存改动")
@@ -750,12 +807,12 @@ class DesktopRunnerApp:
         regions = [k for k, var in self.region_vars.items() if var.get()]
         return regions or [self.region_order[0]]
 
-    def _run_in_background(self, status_text, worker_fn, done_fn):
+    def _run_in_background(self, status_text, worker_fn, done_fn, *, indeterminate=False):
         if self.busy:
             self.log("已有任务在执行，请稍候。")
             return
 
-        self._set_busy(True)
+        self._set_busy(True, indeterminate=indeterminate)
         self._set_status(status_text)
 
         def _worker():
@@ -823,7 +880,7 @@ class DesktopRunnerApp:
                 self.log(f"[{region}] 连接失败：{result.get('message')}")
                 self._set_status("连接测试失败")
 
-        self._run_in_background("连接测试中...", worker, done)
+        self._run_in_background("连接测试中...", worker, done, indeterminate=True)
 
     def run_action(self, from_schedule=False):
         self._sync_edit_form_to_config()
@@ -836,7 +893,12 @@ class DesktopRunnerApp:
         self.log(f"开始执行地区：{', '.join(selected)}")
 
         def worker():
-            return run_regions(selected, self.config_data, log=self._ui_log_from_thread)
+            return run_regions(
+                selected,
+                self.config_data,
+                log=self._ui_log_from_thread,
+                progress=self._ui_progress_from_thread,
+            )
 
         def done(err, result):
             self._set_busy(False)
@@ -844,6 +906,7 @@ class DesktopRunnerApp:
                 self.log(f"执行失败：{err}")
                 self._set_status("执行失败")
                 return
+            self._update_progress(1, 1, "全部完成")
             summary = result.get("summary", {})
             self.summary_label.configure(
                 text=f"地区:{summary.get('regions', 0)} 成功:{summary.get('success', 0)} 部分:{summary.get('partial', 0)} 警告:{summary.get('warning', 0)} 失败:{summary.get('error', 0)}"
