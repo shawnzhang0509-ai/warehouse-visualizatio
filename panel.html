@@ -14,14 +14,15 @@
     body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; color: var(--text); background: var(--bg); }
     .container { max-width: 1280px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
     .panel { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; box-shadow: 0 2px 8px rgba(0,0,0,0.03); }
-    .topbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 12px; }
+    .topbar { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: flex-start; gap: 12px; }
     .title { margin: 0; font-size: 22px; font-weight: 700; }
-    .subtitle { color: var(--muted); font-size: 13px; margin-top: 6px; }
+    .subtitle { color: var(--muted); font-size: 13px; margin-top: 6px; line-height: 1.5; }
     .btn { background: var(--primary); color: #fff; border: none; border-radius: 8px; padding: 8px 16px; font-size: 14px; cursor: pointer; }
     .btn:disabled { opacity: .6; cursor: default; }
-    .badge { font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); }
+    .badge { font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
     .badge.sample { background: #fff7ed; color: #b45309; border-color: #fed7aa; }
     .badge.csv { background: #ecfdf5; color: #047857; border-color: #a7f3d0; }
+    .badge.region { background: #eff6ff; color: #1d4ed8; border-color: #bfdbfe; }
     .kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
     .kpi { background: var(--panel); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
     .kpi .label { color: var(--muted); font-size: 13px; }
@@ -29,19 +30,43 @@
     .kpi .hint { color: var(--muted); font-size: 12px; margin-top: 4px; }
     .kpi.alert .value { color: var(--err); }
     #chart { height: 320px; }
-    table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
-    th { color: var(--muted); font-weight: 600; cursor: pointer; user-select: none; }
-    tr:hover td { background: #f9fafb; }
-    .num { text-align: right; font-variant-numeric: tabular-nums; }
     .row-tools { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-    input[type="search"] { padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; min-width: 220px; }
+    .controls { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    select, input[type="search"] { padding: 7px 10px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; background: #fff; }
+    select { min-width: 140px; }
+    input[type="search"] { min-width: 220px; }
+    label.check { display: inline-flex; align-items: center; gap: 6px; font-size: 14px; color: var(--text); cursor: pointer; }
     .msg { border-radius: 8px; padding: 8px 12px; font-size: 13px; margin-top: 8px; }
     .msg.warning { background: #fffbeb; color: #92400e; border: 1px solid #fde68a; }
     .msg.error { background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; }
     .logic { color: var(--muted); font-size: 12px; line-height: 1.6; }
-    .hidden { display: none; }
-    @media (max-width: 860px) { .kpis { grid-template-columns: repeat(2, 1fr); } }
+    .product-list { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+    .product-card {
+      display: grid; grid-template-columns: 96px 1fr auto; gap: 14px; align-items: center;
+      border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: #fff;
+    }
+    .product-card.gap { border-color: #fecaca; background: #fffbfb; }
+    .thumb {
+      width: 96px; height: 96px; border-radius: 8px; overflow: hidden; flex-shrink: 0;
+      display: flex; align-items: center; justify-content: center; text-align: center;
+      font-size: 11px; line-height: 1.3; padding: 6px; color: #fff; font-weight: 600;
+    }
+    .thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+    .product-main .code-name { font-size: 16px; font-weight: 700; margin-bottom: 4px; }
+    .product-main .meta { color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .tags { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; min-width: 110px; }
+    .tag { font-size: 12px; padding: 4px 10px; border-radius: 999px; font-weight: 600; white-space: nowrap; }
+    .tag.stock { background: #dcfce7; color: #166534; }
+    .tag.displayed { background: #dbeafe; color: #1e40af; }
+    .tag.not-displayed { background: #fee2e2; color: #991b1b; }
+    .tag.gap { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
+    .empty { color: var(--muted); padding: 24px; text-align: center; }
+    @media (max-width: 860px) {
+      .kpis { grid-template-columns: repeat(2, 1fr); }
+      .product-card { grid-template-columns: 72px 1fr; }
+      .tags { grid-column: 1 / -1; flex-direction: row; flex-wrap: wrap; justify-content: flex-start; }
+      .thumb { width: 72px; height: 72px; }
+    }
   </style>
 </head>
 <body>
@@ -57,6 +82,18 @@
       </div>
     </div>
 
+    <div class="panel controls">
+      <label>地区
+        <select id="regionSelect"></select>
+      </label>
+      <label>店面
+        <select id="warehouseSelect"><option value="">全部店面</option></select>
+      </label>
+      <button class="btn" id="reloadBtn">刷新</button>
+      <label class="check"><input type="checkbox" id="gapOnly"> 只看有货未展示</label>
+      <input type="search" id="search" placeholder="搜索编码 / 名称 / 系列...">
+    </div>
+
     <div class="kpis">
       <div class="kpi"><div class="label">店铺有货率</div><div class="value" id="kpiInStock">-</div><div class="hint">有货未停产 / 全部未停产</div></div>
       <div class="kpi"><div class="label">展示覆盖率</div><div class="value" id="kpiCoverage">-</div><div class="hint">已展示且有货 / 有货未停产</div></div>
@@ -70,40 +107,65 @@
     </div>
 
     <div class="panel">
-      <div class="row-tools" style="justify-content: space-between;">
-        <h3 style="margin:0;">有货未展示明细</h3>
-        <input type="search" id="search" placeholder="搜索编码 / 名称 / 系列...">
-      </div>
+      <h3 style="margin:0;">产品列表</h3>
       <div id="messages"></div>
-      <div style="overflow:auto; margin-top: 10px;">
-        <table id="gapTable">
-          <thead>
-            <tr>
-              <th data-key="code">产品编码</th>
-              <th data-key="name">名称</th>
-              <th data-key="family">系列</th>
-              <th data-key="stock_qty" class="num">库存</th>
-              <th data-key="price" class="num">价格</th>
-            </tr>
-          </thead>
-          <tbody id="gapBody"></tbody>
-        </table>
-      </div>
+      <div class="product-list" id="productList"></div>
     </div>
 
     <div class="panel logic">
-      判定口径：<b>有货未展示</b> = 库存 &gt; 0 且未停产 (non-discontinue)，但产品编码不在店面展示清单中。<br>
-      数据源支持：环境变量 <code>INSTOCK_STOCK_CSV</code> / <code>INSTOCK_DISPLAY_CSV</code> 或 <code>INSTOCK_DATA_DIR</code> 指向的 CSV；默认使用 <code>sample_data/</code> 示例数据。
-      可直接用 Data-NZ 里的 SQL 导出结果作为 CSV，列名会自动模糊匹配。
+      判定口径：<b>有货未展示</b> = 库存 &gt; 0 且未停产 (non-discontinue)，但产品编码不在所选店面的展示清单中。<br>
+      图片来源：CSV 的 ImageUrl 列，或数据目录下 <code>images/{产品编码}.jpg</code>（也支持 png/webp）。<br>
+      地区数据：SQL 执行器导出到 <code>Output-NZ</code> / <code>Output-CA</code> 等目录的 <code>latest/</code> 子文件夹，看板可直接切换验证。
     </div>
   </div>
 
   <script>
-    const state = { rows: [], sortKey: "stock_qty", sortDir: -1, filter: "" };
+    const state = { products: [], filter: "", gapOnly: false, region: "sample", warehouse: "" };
     let chart;
+    const FAMILY_COLORS = {
+      Sofa: "#7c3aed", Bed: "#059669", Dining: "#ea580c", Mattress: "#db2777",
+      Chair: "#2563eb", "未分类": "#6b7280"
+    };
 
     function fmtPct(v) { return (v === null || v === undefined) ? "-" : `${Number(v).toFixed(1)}%`; }
     function fmtMoney(v) { return (v === null || v === undefined) ? "-" : Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+
+    function familyColor(family) {
+      return FAMILY_COLORS[family] || `hsl(${(family || "").split("").reduce((a, c) => a + c.charCodeAt(0), 0) % 360}, 55%, 45%)`;
+    }
+
+    function imageSrc(product) {
+      if (!product.image_url) return "";
+      if (product.image_url.startsWith("/api/product-image/")) {
+        const q = state.region && state.region !== "sample" ? `?region=${encodeURIComponent(state.region)}` : "";
+        return product.image_url + q;
+      }
+      return product.image_url;
+    }
+
+    function showPlaceholder(el, product) {
+      el.className = "thumb";
+      el.style.background = familyColor(product.family);
+      el.innerHTML = [product.code, product.family, (product.name || "").slice(0, 18)]
+        .map(l => `<div>${l}</div>`).join("");
+    }
+
+    function buildThumb(product) {
+      const el = document.createElement("div");
+      const src = imageSrc(product);
+      if (!src) {
+        showPlaceholder(el, product);
+        return el;
+      }
+      el.className = "thumb";
+      const img = document.createElement("img");
+      img.src = src;
+      img.alt = product.name || product.code;
+      img.loading = "lazy";
+      img.onerror = () => showPlaceholder(el, product);
+      el.appendChild(img);
+      return el;
+    }
 
     function renderMessages(items) {
       const box = document.getElementById("messages");
@@ -114,6 +176,33 @@
         d.textContent = it.message;
         box.appendChild(d);
       });
+    }
+
+    function renderRegionOptions(options) {
+      const sel = document.getElementById("regionSelect");
+      const current = state.region;
+      sel.innerHTML = "";
+      (options || []).forEach(opt => {
+        const o = document.createElement("option");
+        o.value = opt.key;
+        let label = opt.label || opt.key;
+        if (opt.key !== "sample" && opt.has_latest === false) label += " (尚无 latest 数据)";
+        o.textContent = label;
+        sel.appendChild(o);
+      });
+      if ([...sel.options].some(o => o.value === current)) sel.value = current;
+    }
+
+    function renderWarehouseOptions(warehouses) {
+      const sel = document.getElementById("warehouseSelect");
+      const current = state.warehouse;
+      sel.innerHTML = `<option value="">全部店面</option>`;
+      (warehouses || []).forEach(w => {
+        const o = document.createElement("option");
+        o.value = w; o.textContent = w;
+        sel.appendChild(o);
+      });
+      if (current && [...sel.options].some(o => o.value === current)) sel.value = current;
     }
 
     function renderChart(byFamily) {
@@ -132,32 +221,60 @@
       }, true);
     }
 
-    function renderTable() {
-      const body = document.getElementById("gapBody");
+    function renderProducts() {
+      const list = document.getElementById("productList");
       const f = state.filter.trim().toLowerCase();
-      let rows = state.rows.filter(r =>
-        !f || `${r.code} ${r.name} ${r.family}`.toLowerCase().includes(f));
-      rows.sort((a, b) => {
-        const k = state.sortKey; let av = a[k], bv = b[k];
-        if (typeof av === "string" || typeof bv === "string") { av = String(av ?? ""); bv = String(bv ?? ""); return av.localeCompare(bv) * state.sortDir; }
-        return ((av ?? 0) - (bv ?? 0)) * state.sortDir;
+      let rows = state.products.filter(r => {
+        if (state.gapOnly && !r.gap) return false;
+        if (!f) return true;
+        return `${r.code} ${r.name} ${r.family}`.toLowerCase().includes(f);
       });
-      body.innerHTML = "";
-      if (!rows.length) { body.innerHTML = `<tr><td colspan="5" style="color:var(--muted);padding:16px;">没有符合条件的记录。</td></tr>`; return; }
-      for (const r of rows) {
-        const tr = document.createElement("tr");
-        tr.innerHTML = `<td>${r.code}</td><td>${r.name || "-"}</td><td>${r.family}</td>` +
-          `<td class="num">${r.stock_qty}</td><td class="num">${fmtMoney(r.price)}</td>`;
-        body.appendChild(tr);
+      list.innerHTML = "";
+      if (!rows.length) {
+        list.innerHTML = `<div class="empty">没有符合条件的记录。</div>`;
+        return;
+      }
+      for (const p of rows) {
+        const card = document.createElement("div");
+        card.className = `product-card${p.gap ? " gap" : ""}`;
+        card.appendChild(buildThumb(p));
+
+        const main = document.createElement("div");
+        main.className = "product-main";
+        main.innerHTML = `
+          <div class="code-name">${p.code} · ${p.name || "-"}</div>
+          <div class="meta">系列：${p.family}<br>价格：${fmtMoney(p.price)}</div>`;
+        card.appendChild(main);
+
+        const tags = document.createElement("div");
+        tags.className = "tags";
+        tags.innerHTML = `
+          <span class="tag stock">有货 ${p.stock_qty}</span>
+          <span class="tag ${p.displayed ? "displayed" : "not-displayed"}">${p.displayed ? "已展示" : "未展示"}</span>
+          ${p.gap ? '<span class="tag gap">★ 有货未展示</span>' : ""}`;
+        card.appendChild(tags);
+        list.appendChild(card);
       }
     }
 
     function render(data) {
       const badge = document.getElementById("sourceBadge");
-      badge.className = `badge ${data.source === "sample" ? "sample" : "csv"}`;
-      badge.textContent = data.source === "sample" ? "数据源：示例数据" : "数据源：CSV";
+      if (data.source === "sample") {
+        badge.className = "badge sample";
+        badge.textContent = "数据源：示例数据";
+      } else if (String(data.source).startsWith("region-")) {
+        badge.className = "badge region";
+        badge.textContent = `数据源：${data.region || data.source}`;
+      } else {
+        badge.className = "badge csv";
+        badge.textContent = "数据源：CSV";
+      }
+
+      const whText = data.warehouse ? `店面：${data.warehouse}` : "店面：全部";
       document.getElementById("subtitle").textContent =
-        `更新时间：${data.asOf || "-"}　库存源：${(data.sources && data.sources.stock) || "-"}`;
+        `${whText}　有货率 ${fmtPct(data.summary?.in_stock_rate)}　展示覆盖率 ${fmtPct(data.summary?.display_coverage_rate)}　` +
+        `有货未展示 ${data.summary?.not_displayed_count ?? "-"} 个　纳入分析 ${data.summary?.total_non_discontinue ?? "-"} 个未停产产品` +
+        `　更新时间：${data.asOf || "-"}`;
 
       const s = data.summary || {};
       document.getElementById("kpiInStock").textContent = fmtPct(s.in_stock_rate);
@@ -165,34 +282,41 @@
       document.getElementById("kpiGap").textContent = s.not_displayed_count ?? "-";
       document.getElementById("kpiInStockCount").textContent = s.in_stock_count ?? "-";
 
-      state.rows = data.not_displayed || [];
+      state.products = data.products || data.not_displayed || [];
+      renderRegionOptions(data.regionOptions || []);
+      renderWarehouseOptions(data.warehouses || []);
       renderChart(data.by_family || []);
-      renderTable();
+      renderProducts();
       renderMessages(data.diagnostics);
     }
 
     async function load() {
       const btn = document.getElementById("refreshBtn");
-      btn.disabled = true; btn.textContent = "加载中...";
+      const reloadBtn = document.getElementById("reloadBtn");
+      btn.disabled = true; reloadBtn.disabled = true;
+      btn.textContent = "加载中...";
       try {
-        const res = await fetch("/api/gap");
+        const params = new URLSearchParams();
+        if (state.region && state.region !== "sample") params.set("region", state.region);
+        if (state.warehouse) params.set("warehouse", state.warehouse);
+        const res = await fetch(`/api/gap?${params}`);
         const data = await res.json();
         if (data.status !== "success") { renderMessages([{ level: "error", message: data.message || "加载失败" }]); return; }
         render(data);
       } catch (e) {
         renderMessages([{ level: "error", message: String(e) }]);
       } finally {
-        btn.disabled = false; btn.textContent = "刷新";
+        btn.disabled = false; reloadBtn.disabled = false;
+        btn.textContent = "刷新";
       }
     }
 
     document.getElementById("refreshBtn").addEventListener("click", load);
-    document.getElementById("search").addEventListener("input", e => { state.filter = e.target.value; renderTable(); });
-    document.querySelectorAll("#gapTable th").forEach(th => th.addEventListener("click", () => {
-      const k = th.dataset.key;
-      if (state.sortKey === k) state.sortDir *= -1; else { state.sortKey = k; state.sortDir = 1; }
-      renderTable();
-    }));
+    document.getElementById("reloadBtn").addEventListener("click", load);
+    document.getElementById("regionSelect").addEventListener("change", e => { state.region = e.target.value; load(); });
+    document.getElementById("warehouseSelect").addEventListener("change", e => { state.warehouse = e.target.value; load(); });
+    document.getElementById("gapOnly").addEventListener("change", e => { state.gapOnly = e.target.checked; renderProducts(); });
+    document.getElementById("search").addEventListener("input", e => { state.filter = e.target.value; renderProducts(); });
     window.addEventListener("resize", () => chart && chart.resize());
     load();
   </script>

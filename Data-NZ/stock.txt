@@ -1,0 +1,16 @@
+-- 库存 + 价格 + 图片（看板会模糊匹配列名）
+-- 导出后自动写入 Output-NZ/{时间戳}/NZ_stock.csv 和 NZ_stock.xlsx
+-- 并同步到 Output-NZ/latest/stock.csv 供看板切换「新西兰」验证
+--
+-- 建议列名：ProductCode, ProductName, Family, StockQty, Price, Discontinued, ImageUrl
+-- SELECT
+--   p.Code AS ProductCode,
+--   p.Name AS ProductName,
+--   p.Family,
+--   s.Qty AS StockQty,
+--   p.Price,
+--   p.Discontinued,
+--   p.ImageUrl
+-- FROM ...
+
+SELECT GETDATE() AS run_time;

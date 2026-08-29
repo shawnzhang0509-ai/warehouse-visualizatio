@@ -13,6 +13,22 @@ except ImportError:
     pyodbc = None
 
 try:
+    from openpyxl import Workbook
+except ImportError:
+    Workbook = None
+
+# SQL 模板文件名（不含后缀）到看板标准文件名的映射
+STANDARD_OUTPUT_NAMES = {
+    "stock": "stock",
+    "product_stock": "stock",
+    "product_stock_price": "stock",
+    "inventory": "stock",
+    "display": "display",
+    "store_display": "display",
+    "display_list": "display",
+}
+
+try:
     import tkinter as tk
     from tkinter import filedialog, messagebox, scrolledtext, ttk
 except Exception:
@@ -221,14 +237,24 @@ def _load_sql_templates(template_dir):
     return templates
 
 
-def _csv_output_path(output_dir, region_key, sql_file_name, batch_label):
+def _standard_output_stem(sql_file_name):
+    stem = Path(sql_file_name).stem.replace(" ", "_").lower()
+    return STANDARD_OUTPUT_NAMES.get(stem, stem)
+
+
+def _output_paths(output_dir, region_key, sql_file_name, batch_label):
     output_root = _resolve_path(output_dir)
     if output_root is None:
         raise ValueError("输出目录为空。")
-    safe_name = Path(sql_file_name).stem.replace(" ", "_")
-    target = output_root / batch_label / f"{region_key}_{safe_name}.csv"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    return target
+    standard_stem = _standard_output_stem(sql_file_name)
+    batch_dir = output_root / batch_label
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    return {
+        "batch_dir": batch_dir,
+        "csv": batch_dir / f"{region_key}_{standard_stem}.csv",
+        "xlsx": batch_dir / f"{region_key}_{standard_stem}.xlsx",
+        "standard_name": standard_stem,
+    }
 
 
 def _write_csv(path, columns, rows):
@@ -238,6 +264,36 @@ def _write_csv(path, columns, rows):
             writer.writerow(columns)
         for row in rows:
             writer.writerow(list(row))
+
+
+def _write_xlsx(path, columns, rows):
+    if Workbook is None:
+        return False
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "data"
+    if columns:
+        ws.append(list(columns))
+    for row in rows:
+        ws.append(["" if value is None else value for value in row])
+    wb.save(path)
+    return True
+
+
+def _publish_latest(output_dir, standard_name, csv_path, xlsx_path):
+    """把本次导出复制到 {output_dir}/latest/，方便看板直接读取验证。"""
+    output_root = _resolve_path(output_dir)
+    if output_root is None or standard_name not in ("stock", "display"):
+        return []
+    latest_dir = output_root / "latest"
+    latest_dir.mkdir(parents=True, exist_ok=True)
+    published = []
+    for src, suffix in ((csv_path, ".csv"), (xlsx_path, ".xlsx")):
+        if src and Path(src).is_file():
+            target = latest_dir / f"{standard_name}{suffix}"
+            target.write_bytes(Path(src).read_bytes())
+            published.append(str(target))
+    return published
 
 
 def _run_single_template(cursor, sql):
@@ -343,17 +399,28 @@ def execute_region(region_key, region_cfg, log=None):
             try:
                 result = _run_single_template(cursor, tpl["sql"])
                 if result["has_result_set"]:
-                    output_path = _csv_output_path(region_cfg.get("output_dir"), region_key, tpl_name, batch_label)
-                    _write_csv(output_path, result["columns"], result["rows"])
+                    paths = _output_paths(region_cfg.get("output_dir"), region_key, tpl_name, batch_label)
+                    _write_csv(paths["csv"], result["columns"], result["rows"])
+                    xlsx_ok = _write_xlsx(paths["xlsx"], result["columns"], result["rows"])
+                    latest_files = _publish_latest(
+                        region_cfg.get("output_dir"),
+                        paths["standard_name"],
+                        paths["csv"],
+                        paths["xlsx"] if xlsx_ok else None,
+                    )
                     outputs.append(
                         {
                             "template": tpl_name,
                             "rows": result["row_count"],
-                            "file": str(output_path),
+                            "file": str(paths["csv"]),
+                            "xlsx": str(paths["xlsx"]) if xlsx_ok else None,
+                            "latest": latest_files,
                             "status": "success",
                         }
                     )
-                    _log(f"[{region_key}] 成功：{tpl_name} -> {output_path} ({result['row_count']} 行)")
+                    extra = f"，Excel: {paths['xlsx']}" if xlsx_ok else "（未安装 openpyxl，仅导出 CSV）"
+                    latest_hint = f"，latest: {', '.join(latest_files)}" if latest_files else ""
+                    _log(f"[{region_key}] 成功：{tpl_name} -> {paths['csv']}{extra}{latest_hint} ({result['row_count']} 行)")
                 else:
                     conn.commit()
                     outputs.append(

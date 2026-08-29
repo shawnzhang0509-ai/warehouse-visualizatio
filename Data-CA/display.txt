@@ -1,0 +1,3 @@
+-- 加拿大店面展示导出模板（列名同 Data-NZ/display.txt）
+-- 输出目录：Output-CA/{时间戳}/ 与 Output-CA/latest/
+SELECT GETDATE() AS run_time;
