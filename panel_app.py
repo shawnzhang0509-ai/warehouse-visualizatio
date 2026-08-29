@@ -88,7 +88,7 @@ class PanelApp:
         for r in regions:
             label = r["label"]
             if r["key"] != panel_data.SAMPLE_REGION and not r.get("has_latest"):
-                label += " (尚无 latest)"
+                label += " (尚无数据)"
             region_values.append(f"{r['key']} {label}")
         self.region_combo = ttk.Combobox(bar, width=22, state="readonly", values=region_values)
         self.region_combo.current(0)
@@ -144,6 +144,15 @@ class PanelApp:
         self.reload()
 
     # ---------- 图片 ----------
+    def _fetch_image_bytes(self, url):
+        safe_url = panel_data.normalize_url(url)
+        req = urllib.request.Request(
+            safe_url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WarehousePanel/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            return resp.read()
+
     def _load_thumb(self, item):
         raw = item.get("image")
         if raw and raw in self._img_cache:
@@ -152,14 +161,15 @@ class PanelApp:
         try:
             if raw:
                 if str(raw).lower().startswith(("http://", "https://")):
-                    with urllib.request.urlopen(raw, timeout=8) as resp:
-                        data = resp.read()
+                    data = self._fetch_image_bytes(raw)
                     if Image is not None:
-                        im = Image.open(io.BytesIO(data)); im.thumbnail(THUMB)
+                        im = Image.open(io.BytesIO(data))
+                        im.thumbnail(THUMB)
                         photo = ImageTk.PhotoImage(im)
                 elif Path(raw).exists():
                     if Image is not None:
-                        im = Image.open(raw); im.thumbnail(THUMB)
+                        im = Image.open(raw)
+                        im.thumbnail(THUMB)
                         photo = ImageTk.PhotoImage(im)
                     else:
                         photo = tk.PhotoImage(file=raw)

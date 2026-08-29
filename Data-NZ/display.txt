@@ -1,8 +1,6 @@
 -- 店面展示清单（按仓库/店面）
--- 导出后自动写入 Output-NZ/{时间戳}/NZ_display.csv 和 NZ_display.xlsx
--- 并同步到 Output-NZ/latest/display.csv
---
--- 建议列名：ProductCode, ProductName, Family, DisplayWarehouse
+-- 导出后直接覆盖 Output-NZ/display.csv 和 display.xlsx
+-- 建议列名：ProductCode, ProductName, ProductFamily, DisplayWarehouse
 -- SELECT
 --   d.ProductCode,
 --   d.ProductName,
