@@ -33,9 +33,12 @@ CODE_KEYS = ["productcode", "product_code", "sku", "itemcode", "item_code",
              "code", "productid", "product_id", "product", "item"]
 NAME_KEYS = ["productname", "product_name", "name", "description", "desc", "title"]
 FAMILY_KEYS = ["family", "productfamily", "product_family", "category",
-               "categoryname", "category_name", "group", "producttype", "type"]
+               "categoryname", "category_name", "group", "producttype", "type",
+               "productfamilyname"]
 STOCK_KEYS = ["stockqty", "stock_qty", "stock", "qty", "quantity", "onhand",
-              "on_hand", "available", "availableqty", "available_qty", "soh"]
+              "on_hand", "onhandqty", "on_hand_qty", "qtyonhand", "qty_on_hand",
+              "available", "availableqty", "available_qty", "availablestock",
+              "soh", "totalstock", "total_stock"]
 PRICE_KEYS = ["price", "unitprice", "unit_price", "sellprice", "sell_price",
               "saleprice", "sale_price", "retailprice", "retail_price"]
 DISCONTINUE_KEYS = ["discontinued", "isdiscontinued", "is_discontinued",
