@@ -1,9 +1,11 @@
-ProductCode,ProductName,Family,DisplayWarehouse
+ProductCode,ProductName,Family,Store
+SOF-1001,Roma 3-Seater Sofa,Sofa,Onehunga
 SOF-1001,Roma 3-Seater Sofa,Sofa,Walls Road
-SOF-1002,Milan Corner Sofa,Sofa,Carbine Rd Warehouse
-SOF-1003,Venice Recliner Sofa,Sofa,Walls Road
+SOF-1002,Milan Corner Sofa,Sofa,Walls Road
+SOF-1003,Venice Recliner Sofa,Sofa,Onehunga
+BED-2001,Oslo Queen Bed,Bed,Onehunga
 BED-2001,Oslo Queen Bed,Bed,CHCH Gerald Connelly
 DIN-3001,Oak Dining Table 6-Seat,Dining,Walls Road
-MAT-4001,CloudRest Queen Mattress,Mattress,Carbine Rd Warehouse
+MAT-4001,CloudRest Queen Mattress,Mattress,Onehunga
 MAT-4002,OrthoFirm King Mattress,Mattress,Walls Road
 CHR-5001,Ergo Office Chair,Chair,CHCH Gerald Connelly
