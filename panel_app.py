@@ -10,6 +10,7 @@
 
 import io
 import sys
+import threading
 import urllib.request
 from pathlib import Path
 
@@ -55,6 +56,7 @@ class PanelApp:
 
         self._img_cache = {}   # path/url -> PhotoImage（防止被回收）
         self._placeholder_cache = {}
+        self._pending_images = set()
 
         regions = panel_data.list_regions()
         default_region = panel_data.SAMPLE_REGION
@@ -144,6 +146,20 @@ class PanelApp:
         self.reload()
 
     # ---------- 图片 ----------
+    def _pil_to_photo(self, im):
+        if Image is None or ImageTk is None:
+            return None
+        if im.mode in ("RGBA", "LA", "P"):
+            bg = Image.new("RGB", im.size, (255, 255, 255))
+            if im.mode == "P":
+                im = im.convert("RGBA")
+            alpha = im.split()[-1] if im.mode in ("RGBA", "LA") else None
+            bg.paste(im, mask=alpha)
+            im = bg
+        elif im.mode != "RGB":
+            im = im.convert("RGB")
+        return ImageTk.PhotoImage(im)
+
     def _fetch_image_bytes(self, url):
         safe_url = panel_data.normalize_url(url)
         req = urllib.request.Request(
@@ -153,7 +169,7 @@ class PanelApp:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return resp.read()
 
-    def _load_thumb(self, item):
+    def _load_thumb(self, item, img_label=None, bg=None):
         raw = item.get("image")
         if raw and raw in self._img_cache:
             return self._img_cache[raw]
@@ -161,25 +177,61 @@ class PanelApp:
         try:
             if raw:
                 if str(raw).lower().startswith(("http://", "https://")):
+                    if raw in self._pending_images:
+                        return None
+                    if img_label is not None:
+                        self._pending_images.add(raw)
+                        threading.Thread(
+                            target=self._load_url_async,
+                            args=(raw, item, img_label, bg),
+                            daemon=True,
+                        ).start()
+                        return None
                     data = self._fetch_image_bytes(raw)
                     if Image is not None:
                         im = Image.open(io.BytesIO(data))
                         im.thumbnail(THUMB)
-                        photo = ImageTk.PhotoImage(im)
+                        photo = self._pil_to_photo(im)
                 elif Path(raw).exists():
                     if Image is not None:
                         im = Image.open(raw)
                         im.thumbnail(THUMB)
-                        photo = ImageTk.PhotoImage(im)
+                        photo = self._pil_to_photo(im)
                     else:
                         photo = tk.PhotoImage(file=raw)
         except Exception:
             photo = None
-        if photo is not None:
+        if photo is not None and raw:
             self._img_cache[raw] = photo
         return photo
 
-    def _placeholder(self, family):
+    def _load_url_async(self, url, item, img_label, bg):
+        photo = None
+        try:
+            data = self._fetch_image_bytes(url)
+            if Image is not None:
+                im = Image.open(io.BytesIO(data))
+                im.thumbnail(THUMB)
+                photo = self._pil_to_photo(im)
+        except Exception:
+            photo = None
+
+        def apply():
+            self._pending_images.discard(url)
+            if photo is not None:
+                self._img_cache[url] = photo
+                img_label.configure(image=photo)
+                img_label.image = photo
+            elif img_label.winfo_exists():
+                ph = self._placeholder(item)
+                img_label.configure(image=ph)
+                img_label.image = ph
+
+        if self.root.winfo_exists():
+            self.root.after(0, apply)
+
+    def _placeholder(self, item):
+        family = item.get("family", "")
         color = FAMILY_COLORS.get(family, "#64748b")
         if color in self._placeholder_cache:
             return self._placeholder_cache[color]
@@ -206,12 +258,16 @@ class PanelApp:
 
         s = data["summary"]
         if data["source"] == "sample":
-            src = "示例数据"
+            src = "示例数据（占位图，非真照片）"
         elif str(data["source"]).startswith("region-"):
             src = self._region_labels.get(region, region)
         else:
             src = "CSV"
         self.source_var.set(f"数据源：{src}    库存：{data['stock_path']}")
+        if Image is None:
+            self.source_var.set(
+                self.source_var.get() + "    ⚠ 未安装 Pillow，请运行 pip install pillow"
+            )
 
         def pct(v):
             return "-" if v is None else f"{v:.1f}%"
@@ -242,10 +298,11 @@ class PanelApp:
         row.pack(fill=tk.X, pady=3, padx=2)
 
         # 图片
-        photo = self._load_thumb(item)
+        img_lbl = tk.Label(row, bg=bg)
+        photo = self._load_thumb(item, img_label=img_lbl, bg=bg)
         if photo is None:
-            photo = self._placeholder(item["family"])
-        img_lbl = tk.Label(row, image=photo, bg=bg)
+            photo = self._placeholder(item)
+        img_lbl.configure(image=photo)
         img_lbl.image = photo
         img_lbl.pack(side=tk.LEFT, padx=8, pady=8)
 

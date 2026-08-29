@@ -15,6 +15,7 @@
 import csv
 import json
 import os
+import re
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -149,6 +150,35 @@ def _find_data_file(directory, stems):
     return None
 
 
+def _find_region_data_file(output_dir, stems):
+    """在 Output 目录及其子目录（latest、时间戳文件夹）里找数据文件。"""
+    base = Path(output_dir)
+    if not base.is_dir():
+        return None
+
+    found = _find_data_file(base, stems)
+    if found:
+        return found
+
+    latest = base / "latest"
+    found = _find_data_file(latest, stems)
+    if found:
+        return found
+
+    stamp_dirs = sorted(
+        (
+            d for d in base.iterdir()
+            if d.is_dir() and re.fullmatch(r"\d{8}_\d{6}", d.name)
+        ),
+        reverse=True,
+    )
+    for sub in stamp_dirs:
+        found = _find_data_file(sub, stems)
+        if found:
+            return found
+    return None
+
+
 def _region_stock_stems(region_key):
     rk = region_key.upper()
     return ["stock", f"{rk}_stock", "product_stock_price", f"{rk}_product_stock_price"]
@@ -194,8 +224,8 @@ def resolve_sources(region=None):
         return d / "stock.csv", d / "display.csv", "csv", d
     if region_key and region_key != SAMPLE_REGION.upper():
         d = _region_output_dir(region_key)
-        stock_path = _find_data_file(d, _region_stock_stems(region_key))
-        display_path = _find_data_file(d, _region_display_stems(region_key))
+        stock_path = _find_region_data_file(d, _region_stock_stems(region_key))
+        display_path = _find_region_data_file(d, _region_display_stems(region_key))
         if stock_path is None:
             stock_path = d / "stock.xlsx"
         if display_path is None:
@@ -208,7 +238,7 @@ def list_regions():
     options = [{"key": SAMPLE_REGION, "label": "示例数据", "has_latest": True}]
     for key, cfg in _load_runner_regions().items():
         out_dir = _region_output_dir(key)
-        has_data = _find_data_file(out_dir, _region_stock_stems(key)) is not None
+        has_data = _find_region_data_file(out_dir, _region_stock_stems(key)) is not None
         options.append({
             "key": key,
             "label": cfg.get("label", key),
