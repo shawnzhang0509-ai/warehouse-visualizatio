@@ -24,7 +24,7 @@ if not "%EXIT_CODE%"=="0" (
     echo.
     echo app.py exited with code %EXIT_CODE%.
     echo If module errors appear, install dependencies manually:
-    echo   py -3 -m pip install flask pyodbc
+    echo   py -3 -m pip install pyodbc openpyxl pillow
 )
 pause
 exit /b %EXIT_CODE%
