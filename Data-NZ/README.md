@@ -7,16 +7,8 @@
 | 模板文件名 | 输出到 Output-NZ/ |
 |-----------|-------------------|
 | product_stock_price.sql | stock.xlsx / stock.csv |
-| **display.sql** | **display.xlsx / display.csv**（店面下拉靠这个） |
+| **display_with_families.sql** | **display.xlsx / display.csv**（店面下拉靠这个） |
 | weekly_sales.sql | weekly_sales.xlsx |
-| 其他文件名 | 同名.xlsx（如 my_report.sql → my_report.xlsx）|
-
-## display 没数据 / 店面下拉为空？
-
-1. 确认 `Data-NZ/display.sql` 存在（不是 display.sql.example）
-2. 执行后打开 `Output-NZ/display.xlsx`，应有**很多行**，且有一列店面名（如 Walls Road、Onehunga）
-3. `display.minimal.sql` **不会**写入 display.xlsx，需用标准文件名 `display.sql`
-4. 若 display 只有 1 行，执行器日志会提示警告
 
 ## 注意
 

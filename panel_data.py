@@ -189,7 +189,8 @@ def _region_stock_stems(region_key):
 
 def _region_display_stems(region_key):
     rk = region_key.upper()
-    return ["display", f"{rk}_display", "store_display", f"{rk}_store_display"]
+    return ["display", "display_with_families", f"{rk}_display",
+            "store_display", f"{rk}_store_display"]
 
 
 def _load_runner_regions():
@@ -377,7 +378,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
             "level": "warning",
             "message": (
                 f"展示数据几乎为空（display 仅 {len(display_rows)} 行）："
-                f"{display_path}。请检查 Data-NZ/display.sql 并重新执行 SQL 导出。"
+                f"{display_path}。请检查 Data-NZ/display_with_families.sql 并重新执行导出。"
             ),
         })
     elif len(by_store) == 0:
