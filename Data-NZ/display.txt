@@ -1,0 +1,13 @@
+-- 店面展示清单（按仓库/店面）
+-- 导出后自动写入 Output-NZ/{时间戳}/NZ_display.csv 和 NZ_display.xlsx
+-- 并同步到 Output-NZ/latest/display.csv
+--
+-- 建议列名：ProductCode, ProductName, Family, DisplayWarehouse
+-- SELECT
+--   d.ProductCode,
+--   d.ProductName,
+--   d.Family,
+--   w.Name AS DisplayWarehouse
+-- FROM ...
+
+SELECT GETDATE() AS run_time;
