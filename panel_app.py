@@ -30,6 +30,8 @@ except Exception:
     ImageTk = None
 
 THUMB = (116, 84)
+RENDER_BATCH = 40
+LARGE_LIST_HINT = 300
 
 FAMILY_COLORS = {
     "Sofa": "#2563eb", "Bed": "#16a34a", "Dining": "#d97706",
@@ -54,9 +56,13 @@ class PanelApp:
         self.root.geometry("1024x760")
         self.root.minsize(880, 600)
 
-        self._img_cache = {}   # path/url -> PhotoImage（防止被回收）
+        self._img_cache = {}
         self._placeholder_cache = {}
         self._pending_images = set()
+        self._reload_token = 0
+        self._render_token = 0
+        self._summary_text = ""
+        self._image_semaphore = threading.Semaphore(6)
 
         regions = panel_data.list_regions()
         default_region = panel_data.SAMPLE_REGION
@@ -75,7 +81,6 @@ class PanelApp:
         self._build_ui(stores, regions)
         self.reload()
 
-    # ---------- UI 构建 ----------
     def _build_ui(self, stores, regions):
         top = ttk.Frame(self.root, padding=(12, 10))
         top.pack(fill=tk.X)
@@ -101,7 +106,8 @@ class PanelApp:
                                          values=stores, textvariable=self.store_var)
         self.store_combo.pack(side=tk.LEFT, padx=(0, 12))
         self.store_combo.bind("<<ComboboxSelected>>", lambda _e: self.reload())
-        ttk.Button(bar, text="刷新", command=self.reload).pack(side=tk.LEFT)
+        self.reload_btn = ttk.Button(bar, text="刷新", command=self.reload)
+        self.reload_btn.pack(side=tk.LEFT)
         ttk.Checkbutton(bar, text="只看有货未展示", variable=self.only_gap_var,
                         command=self.reload).pack(side=tk.LEFT, padx=(12, 0))
 
@@ -109,7 +115,6 @@ class PanelApp:
                                      padding=(12, 8), font=("Segoe UI", 11))
         self.summary_lbl.pack(fill=tk.X)
 
-        # 滚动区域
         container = ttk.Frame(self.root)
         container.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
         self.canvas = tk.Canvas(container, highlightthickness=0, background="#f3f6fb")
@@ -124,7 +129,6 @@ class PanelApp:
                              lambda _e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind("<Configure>",
                          lambda e: self.canvas.itemconfigure(self._win, width=e.width))
-        # 鼠标滚轮
         self.canvas.bind_all("<MouseWheel>", self._on_wheel)
         self.canvas.bind_all("<Button-4>", lambda _e: self.canvas.yview_scroll(-1, "units"))
         self.canvas.bind_all("<Button-5>", lambda _e: self.canvas.yview_scroll(1, "units"))
@@ -137,15 +141,45 @@ class PanelApp:
         text = self.region_combo.get().strip()
         return text.split(" ")[0] if text else panel_data.SAMPLE_REGION
 
+    def _set_controls_state(self, enabled):
+        state = "readonly" if enabled else "disabled"
+        normal = tk.NORMAL if enabled else tk.DISABLED
+        self.region_combo.configure(state=state)
+        self.store_combo.configure(state=state)
+        self.reload_btn.configure(state=normal)
+
+    def _run_bg(self, worker, on_done):
+        def _thread():
+            try:
+                result = worker()
+                err = None
+            except Exception as exc:
+                result = None
+                err = exc
+            self.root.after(0, lambda: on_done(err, result))
+
+        threading.Thread(target=_thread, daemon=True).start()
+
     def _on_region_change(self):
         region = self._current_region()
-        stores = panel_data.list_stores(region)
-        self.store_combo.configure(values=stores)
-        if self.store_var.get() not in stores:
-            self.store_var.set(stores[0] if stores else panel_data.ALL_STORES)
-        self.reload()
+        self._set_controls_state(False)
+        self.status_var.set(f"正在加载 {region} 店面列表...")
 
-    # ---------- 图片 ----------
+        def worker():
+            return panel_data.list_stores(region)
+
+        def done(err, stores):
+            if err:
+                self.status_var.set(f"加载店面失败：{err}")
+                self._set_controls_state(True)
+                return
+            self.store_combo.configure(values=stores)
+            if self.store_var.get() not in stores:
+                self.store_var.set(stores[0] if stores else panel_data.ALL_STORES)
+            self.reload()
+
+        self._run_bg(worker, done)
+
     def _pil_to_photo(self, im):
         if Image is None or ImageTk is None:
             return None
@@ -169,67 +203,6 @@ class PanelApp:
         with urllib.request.urlopen(req, timeout=15) as resp:
             return resp.read()
 
-    def _load_thumb(self, item, img_label=None, bg=None):
-        raw = item.get("image")
-        if raw and raw in self._img_cache:
-            return self._img_cache[raw]
-        photo = None
-        try:
-            if raw:
-                if str(raw).lower().startswith(("http://", "https://")):
-                    if raw in self._pending_images:
-                        return None
-                    if img_label is not None:
-                        self._pending_images.add(raw)
-                        threading.Thread(
-                            target=self._load_url_async,
-                            args=(raw, item, img_label, bg),
-                            daemon=True,
-                        ).start()
-                        return None
-                    data = self._fetch_image_bytes(raw)
-                    if Image is not None:
-                        im = Image.open(io.BytesIO(data))
-                        im.thumbnail(THUMB)
-                        photo = self._pil_to_photo(im)
-                elif Path(raw).exists():
-                    if Image is not None:
-                        im = Image.open(raw)
-                        im.thumbnail(THUMB)
-                        photo = self._pil_to_photo(im)
-                    else:
-                        photo = tk.PhotoImage(file=raw)
-        except Exception:
-            photo = None
-        if photo is not None and raw:
-            self._img_cache[raw] = photo
-        return photo
-
-    def _load_url_async(self, url, item, img_label, bg):
-        photo = None
-        try:
-            data = self._fetch_image_bytes(url)
-            if Image is not None:
-                im = Image.open(io.BytesIO(data))
-                im.thumbnail(THUMB)
-                photo = self._pil_to_photo(im)
-        except Exception:
-            photo = None
-
-        def apply():
-            self._pending_images.discard(url)
-            if photo is not None:
-                self._img_cache[url] = photo
-                img_label.configure(image=photo)
-                img_label.image = photo
-            elif img_label.winfo_exists():
-                ph = self._placeholder(item)
-                img_label.configure(image=ph)
-                img_label.image = ph
-
-        if self.root.winfo_exists():
-            self.root.after(0, apply)
-
     def _placeholder(self, item):
         family = item.get("family", "")
         color = FAMILY_COLORS.get(family, "#64748b")
@@ -240,22 +213,76 @@ class PanelApp:
         self._placeholder_cache[color] = img
         return img
 
-    # ---------- 渲染 ----------
-    def reload(self):
-        region = self._current_region()
-        try:
-            data = panel_data.build_products(
-                store=self.store_var.get(),
-                only_gap=self.only_gap_var.get(),
-                region=region,
-            )
-        except FileNotFoundError as exc:
-            self.status_var.set(f"找不到数据文件：{exc}")
+    def _schedule_image_load(self, raw, item, img_label):
+        if not raw or raw in self._img_cache or raw in self._pending_images:
             return
-        except Exception as exc:
-            self.status_var.set(f"加载失败：{exc}")
-            return
+        self._pending_images.add(raw)
+        threading.Thread(
+            target=self._load_image_async,
+            args=(raw, item, img_label),
+            daemon=True,
+        ).start()
 
+    def _load_image_async(self, raw, item, img_label):
+        photo = None
+        try:
+            with self._image_semaphore:
+                if str(raw).lower().startswith(("http://", "https://")):
+                    data = self._fetch_image_bytes(raw)
+                    if Image is not None:
+                        im = Image.open(io.BytesIO(data))
+                        im.thumbnail(THUMB)
+                        photo = self._pil_to_photo(im)
+                elif Path(raw).exists() and Image is not None:
+                    im = Image.open(raw)
+                    im.thumbnail(THUMB)
+                    photo = self._pil_to_photo(im)
+        except Exception:
+            photo = None
+
+        def apply():
+            self._pending_images.discard(raw)
+            if not img_label.winfo_exists():
+                return
+            if photo is not None:
+                self._img_cache[raw] = photo
+                img_label.configure(image=photo)
+                img_label.image = photo
+
+        if self.root.winfo_exists():
+            self.root.after(0, apply)
+
+    def reload(self):
+        self._reload_token += 1
+        token = self._reload_token
+        region = self._current_region()
+        store = self.store_var.get()
+        only_gap = self.only_gap_var.get()
+
+        self._set_controls_state(False)
+        self.status_var.set("正在读取数据，请稍候...")
+        for w in self.list_frame.winfo_children():
+            w.destroy()
+        tk.Label(self.list_frame, text="数据加载中...",
+                 bg="#f3f6fb", fg=COL_MUTED, pady=24).pack()
+
+        def worker():
+            return panel_data.build_products(store=store, only_gap=only_gap, region=region)
+
+        def done(err, data):
+            if token != self._reload_token:
+                return
+            self._set_controls_state(True)
+            if err:
+                self.status_var.set(f"加载失败：{err}")
+                for w in self.list_frame.winfo_children():
+                    w.destroy()
+                return
+            self._apply_data(data, region)
+
+        self._run_bg(worker, done)
+
+    def _apply_data(self, data, region):
         s = data["summary"]
         if data["source"] == "sample":
             src = "示例数据（占位图，非真照片）"
@@ -265,30 +292,55 @@ class PanelApp:
             src = "CSV"
         self.source_var.set(f"数据源：{src}    库存：{data['stock_path']}")
         if Image is None:
-            self.source_var.set(
-                self.source_var.get() + "    ⚠ 未安装 Pillow，请运行 pip install pillow"
-            )
+            self.source_var.set(self.source_var.get() + "    ⚠ 未安装 Pillow，请运行 pip install pillow")
 
         def pct(v):
             return "-" if v is None else f"{v:.1f}%"
-        self.status_var.set(
+
+        extra = ""
+        products = data["products"]
+        if len(products) > LARGE_LIST_HINT and not self.only_gap_var.get():
+            extra = f"    （共 {len(products)} 条，建议勾选「只看有货未展示」加快显示）"
+
+        self._summary_text = (
             f"店面：{s['store']}    "
             f"有货率 {pct(s['in_stock_rate'])}    "
             f"展示覆盖率 {pct(s['display_coverage_rate'])}    "
             f"有货未展示 {s['not_displayed_count']} 个"
             f"（纳入分析 {s['total_non_discontinue']} 个未停产产品）"
+            f"{extra}"
         )
+        self.status_var.set(self._summary_text)
+
+        for msg in data.get("diagnostics") or []:
+            if msg.get("level") == "warning":
+                self._summary_text += f"    ⚠ {msg['message']}"
+                self.status_var.set(self._summary_text)
+                break
 
         for w in self.list_frame.winfo_children():
             w.destroy()
 
-        if not data["products"]:
+        if not products:
             tk.Label(self.list_frame, text="没有符合条件的产品。",
                      bg="#f3f6fb", fg=COL_MUTED, pady=20).pack()
             return
 
-        for item in data["products"]:
+        self._render_token += 1
+        render_token = self._render_token
+        self._render_products_batched(products, render_token, 0)
+
+    def _render_products_batched(self, products, render_token, start):
+        if render_token != self._render_token:
+            return
+        end = min(start + RENDER_BATCH, len(products))
+        for item in products[start:end]:
             self._render_row(item)
+        if end < len(products):
+            self.status_var.set(f"{self._summary_text}    正在渲染 {end}/{len(products)} ...")
+            self.root.after(1, lambda: self._render_products_batched(products, render_token, end))
+        else:
+            self.status_var.set(self._summary_text)
 
     def _render_row(self, item):
         gap = item["gap"]
@@ -297,16 +349,17 @@ class PanelApp:
                        highlightthickness=1)
         row.pack(fill=tk.X, pady=3, padx=2)
 
-        # 图片
         img_lbl = tk.Label(row, bg=bg)
-        photo = self._load_thumb(item, img_label=img_lbl, bg=bg)
+        raw = item.get("image")
+        photo = self._img_cache.get(raw) if raw else None
         if photo is None:
             photo = self._placeholder(item)
+            if raw:
+                self._schedule_image_load(raw, item, img_lbl)
         img_lbl.configure(image=photo)
         img_lbl.image = photo
         img_lbl.pack(side=tk.LEFT, padx=8, pady=8)
 
-        # 文字信息
         info = tk.Frame(row, bg=bg)
         info.pack(side=tk.LEFT, fill=tk.X, expand=True, pady=6)
         title = f"{item['code']}  ·  {item['name'] or '（无名称）'}"
@@ -317,7 +370,6 @@ class PanelApp:
             sub += f"    价格：{item['price']:,.2f}"
         tk.Label(info, text=sub, bg=bg, fg=COL_MUTED, anchor="w").pack(fill=tk.X)
 
-        # 状态标签
         tags = tk.Frame(row, bg=bg)
         tags.pack(side=tk.RIGHT, padx=10)
         if item["in_stock"]:

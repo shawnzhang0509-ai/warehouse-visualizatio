@@ -33,9 +33,12 @@ CODE_KEYS = ["productcode", "product_code", "sku", "itemcode", "item_code",
              "code", "productid", "product_id", "product", "item"]
 NAME_KEYS = ["productname", "product_name", "name", "description", "desc", "title"]
 FAMILY_KEYS = ["family", "productfamily", "product_family", "category",
-               "categoryname", "category_name", "group", "producttype", "type"]
+               "categoryname", "category_name", "group", "producttype", "type",
+               "productfamilyname"]
 STOCK_KEYS = ["stockqty", "stock_qty", "stock", "qty", "quantity", "onhand",
-              "on_hand", "available", "availableqty", "available_qty", "soh"]
+              "on_hand", "onhandqty", "on_hand_qty", "qtyonhand", "qty_on_hand",
+              "available", "availableqty", "available_qty", "availablestock",
+              "soh", "totalstock", "total_stock"]
 PRICE_KEYS = ["price", "unitprice", "unit_price", "sellprice", "sell_price",
               "saleprice", "sale_price", "retailprice", "retail_price"]
 DISCONTINUE_KEYS = ["discontinued", "isdiscontinued", "is_discontinued",
@@ -186,7 +189,8 @@ def _region_stock_stems(region_key):
 
 def _region_display_stems(region_key):
     rk = region_key.upper()
-    return ["display", f"{rk}_display", "store_display", f"{rk}_store_display"]
+    return ["display", "display_with_families", f"{rk}_display",
+            "store_display", f"{rk}_store_display"]
 
 
 def _load_runner_regions():
@@ -367,16 +371,42 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         view = [p for p in view if p["gap"]]
     view.sort(key=lambda p: (not p["gap"], not p["in_stock"], -p["stock_qty"], p["code"]))
 
+    diagnostics = []
+    display_rows = _read_table(display_path)
+    if len(display_rows) < 5:
+        diagnostics.append({
+            "level": "warning",
+            "message": (
+                f"展示数据几乎为空（display 仅 {len(display_rows)} 行）："
+                f"{display_path}。请检查 Data-NZ/display_with_families.sql 并重新执行导出。"
+            ),
+        })
+    elif len(by_store) == 0:
+        diagnostics.append({
+            "level": "warning",
+            "message": (
+                "展示数据里没有识别到店面列（需要 Store / DisplayWarehouse / Warehouse 等列名）。"
+                f"当前文件：{display_path}"
+            ),
+        })
+    elif len(stores) <= 1:
+        diagnostics.append({
+            "level": "warning",
+            "message": "展示数据未包含有效店面，店面下拉只会显示「全部店面」。",
+        })
+
     return {
         "source": source,
         "region": region or SAMPLE_REGION,
         "stock_path": str(stock_path),
         "display_path": str(display_path),
+        "display_row_count": len(display_rows),
         "stores": stores,
         "selected_store": store,
         "summary": summary,
         "products": view,
         "regions": list_regions(),
+        "diagnostics": diagnostics,
     }
 
 

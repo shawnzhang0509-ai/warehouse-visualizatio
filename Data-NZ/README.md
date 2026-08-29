@@ -7,9 +7,8 @@
 | 模板文件名 | 输出到 Output-NZ/ |
 |-----------|-------------------|
 | product_stock_price.sql | stock.xlsx / stock.csv |
-| display.sql | display.xlsx / display.csv |
+| **display_with_families.sql** | **display.xlsx / display.csv**（店面下拉靠这个） |
 | weekly_sales.sql | weekly_sales.xlsx |
-| 其他文件名 | 同名.xlsx（如 my_report.sql → my_report.xlsx）|
 
 ## 注意
 
