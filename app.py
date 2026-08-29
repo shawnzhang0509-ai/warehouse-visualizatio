@@ -242,17 +242,16 @@ def _standard_output_stem(sql_file_name):
     return STANDARD_OUTPUT_NAMES.get(stem, stem)
 
 
-def _output_paths(output_dir, region_key, sql_file_name, batch_label):
+def _output_paths(output_dir, region_key, sql_file_name):
     output_root = _resolve_path(output_dir)
     if output_root is None:
         raise ValueError("输出目录为空。")
+    output_root.mkdir(parents=True, exist_ok=True)
     standard_stem = _standard_output_stem(sql_file_name)
-    batch_dir = output_root / batch_label
-    batch_dir.mkdir(parents=True, exist_ok=True)
     return {
-        "batch_dir": batch_dir,
-        "csv": batch_dir / f"{region_key}_{standard_stem}.csv",
-        "xlsx": batch_dir / f"{region_key}_{standard_stem}.xlsx",
+        "output_dir": output_root,
+        "csv": output_root / f"{standard_stem}.csv",
+        "xlsx": output_root / f"{standard_stem}.xlsx",
         "standard_name": standard_stem,
     }
 
@@ -278,22 +277,6 @@ def _write_xlsx(path, columns, rows):
         ws.append(["" if value is None else value for value in row])
     wb.save(path)
     return True
-
-
-def _publish_latest(output_dir, standard_name, csv_path, xlsx_path):
-    """把本次导出复制到 {output_dir}/latest/，方便看板直接读取验证。"""
-    output_root = _resolve_path(output_dir)
-    if output_root is None or standard_name not in ("stock", "display"):
-        return []
-    latest_dir = output_root / "latest"
-    latest_dir.mkdir(parents=True, exist_ok=True)
-    published = []
-    for src, suffix in ((csv_path, ".csv"), (xlsx_path, ".xlsx")):
-        if src and Path(src).is_file():
-            target = latest_dir / f"{standard_name}{suffix}"
-            target.write_bytes(Path(src).read_bytes())
-            published.append(str(target))
-    return published
 
 
 def _run_single_template(cursor, sql):
@@ -383,7 +366,6 @@ def execute_region(region_key, region_cfg, log=None):
     if pyodbc is None:
         raise RuntimeError("pyodbc 不可用，请先安装 pyodbc 和 ODBC Driver。")
 
-    batch_label = datetime.now().strftime("%Y%m%d_%H%M%S")
     conn = None
     cursor = None
     outputs = []
@@ -399,28 +381,20 @@ def execute_region(region_key, region_cfg, log=None):
             try:
                 result = _run_single_template(cursor, tpl["sql"])
                 if result["has_result_set"]:
-                    paths = _output_paths(region_cfg.get("output_dir"), region_key, tpl_name, batch_label)
+                    paths = _output_paths(region_cfg.get("output_dir"), region_key, tpl_name)
                     _write_csv(paths["csv"], result["columns"], result["rows"])
                     xlsx_ok = _write_xlsx(paths["xlsx"], result["columns"], result["rows"])
-                    latest_files = _publish_latest(
-                        region_cfg.get("output_dir"),
-                        paths["standard_name"],
-                        paths["csv"],
-                        paths["xlsx"] if xlsx_ok else None,
-                    )
                     outputs.append(
                         {
                             "template": tpl_name,
                             "rows": result["row_count"],
                             "file": str(paths["csv"]),
                             "xlsx": str(paths["xlsx"]) if xlsx_ok else None,
-                            "latest": latest_files,
                             "status": "success",
                         }
                     )
                     extra = f"，Excel: {paths['xlsx']}" if xlsx_ok else "（未安装 openpyxl，仅导出 CSV）"
-                    latest_hint = f"，latest: {', '.join(latest_files)}" if latest_files else ""
-                    _log(f"[{region_key}] 成功：{tpl_name} -> {paths['csv']}{extra}{latest_hint} ({result['row_count']} 行)")
+                    _log(f"[{region_key}] 成功：{tpl_name} -> {paths['csv']}{extra} ({result['row_count']} 行)")
                 else:
                     conn.commit()
                     outputs.append(

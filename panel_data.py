@@ -6,16 +6,22 @@
 数据来源（按优先级）
 1. 环境变量 INSTOCK_STOCK_CSV / INSTOCK_DISPLAY_CSV
 2. INSTOCK_DATA_DIR 目录下的 stock.csv / display.csv
-3. INSTOCK_REGION（如 NZ/CA）→ Output-{region}/latest/
+3. INSTOCK_REGION（如 NZ/CA）→ Output-{region}/ 下的 stock/display 文件
 4. 仓库自带 sample_data/（默认，开箱即用）
 
-列名不需要完全一致，_pick 会做模糊匹配；display 里需要一个"店面/仓库"列。
+支持 CSV 和 Excel（.xlsx）；列名不需要完全一致，_pick 会做模糊匹配。
 """
 
 import csv
 import json
 import os
 from pathlib import Path
+from urllib.parse import quote, urlsplit, urlunsplit
+
+try:
+    from openpyxl import load_workbook
+except ImportError:
+    load_workbook = None
 
 ROOT_DIR = Path(__file__).parent
 SAMPLE_DIR = ROOT_DIR / "sample_data"
@@ -30,7 +36,7 @@ FAMILY_KEYS = ["family", "productfamily", "product_family", "category",
 STOCK_KEYS = ["stockqty", "stock_qty", "stock", "qty", "quantity", "onhand",
               "on_hand", "available", "availableqty", "available_qty", "soh"]
 PRICE_KEYS = ["price", "unitprice", "unit_price", "sellprice", "sell_price",
-              "retailprice", "retail_price"]
+              "saleprice", "sale_price", "retailprice", "retail_price"]
 DISCONTINUE_KEYS = ["discontinued", "isdiscontinued", "is_discontinued",
                     "discontinue", "discontinueflag", "discontinue_flag", "status"]
 STORE_KEYS = ["store", "storename", "store_name", "warehouse", "warehousename",
@@ -82,6 +88,77 @@ def _read_csv(path):
         return list(csv.DictReader(f))
 
 
+def _read_xlsx(path):
+    if load_workbook is None:
+        raise RuntimeError("读取 Excel 需要 openpyxl，请运行：pip install openpyxl")
+    wb = load_workbook(path, read_only=True, data_only=True)
+    ws = wb.active
+    rows_iter = ws.iter_rows(values_only=True)
+    headers = next(rows_iter, None)
+    if not headers:
+        wb.close()
+        return []
+    columns = [str(h).strip() if h is not None else "" for h in headers]
+    out = []
+    for row in rows_iter:
+        if row is None:
+            continue
+        item = {}
+        empty = True
+        for idx, col in enumerate(columns):
+            if not col:
+                continue
+            value = row[idx] if idx < len(row) else None
+            if value is not None and str(value).strip() != "":
+                empty = False
+            item[col] = value
+        if not empty:
+            out.append(item)
+    wb.close()
+    return out
+
+
+def _read_table(path):
+    path = Path(path)
+    if path.suffix.lower() == ".xlsx":
+        return _read_xlsx(path)
+    return _read_csv(path)
+
+
+def normalize_url(url):
+    """把含中文/空格的 URL 编码成可请求的地址。"""
+    text = str(url).strip()
+    if not text.lower().startswith(("http://", "https://")):
+        return text
+    parts = urlsplit(text)
+    path = quote(parts.path, safe="/:@")
+    query = quote(parts.query, safe="=&?/:;+") if parts.query else parts.query
+    return urlunsplit((parts.scheme, parts.netloc, path, query, parts.fragment))
+
+
+def _find_data_file(directory, stems):
+    """在目录里按候选文件名找 stock/display（优先 xlsx，其次 csv）。"""
+    base = Path(directory)
+    if not base.is_dir():
+        return None
+    for stem in stems:
+        for ext in (".xlsx", ".csv"):
+            candidate = base / f"{stem}{ext}"
+            if candidate.is_file():
+                return candidate
+    return None
+
+
+def _region_stock_stems(region_key):
+    rk = region_key.upper()
+    return ["stock", f"{rk}_stock", "product_stock_price", f"{rk}_product_stock_price"]
+
+
+def _region_display_stems(region_key):
+    rk = region_key.upper()
+    return ["display", f"{rk}_display", "store_display", f"{rk}_store_display"]
+
+
 def _load_runner_regions():
     if not RUNNER_CONFIG_FILE.exists():
         return {}
@@ -116,19 +193,26 @@ def resolve_sources(region=None):
         d = Path(data_dir)
         return d / "stock.csv", d / "display.csv", "csv", d
     if region_key and region_key != SAMPLE_REGION.upper():
-        d = _region_output_dir(region_key) / "latest"
-        return d / "stock.csv", d / "display.csv", f"region-{region_key}", d
+        d = _region_output_dir(region_key)
+        stock_path = _find_data_file(d, _region_stock_stems(region_key))
+        display_path = _find_data_file(d, _region_display_stems(region_key))
+        if stock_path is None:
+            stock_path = d / "stock.xlsx"
+        if display_path is None:
+            display_path = d / "display.xlsx"
+        return stock_path, display_path, f"region-{region_key}", d
     return SAMPLE_DIR / "stock.csv", SAMPLE_DIR / "display.csv", "sample", SAMPLE_DIR
 
 
 def list_regions():
     options = [{"key": SAMPLE_REGION, "label": "示例数据", "has_latest": True}]
     for key, cfg in _load_runner_regions().items():
-        latest = _region_output_dir(key) / "latest" / "stock.csv"
+        out_dir = _region_output_dir(key)
+        has_data = _find_data_file(out_dir, _region_stock_stems(key)) is not None
         options.append({
             "key": key,
             "label": cfg.get("label", key),
-            "has_latest": latest.is_file(),
+            "has_latest": has_data,
         })
     return options
 
@@ -138,7 +222,7 @@ def _resolve_image(raw, code, data_dir):
     if raw:
         text = str(raw).strip()
         if text.lower().startswith(("http://", "https://")):
-            return text
+            return normalize_url(text)
         p = Path(text)
         if not p.is_absolute():
             p = ROOT_DIR / p
@@ -196,15 +280,19 @@ def _load_display(rows):
 
 def list_stores(region=None):
     _, display_path, _, _ = resolve_sources(region)
-    by_store = _load_display(_read_csv(display_path))
+    by_store = _load_display(_read_table(display_path))
     return [ALL_STORES] + sorted(by_store.keys())
 
 
 def build_products(store=None, only_gap=False, include_discontinued=False, region=None):
     """核心：按店面逐个产品计算 有货/展示 状态与汇总指标。"""
     stock_path, display_path, source, data_dir = resolve_sources(region)
-    stock_rows = _load_stock(_read_csv(stock_path), data_dir)
-    by_store = _load_display(_read_csv(display_path))
+    if not Path(stock_path).is_file():
+        raise FileNotFoundError(stock_path)
+    if not Path(display_path).is_file():
+        raise FileNotFoundError(display_path)
+    stock_rows = _load_stock(_read_table(stock_path), data_dir)
+    by_store = _load_display(_read_table(display_path))
 
     stores = [ALL_STORES] + sorted(by_store.keys())
     if store is None:
