@@ -30,8 +30,9 @@ except Exception:
     ImageTk = None
 
 THUMB = (116, 84)
-RENDER_BATCH = 40
-LARGE_LIST_HINT = 300
+CARD_MODE_LIMIT = 80        # 超过则用表格，避免大量卡片频闪
+CARD_RENDER_BATCH = 40
+IMAGE_LOAD_LIMIT = 40       # 卡片模式下限制图片加载数
 
 FAMILY_COLORS = {
     "Sofa": "#2563eb", "Bed": "#16a34a", "Dining": "#d97706",
@@ -62,7 +63,17 @@ class PanelApp:
         self._reload_token = 0
         self._render_token = 0
         self._summary_text = ""
-        self._image_semaphore = threading.Semaphore(6)
+        self._image_semaphore = threading.Semaphore(4)
+        self._image_load_budget = 0
+        self._rendering = False
+        self._view_mode = None  # "card" | "tree"
+        self._tree_vscroll = None
+
+        self.product_container = None
+        self.canvas = None
+        self.list_frame = None
+        self._tree = None
+        self._on_frame_configure = None
 
         regions = panel_data.list_regions()
         default_region = panel_data.SAMPLE_REGION
@@ -115,27 +126,90 @@ class PanelApp:
                                      padding=(12, 8), font=("Segoe UI", 11))
         self.summary_lbl.pack(fill=tk.X)
 
-        container = ttk.Frame(self.root)
-        container.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
-        self.canvas = tk.Canvas(container, highlightthickness=0, background="#f3f6fb")
-        vscroll = ttk.Scrollbar(container, orient="vertical", command=self.canvas.yview)
+        self.product_container = ttk.Frame(self.root)
+        self.product_container.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
+        self._setup_card_view()
+
+        self.canvas.bind_all("<MouseWheel>", self._on_wheel)
+        self.canvas.bind_all("<Button-4>", lambda _e: self._on_wheel(-1))
+        self.canvas.bind_all("<Button-5>", lambda _e: self._on_wheel(1))
+
+    def _setup_card_view(self):
+        if self._view_mode == "card" and self.canvas is not None:
+            return
+        self._clear_product_container()
+        self._view_mode = "card"
+        self.canvas = tk.Canvas(self.product_container, highlightthickness=0, background="#f3f6fb")
+        vscroll = ttk.Scrollbar(self.product_container, orient="vertical", command=self.canvas.yview)
         self.canvas.configure(yscrollcommand=vscroll.set)
         vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         self.list_frame = tk.Frame(self.canvas, background="#f3f6fb")
         self._win = self.canvas.create_window((0, 0), window=self.list_frame, anchor="nw")
-        self.list_frame.bind("<Configure>",
-                             lambda _e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
-        self.canvas.bind("<Configure>",
-                         lambda e: self.canvas.itemconfigure(self._win, width=e.width))
-        self.canvas.bind_all("<MouseWheel>", self._on_wheel)
-        self.canvas.bind_all("<Button-4>", lambda _e: self.canvas.yview_scroll(-1, "units"))
-        self.canvas.bind_all("<Button-5>", lambda _e: self.canvas.yview_scroll(1, "units"))
+        self._on_frame_configure = lambda _e: self._update_scrollregion()
+        self.list_frame.bind("<Configure>", self._on_frame_configure)
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._win, width=e.width))
 
-    def _on_wheel(self, event):
-        delta = -1 if event.delta > 0 else 1
-        self.canvas.yview_scroll(delta, "units")
+    def _setup_tree_view(self):
+        if self._view_mode == "tree" and self._tree is not None:
+            return
+        self._clear_product_container()
+        self._view_mode = "tree"
+        columns = ("code", "name", "family", "price", "stock", "display", "status")
+        self._tree = ttk.Treeview(self.product_container, columns=columns, show="headings", selectmode="browse")
+        headings = {
+            "code": ("编码", 100), "name": ("名称", 280), "family": ("系列", 100),
+            "price": ("价格", 80), "stock": ("库存", 70), "display": ("展示", 70), "status": ("状态", 120),
+        }
+        for col, (text, width) in headings.items():
+            self._tree.heading(col, text=text)
+            self._tree.column(col, width=width, anchor="w" if col in ("code", "name", "family") else "center")
+        self._tree.tag_configure("gap", background="#fef2f2")
+        self._tree_vscroll = ttk.Scrollbar(self.product_container, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=self._tree_vscroll.set)
+        self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._tree_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+    def _clear_product_container(self):
+        for child in self.product_container.winfo_children():
+            child.destroy()
+        self.canvas = None
+        self.list_frame = None
+        self._tree = None
+        self._tree_vscroll = None
+
+    def _clear_card_rows(self):
+        if not self.list_frame:
+            return
+        for w in self.list_frame.winfo_children():
+            w.destroy()
+
+    def _clear_tree_rows(self):
+        if not self._tree:
+            return
+        children = self._tree.get_children()
+        if children:
+            self._tree.delete(*children)
+
+    def _update_scrollregion(self):
+        if self._rendering or not self.canvas:
+            return
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_wheel(self, delta):
+        if self._view_mode == "card" and self.canvas:
+            if isinstance(delta, int):
+                self.canvas.yview_scroll(delta, "units")
+            else:
+                step = -1 if delta.delta > 0 else 1
+                self.canvas.yview_scroll(step, "units")
+        elif self._view_mode == "tree" and self._tree:
+            if isinstance(delta, int):
+                self._tree.yview_scroll(delta, "units")
+            else:
+                step = -1 if delta.delta > 0 else 1
+                self._tree.yview_scroll(step, "units")
 
     def _current_region(self):
         text = self.region_combo.get().strip()
@@ -147,6 +221,9 @@ class PanelApp:
         self.region_combo.configure(state=state)
         self.store_combo.configure(state=state)
         self.reload_btn.configure(state=normal)
+
+    def _set_busy(self, busy):
+        self.root.config(cursor="watch" if busy else "")
 
     def _run_bg(self, worker, on_done):
         def _thread():
@@ -163,12 +240,14 @@ class PanelApp:
     def _on_region_change(self):
         region = self._current_region()
         self._set_controls_state(False)
+        self._set_busy(True)
         self.status_var.set(f"正在加载 {region} 店面列表...")
 
         def worker():
             return panel_data.list_stores(region)
 
         def done(err, stores):
+            self._set_busy(False)
             if err:
                 self.status_var.set(f"加载店面失败：{err}")
                 self._set_controls_state(True)
@@ -213,17 +292,20 @@ class PanelApp:
         self._placeholder_cache[color] = img
         return img
 
-    def _schedule_image_load(self, raw, item, img_label):
+    def _schedule_image_load(self, raw, item, img_label, render_token):
         if not raw or raw in self._img_cache or raw in self._pending_images:
             return
+        if self._image_load_budget <= 0:
+            return
+        self._image_load_budget -= 1
         self._pending_images.add(raw)
         threading.Thread(
             target=self._load_image_async,
-            args=(raw, item, img_label),
+            args=(raw, item, img_label, render_token),
             daemon=True,
         ).start()
 
-    def _load_image_async(self, raw, item, img_label):
+    def _load_image_async(self, raw, item, img_label, render_token):
         photo = None
         try:
             with self._image_semaphore:
@@ -242,6 +324,8 @@ class PanelApp:
 
         def apply():
             self._pending_images.discard(raw)
+            if render_token != self._render_token:
+                return
             if not img_label.winfo_exists():
                 return
             if photo is not None:
@@ -254,17 +338,17 @@ class PanelApp:
 
     def reload(self):
         self._reload_token += 1
+        self._render_token += 1
+        self._pending_images.clear()
         token = self._reload_token
         region = self._current_region()
         store = self.store_var.get()
         only_gap = self.only_gap_var.get()
 
         self._set_controls_state(False)
+        self._set_busy(True)
         self.status_var.set("正在读取数据，请稍候...")
-        for w in self.list_frame.winfo_children():
-            w.destroy()
-        tk.Label(self.list_frame, text="数据加载中...",
-                 bg="#f3f6fb", fg=COL_MUTED, pady=24).pack()
+        # 保留当前列表内容直到新数据就绪，避免清空后频闪
 
         def worker():
             return panel_data.build_products(store=store, only_gap=only_gap, region=region)
@@ -272,11 +356,10 @@ class PanelApp:
         def done(err, data):
             if token != self._reload_token:
                 return
+            self._set_busy(False)
             self._set_controls_state(True)
             if err:
                 self.status_var.set(f"加载失败：{err}")
-                for w in self.list_frame.winfo_children():
-                    w.destroy()
                 return
             self._apply_data(data, region)
 
@@ -291,16 +374,17 @@ class PanelApp:
         else:
             src = "CSV"
         self.source_var.set(f"数据源：{src}    库存：{data['stock_path']}")
-        if Image is None:
-            self.source_var.set(self.source_var.get() + "    ⚠ 未安装 Pillow，请运行 pip install pillow")
 
         def pct(v):
             return "-" if v is None else f"{v:.1f}%"
 
-        extra = ""
         products = data["products"]
-        if len(products) > LARGE_LIST_HINT and not self.only_gap_var.get():
-            extra = f"    （共 {len(products)} 条，建议勾选「只看有货未展示」加快显示）"
+        use_tree = len(products) > CARD_MODE_LIMIT
+        extra = ""
+        if use_tree:
+            extra = "    （表格模式；勾选「只看有货未展示」可缩小范围）"
+        elif len(products) > CARD_MODE_LIMIT // 2 and not self.only_gap_var.get():
+            extra = f"    （共 {len(products)} 条，建议勾选「只看有货未展示」）"
 
         self._summary_text = (
             f"店面：{s['store']}    "
@@ -318,31 +402,89 @@ class PanelApp:
                 self.status_var.set(self._summary_text)
                 break
 
-        for w in self.list_frame.winfo_children():
-            w.destroy()
-
         if not products:
+            if self._view_mode != "card":
+                self._setup_card_view()
+            else:
+                self._clear_card_rows()
             tk.Label(self.list_frame, text="没有符合条件的产品。",
                      bg="#f3f6fb", fg=COL_MUTED, pady=20).pack()
             return
 
-        self._render_token += 1
-        render_token = self._render_token
-        self._render_products_batched(products, render_token, 0)
+        if use_tree:
+            self._render_tree(products)
+        else:
+            if self._view_mode != "card":
+                self._setup_card_view()
+            else:
+                self._clear_card_rows()
+            self._image_load_budget = min(IMAGE_LOAD_LIMIT, len(products))
+            self._render_products_batched(products, self._render_token, 0)
 
     def _render_products_batched(self, products, render_token, start):
         if render_token != self._render_token:
             return
-        end = min(start + RENDER_BATCH, len(products))
+        self._rendering = True
+        end = min(start + CARD_RENDER_BATCH, len(products))
         for item in products[start:end]:
-            self._render_row(item)
+            self._render_row(item, render_token)
         if end < len(products):
-            self.status_var.set(f"{self._summary_text}    正在渲染 {end}/{len(products)} ...")
-            self.root.after(1, lambda: self._render_products_batched(products, render_token, end))
+            self.root.after(32, lambda: self._render_products_batched(products, render_token, end))
         else:
-            self.status_var.set(self._summary_text)
+            self._rendering = False
+            self._update_scrollregion()
 
-    def _render_row(self, item):
+    def _tree_row_values(self, item):
+        price = f"{item['price']:,.2f}" if item.get("price") is not None else "-"
+        stock = int(item["stock_qty"]) if item.get("in_stock") else 0
+        displayed = "已展示" if item.get("displayed") else "未展示"
+        if item.get("gap"):
+            status = "★有货未展示"
+            tags = ("gap",)
+        elif item.get("discontinued"):
+            status = "已停产"
+            tags = ()
+        elif item.get("in_stock"):
+            status = "有货"
+            tags = ()
+        else:
+            status = "无货"
+            tags = ()
+        return (
+            item["code"], item.get("name") or "", item.get("family") or "",
+            price, stock, displayed, status,
+        ), tags
+
+    def _render_tree(self, products):
+        """一次性填充表格，避免分批插入造成频闪。"""
+        self._render_token += 1
+        render_token = self._render_token
+        need_switch = self._view_mode != "tree"
+        if need_switch:
+            self._setup_tree_view()
+        else:
+            self._clear_tree_rows()
+
+        # 隐藏表格，批量插入后再显示，避免中间态闪烁
+        if self._tree:
+            self._tree.pack_forget()
+            if self._tree_vscroll:
+                self._tree_vscroll.pack_forget()
+
+        rows = [self._tree_row_values(item) for item in products]
+
+        def fill():
+            if render_token != self._render_token or not self._tree:
+                return
+            for values, tags in rows:
+                self._tree.insert("", tk.END, values=values, tags=tags)
+            self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            if self._tree_vscroll:
+                self._tree_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.root.after_idle(fill)
+
+    def _render_row(self, item, render_token):
         gap = item["gap"]
         bg = COL_GAP_BG if gap else COL_ROW_BG
         row = tk.Frame(self.list_frame, bg=bg, highlightbackground=COL_BORDER,
@@ -355,7 +497,7 @@ class PanelApp:
         if photo is None:
             photo = self._placeholder(item)
             if raw:
-                self._schedule_image_load(raw, item, img_lbl)
+                self._schedule_image_load(raw, item, img_lbl, render_token)
         img_lbl.configure(image=photo)
         img_lbl.image = photo
         img_lbl.pack(side=tk.LEFT, padx=8, pady=8)
