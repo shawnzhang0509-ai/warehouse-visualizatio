@@ -30,10 +30,9 @@ except Exception:
     ImageTk = None
 
 THUMB = (116, 84)
-CARD_MODE_LIMIT = 120       # 超过则用表格，避免 2000+ 卡片频闪
-CARD_RENDER_BATCH = 60
-TREE_INSERT_BATCH = 250
-IMAGE_LOAD_LIMIT = 80       # 卡片模式下也限制并发图片数
+CARD_MODE_LIMIT = 80        # 超过则用表格，避免大量卡片频闪
+CARD_RENDER_BATCH = 40
+IMAGE_LOAD_LIMIT = 40       # 卡片模式下限制图片加载数
 
 FAMILY_COLORS = {
     "Sofa": "#2563eb", "Bed": "#16a34a", "Dining": "#d97706",
@@ -68,6 +67,7 @@ class PanelApp:
         self._image_load_budget = 0
         self._rendering = False
         self._view_mode = None  # "card" | "tree"
+        self._tree_vscroll = None
 
         self.product_container = None
         self.canvas = None
@@ -135,6 +135,8 @@ class PanelApp:
         self.canvas.bind_all("<Button-5>", lambda _e: self._on_wheel(1))
 
     def _setup_card_view(self):
+        if self._view_mode == "card" and self.canvas is not None:
+            return
         self._clear_product_container()
         self._view_mode = "card"
         self.canvas = tk.Canvas(self.product_container, highlightthickness=0, background="#f3f6fb")
@@ -150,6 +152,8 @@ class PanelApp:
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._win, width=e.width))
 
     def _setup_tree_view(self):
+        if self._view_mode == "tree" and self._tree is not None:
+            return
         self._clear_product_container()
         self._view_mode = "tree"
         columns = ("code", "name", "family", "price", "stock", "display", "status")
@@ -162,10 +166,10 @@ class PanelApp:
             self._tree.heading(col, text=text)
             self._tree.column(col, width=width, anchor="w" if col in ("code", "name", "family") else "center")
         self._tree.tag_configure("gap", background="#fef2f2")
-        vscroll = ttk.Scrollbar(self.product_container, orient="vertical", command=self._tree.yview)
-        self._tree.configure(yscrollcommand=vscroll.set)
+        self._tree_vscroll = ttk.Scrollbar(self.product_container, orient="vertical", command=self._tree.yview)
+        self._tree.configure(yscrollcommand=self._tree_vscroll.set)
         self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._tree_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
 
     def _clear_product_container(self):
         for child in self.product_container.winfo_children():
@@ -173,6 +177,20 @@ class PanelApp:
         self.canvas = None
         self.list_frame = None
         self._tree = None
+        self._tree_vscroll = None
+
+    def _clear_card_rows(self):
+        if not self.list_frame:
+            return
+        for w in self.list_frame.winfo_children():
+            w.destroy()
+
+    def _clear_tree_rows(self):
+        if not self._tree:
+            return
+        children = self._tree.get_children()
+        if children:
+            self._tree.delete(*children)
 
     def _update_scrollregion(self):
         if self._rendering or not self.canvas:
@@ -186,6 +204,12 @@ class PanelApp:
             else:
                 step = -1 if delta.delta > 0 else 1
                 self.canvas.yview_scroll(step, "units")
+        elif self._view_mode == "tree" and self._tree:
+            if isinstance(delta, int):
+                self._tree.yview_scroll(delta, "units")
+            else:
+                step = -1 if delta.delta > 0 else 1
+                self._tree.yview_scroll(step, "units")
 
     def _current_region(self):
         text = self.region_combo.get().strip()
@@ -197,6 +221,9 @@ class PanelApp:
         self.region_combo.configure(state=state)
         self.store_combo.configure(state=state)
         self.reload_btn.configure(state=normal)
+
+    def _set_busy(self, busy):
+        self.root.config(cursor="watch" if busy else "")
 
     def _run_bg(self, worker, on_done):
         def _thread():
@@ -213,12 +240,14 @@ class PanelApp:
     def _on_region_change(self):
         region = self._current_region()
         self._set_controls_state(False)
+        self._set_busy(True)
         self.status_var.set(f"正在加载 {region} 店面列表...")
 
         def worker():
             return panel_data.list_stores(region)
 
         def done(err, stores):
+            self._set_busy(False)
             if err:
                 self.status_var.set(f"加载店面失败：{err}")
                 self._set_controls_state(True)
@@ -317,12 +346,9 @@ class PanelApp:
         only_gap = self.only_gap_var.get()
 
         self._set_controls_state(False)
+        self._set_busy(True)
         self.status_var.set("正在读取数据，请稍候...")
-        if self.list_frame:
-            for w in self.list_frame.winfo_children():
-                w.destroy()
-            tk.Label(self.list_frame, text="数据加载中...",
-                     bg="#f3f6fb", fg=COL_MUTED, pady=24).pack()
+        # 保留当前列表内容直到新数据就绪，避免清空后频闪
 
         def worker():
             return panel_data.build_products(store=store, only_gap=only_gap, region=region)
@@ -330,6 +356,7 @@ class PanelApp:
         def done(err, data):
             if token != self._reload_token:
                 return
+            self._set_busy(False)
             self._set_controls_state(True)
             if err:
                 self.status_var.set(f"加载失败：{err}")
@@ -352,9 +379,10 @@ class PanelApp:
             return "-" if v is None else f"{v:.1f}%"
 
         products = data["products"]
+        use_tree = len(products) > CARD_MODE_LIMIT
         extra = ""
-        if len(products) > CARD_MODE_LIMIT:
-            extra = "    （大数据量：表格模式，勾选「只看有货未展示」可进一步缩小范围）"
+        if use_tree:
+            extra = "    （表格模式；勾选「只看有货未展示」可缩小范围）"
         elif len(products) > CARD_MODE_LIMIT // 2 and not self.only_gap_var.get():
             extra = f"    （共 {len(products)} 条，建议勾选「只看有货未展示」）"
 
@@ -375,16 +403,21 @@ class PanelApp:
                 break
 
         if not products:
-            self._setup_card_view()
+            if self._view_mode != "card":
+                self._setup_card_view()
+            else:
+                self._clear_card_rows()
             tk.Label(self.list_frame, text="没有符合条件的产品。",
                      bg="#f3f6fb", fg=COL_MUTED, pady=20).pack()
             return
 
-        if len(products) > CARD_MODE_LIMIT:
-            self._render_tree_batched(products)
+        if use_tree:
+            self._render_tree(products)
         else:
             if self._view_mode != "card":
                 self._setup_card_view()
+            else:
+                self._clear_card_rows()
             self._image_load_budget = min(IMAGE_LOAD_LIMIT, len(products))
             self._render_products_batched(products, self._render_token, 0)
 
@@ -396,46 +429,60 @@ class PanelApp:
         for item in products[start:end]:
             self._render_row(item, render_token)
         if end < len(products):
-            self.root.after(16, lambda: self._render_products_batched(products, render_token, end))
+            self.root.after(32, lambda: self._render_products_batched(products, render_token, end))
         else:
             self._rendering = False
             self._update_scrollregion()
 
-    def _render_tree_batched(self, products, render_token=None, start=0):
-        if render_token is None:
-            self._render_token += 1
-            render_token = self._render_token
+    def _tree_row_values(self, item):
+        price = f"{item['price']:,.2f}" if item.get("price") is not None else "-"
+        stock = int(item["stock_qty"]) if item.get("in_stock") else 0
+        displayed = "已展示" if item.get("displayed") else "未展示"
+        if item.get("gap"):
+            status = "★有货未展示"
+            tags = ("gap",)
+        elif item.get("discontinued"):
+            status = "已停产"
+            tags = ()
+        elif item.get("in_stock"):
+            status = "有货"
+            tags = ()
+        else:
+            status = "无货"
+            tags = ()
+        return (
+            item["code"], item.get("name") or "", item.get("family") or "",
+            price, stock, displayed, status,
+        ), tags
+
+    def _render_tree(self, products):
+        """一次性填充表格，避免分批插入造成频闪。"""
+        self._render_token += 1
+        render_token = self._render_token
+        need_switch = self._view_mode != "tree"
+        if need_switch:
             self._setup_tree_view()
-            start = 0
-        if render_token != self._render_token:
-            return
+        else:
+            self._clear_tree_rows()
 
-        end = min(start + TREE_INSERT_BATCH, len(products))
-        for item in products[start:end]:
-            price = f"{item['price']:,.2f}" if item.get("price") is not None else "-"
-            stock = int(item["stock_qty"]) if item.get("in_stock") else 0
-            displayed = "已展示" if item.get("displayed") else "未展示"
-            if item.get("gap"):
-                status = "★有货未展示"
-                tags = ("gap",)
-            elif item.get("discontinued"):
-                status = "已停产"
-                tags = ()
-            elif item.get("in_stock"):
-                status = "有货"
-                tags = ()
-            else:
-                status = "无货"
-                tags = ()
-            self._tree.insert(
-                "", tk.END,
-                values=(item["code"], item.get("name") or "", item.get("family") or "",
-                        price, stock, displayed, status),
-                tags=tags,
-            )
+        # 隐藏表格，批量插入后再显示，避免中间态闪烁
+        if self._tree:
+            self._tree.pack_forget()
+            if self._tree_vscroll:
+                self._tree_vscroll.pack_forget()
 
-        if end < len(products):
-            self.root.after(1, lambda: self._render_tree_batched(products, render_token, end))
+        rows = [self._tree_row_values(item) for item in products]
+
+        def fill():
+            if render_token != self._render_token or not self._tree:
+                return
+            for values, tags in rows:
+                self._tree.insert("", tk.END, values=values, tags=tags)
+            self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+            if self._tree_vscroll:
+                self._tree_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.root.after_idle(fill)
 
     def _render_row(self, item, render_token):
         gap = item["gap"]
