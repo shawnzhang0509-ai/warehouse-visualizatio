@@ -370,16 +370,42 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         view = [p for p in view if p["gap"]]
     view.sort(key=lambda p: (not p["gap"], not p["in_stock"], -p["stock_qty"], p["code"]))
 
+    diagnostics = []
+    display_rows = _read_table(display_path)
+    if len(display_rows) < 5:
+        diagnostics.append({
+            "level": "warning",
+            "message": (
+                f"展示数据几乎为空（display 仅 {len(display_rows)} 行）："
+                f"{display_path}。请检查 Data-NZ/display.sql 并重新执行 SQL 导出。"
+            ),
+        })
+    elif len(by_store) == 0:
+        diagnostics.append({
+            "level": "warning",
+            "message": (
+                "展示数据里没有识别到店面列（需要 Store / DisplayWarehouse / Warehouse 等列名）。"
+                f"当前文件：{display_path}"
+            ),
+        })
+    elif len(stores) <= 1:
+        diagnostics.append({
+            "level": "warning",
+            "message": "展示数据未包含有效店面，店面下拉只会显示「全部店面」。",
+        })
+
     return {
         "source": source,
         "region": region or SAMPLE_REGION,
         "stock_path": str(stock_path),
         "display_path": str(display_path),
+        "display_row_count": len(display_rows),
         "stores": stores,
         "selected_store": store,
         "summary": summary,
         "products": view,
         "regions": list_regions(),
+        "diagnostics": diagnostics,
     }
 
 

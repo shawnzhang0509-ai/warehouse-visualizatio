@@ -312,6 +312,12 @@ class PanelApp:
         )
         self.status_var.set(self._summary_text)
 
+        for msg in data.get("diagnostics") or []:
+            if msg.get("level") == "warning":
+                self._summary_text += f"    ⚠ {msg['message']}"
+                self.status_var.set(self._summary_text)
+                break
+
         for w in self.list_frame.winfo_children():
             w.destroy()
 

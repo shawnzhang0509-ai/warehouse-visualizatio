@@ -417,6 +417,13 @@ def execute_region(region_key, region_cfg, log=None, on_template_start=None, on_
                     )
                     extra = f"，Excel: {paths['xlsx']}" if xlsx_ok else "（未安装 openpyxl，仅导出 CSV）"
                     _log(f"[{region_key}] 成功：{tpl_name} -> {paths['csv']}{extra} ({result['row_count']} 行)")
+                    if paths["standard_name"] == "display" and result["row_count"] < 10:
+                        _log(
+                            f"[{region_key}] ⚠ 警告：display 只有 {result['row_count']} 行，"
+                            "店面下拉将为空。请检查 Data-NZ/display.sql 是否正确导出各店面展示清单。"
+                        )
+                    if paths["standard_name"] == "stock" and result["row_count"] < 10:
+                        _log(f"[{region_key}] ⚠ 警告：stock 只有 {result['row_count']} 行，请检查库存 SQL。")
                 else:
                     conn.commit()
                     outputs.append(
