@@ -84,19 +84,11 @@ def _resolve_path(path_text):
 
 
 def _ensure_default_template_dirs(regions):
-    sample_sql = (
-        "-- 这里写你的查询，文件后缀保持 .txt\n"
-        "-- 示例：SELECT TOP 10 * FROM dbo.Warehouses;\n"
-        "SELECT GETDATE() AS run_time;"
-    )
     for cfg in regions.values():
         template_dir = _resolve_path(cfg.get("template_dir"))
         if template_dir is None:
             continue
         template_dir.mkdir(parents=True, exist_ok=True)
-        has_txt = any(p.is_file() and p.suffix.lower() == ".txt" for p in template_dir.iterdir())
-        if not has_txt:
-            (template_dir / "example_query.txt").write_text(sample_sql, encoding="utf-8")
 
 
 def _load_runner_config():
@@ -218,6 +210,29 @@ def _list_txt_templates(template_dir):
     return files
 
 
+def _is_stub_sql(sql_text):
+    """识别占位 SQL（如 SELECT GETDATE()），避免覆盖真实导出。"""
+    lines = []
+    for line in sql_text.splitlines():
+        text = line.strip()
+        if not text or text.startswith("--"):
+            continue
+        lines.append(text)
+    body = " ".join(lines).lower().rstrip(";").strip()
+    return body in ("select getdate() as run_time", "select getdate()")
+
+
+def _should_skip_template(file_path, sql_text):
+    name = file_path.name.lower()
+    if name.startswith("example_"):
+        return True
+    if name in ("stock.txt", "display.txt"):
+        return True
+    if _is_stub_sql(sql_text):
+        return True
+    return False
+
+
 def _read_sql_file(path):
     last_err = None
     for encoding in ("utf-8-sig", "utf-8", "gbk", "latin-1"):
@@ -228,12 +243,17 @@ def _read_sql_file(path):
     raise RuntimeError(f"读取 SQL 文件失败: {path} ({last_err})")
 
 
-def _load_sql_templates(template_dir):
+def _load_sql_templates(template_dir, log=None):
     templates = []
     for file_path in _list_txt_templates(template_dir):
         sql_text = _read_sql_file(file_path)
-        if sql_text:
-            templates.append({"name": file_path.name, "sql": sql_text})
+        if not sql_text:
+            continue
+        if _should_skip_template(file_path, sql_text):
+            if callable(log):
+                log(f"跳过：{file_path.name}（占位/示例模板，不执行）")
+            continue
+        templates.append({"name": file_path.name, "sql": sql_text})
     return templates
 
 
@@ -348,7 +368,7 @@ def execute_region(region_key, region_cfg, log=None):
     label = _region_label(region_key, region_cfg)
     started_at = _utc_iso()
     _log(f"[{region_key}] 开始执行：{label}")
-    templates = _load_sql_templates(region_cfg.get("template_dir"))
+    templates = _load_sql_templates(region_cfg.get("template_dir"), log=_log)
     if not templates:
         _log(f"[{region_key}] 未找到可执行的 txt 模板。")
         return {
