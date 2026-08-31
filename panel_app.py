@@ -1,6 +1,6 @@
 """有货未展示看板 —— 纯本地桌面软件（Tkinter，不走浏览器）。
 
-左侧产品列表 + 右侧大图预览；切换店面时复用内存缓存，避免重复读 Excel。
+左侧产品大图预览 + 右侧列表；库存按店面交叉读取 Carbine/Walls/GC 各列。
 
 运行：
     python panel_app.py          # 或双击 start_panel.bat
@@ -124,10 +124,26 @@ class PanelApp:
         paned = ttk.PanedWindow(self.product_container, orient=tk.HORIZONTAL)
         paned.pack(fill=tk.BOTH, expand=True)
 
-        tree_frame = ttk.Frame(paned)
         detail_frame = ttk.Frame(paned, padding=(16, 12))
-        paned.add(tree_frame, weight=3)
+        tree_frame = ttk.Frame(paned)
         paned.add(detail_frame, weight=1)
+        paned.add(tree_frame, weight=3)
+
+        ttk.Label(detail_frame, text="产品预览", font=("Segoe UI", 12, "bold")).pack(anchor="w")
+        ttk.Label(detail_frame, text="选中右侧产品查看大图", foreground=COL_MUTED).pack(anchor="w", pady=(0, 8))
+
+        self._detail_img = tk.Label(detail_frame, bg=PLACEHOLDER_COLOR, width=280, height=210)
+        self._detail_img.pack(anchor="w", pady=(0, 12))
+        self._placeholder_photo = self._make_placeholder_photo()
+        self._detail_img.configure(image=self._placeholder_photo)
+        self._detail_img.image = self._placeholder_photo
+
+        self._detail_title = ttk.Label(detail_frame, text="—", font=("Segoe UI", 11, "bold"), wraplength=300)
+        self._detail_title.pack(anchor="w")
+        self._detail_meta = ttk.Label(detail_frame, text="", foreground=COL_MUTED, wraplength=300)
+        self._detail_meta.pack(anchor="w", pady=(6, 0))
+        self._detail_status = ttk.Label(detail_frame, text="", font=("Segoe UI", 10))
+        self._detail_status.pack(anchor="w", pady=(10, 0))
 
         columns = ("code", "name", "family", "price", "stock", "display", "status")
         self._tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
@@ -144,22 +160,6 @@ class PanelApp:
         self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._tree_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._tree.bind("<<TreeviewSelect>>", self._on_tree_select)
-
-        ttk.Label(detail_frame, text="产品预览", font=("Segoe UI", 12, "bold")).pack(anchor="w")
-        ttk.Label(detail_frame, text="点击左侧列表查看图片", foreground=COL_MUTED).pack(anchor="w", pady=(0, 8))
-
-        self._detail_img = tk.Label(detail_frame, bg=PLACEHOLDER_COLOR, width=280, height=210)
-        self._detail_img.pack(anchor="w", pady=(0, 12))
-        self._placeholder_photo = self._make_placeholder_photo()
-        self._detail_img.configure(image=self._placeholder_photo)
-        self._detail_img.image = self._placeholder_photo
-
-        self._detail_title = ttk.Label(detail_frame, text="—", font=("Segoe UI", 11, "bold"), wraplength=300)
-        self._detail_title.pack(anchor="w")
-        self._detail_meta = ttk.Label(detail_frame, text="", foreground=COL_MUTED, wraplength=300)
-        self._detail_meta.pack(anchor="w", pady=(6, 0))
-        self._detail_status = ttk.Label(detail_frame, text="", font=("Segoe UI", 10))
-        self._detail_status.pack(anchor="w", pady=(10, 0))
 
         self.root.bind_all("<MouseWheel>", self._on_wheel)
         self.root.bind_all("<Button-4>", lambda _e: self._on_wheel(-1))
@@ -320,7 +320,13 @@ class PanelApp:
         meta_parts = [f"系列：{item.get('family') or '—'}"]
         if item.get("price") is not None:
             meta_parts.append(f"价格：{item['price']:,.2f}")
-        meta_parts.append(f"库存：{int(item['stock_qty']) if item.get('in_stock') else 0}")
+        stock_line = f"库存：{int(item['stock_qty']) if item.get('in_stock') else 0}"
+        if item.get("stock_breakdown"):
+            stock_line += f"（{item['stock_breakdown']}）"
+        elif item.get("stock_warehouses"):
+            wh = " + ".join(panel_data.WAREHOUSE_LABELS.get(k, k) for k in item["stock_warehouses"])
+            stock_line += f"（{wh}）"
+        meta_parts.append(stock_line)
         self._detail_meta.configure(text="    ".join(meta_parts))
 
         if item.get("gap"):
@@ -383,6 +389,7 @@ class PanelApp:
 
         summary = (
             f"店面：{s['store']}    "
+            f"库存来源：{s.get('stock_sources', '-')}    "
             f"有货率 {pct(s['in_stock_rate'])}    "
             f"展示覆盖率 {pct(s['display_coverage_rate'])}    "
             f"有货未展示 {s['not_displayed_count']} 个"

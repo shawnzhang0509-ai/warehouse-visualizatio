@@ -39,7 +39,7 @@ STOCK_KEYS = ["stockqty", "stock_qty", "stock", "qty", "quantity", "onhand",
               "soh", "totalstock", "total_stock"]
 PRICE_KEYS = ["price", "unitprice", "unit_price", "sellprice", "sell_price",
               "saleprice", "sale_price", "retailprice", "retail_price"]
-DISCONTINUE_KEYS = ["discontinued", "isdiscontinued", "is_discontinued",
+DISCONTINUE_KEYS = ["discontinued", "isdiscontinued", "is_discontinued", "isdisconti",
                     "discontinue", "discontinueflag", "discontinue_flag", "status"]
 STORE_KEYS = ["store", "storename", "store_name", "warehouse", "warehousename",
               "warehouse_name", "location", "branch", "shop", "displaywarehouse",
@@ -48,6 +48,21 @@ IMAGE_KEYS = ["imagefile", "image", "imageurl", "image_url", "img",
               "picture", "photo", "thumbnail", "thumb"]
 
 ALL_STORES = "全部店面"
+
+# 店面展示名 → 库存列（stock.xlsx 多仓交叉读取）
+WAREHOUSE_LABELS = {
+    "carbine": "Carbine",
+    "walls": "Walls",
+    "geraldconnelly": "GC",
+    "northisland": "North Island",
+}
+REGION_STORE_STOCK_RULES = {
+    "NZ": [
+        (("onehunga", "westgate", "hamilton", "sleeplab"), ("carbine", "walls")),
+        (("chch", "christchurch", "gerald", "treffers", "presale"), ("geraldconnelly",)),
+    ],
+}
+DEFAULT_ALL_WAREHOUSES = ("carbine", "walls", "geraldconnelly")
 
 # region_key -> cached bundle (invalidated when file mtime changes)
 _REGION_CACHE = {}
@@ -85,6 +100,86 @@ def _is_discontinued(value):
 
 def _norm_code(value):
     return str(value).strip().upper() if value is not None else ""
+
+
+def _norm_col_key(name):
+    return re.sub(r"[^a-z0-9]", "", str(name).strip().lower())
+
+
+def _classify_warehouse_column(col_name):
+    """把 stock.xlsx 列名映射到标准仓名（CarbineSt / WallsStoc / GeraldConnellyStock 等）。"""
+    key = _norm_col_key(col_name)
+    if not key:
+        return None
+    if "carbine" in key:
+        return "carbine"
+    if "walls" in key:
+        return "walls"
+    if "geraldconnelly" in key or key.startswith("gc"):
+        return "geraldconnelly"
+    if "northisland" in key or key.startswith("northislar"):
+        return "northisland"
+    return None
+
+
+def _extract_warehouse_stock(row):
+    """从一行 stock 数据提取各仓库存数量。"""
+    stock = {}
+    for col, value in row.items():
+        wh = _classify_warehouse_column(col)
+        if not wh:
+            continue
+        qty = _to_float(value) or 0.0
+        stock[wh] = stock.get(wh, 0.0) + qty
+    return stock
+
+
+def _warehouses_for_store(store_name, region_key):
+    """根据所选店面，决定用哪些仓库列计算有货数量。"""
+    if store_name == ALL_STORES:
+        return DEFAULT_ALL_WAREHOUSES
+
+    text = str(store_name).strip().lower()
+    for patterns, warehouses in REGION_STORE_STOCK_RULES.get(region_key.upper(), []):
+        if any(p in text for p in patterns):
+            return warehouses
+
+    if any(x in text for x in ("auck", "onehunga", "westgate", "hamilton", "north")):
+        return ("carbine", "walls")
+    if any(x in text for x in ("chch", "christ", "gerald", "treffers", "south")):
+        return ("geraldconnelly",)
+    return DEFAULT_ALL_WAREHOUSES
+
+
+def _qty_from_warehouses(warehouse_stock, warehouse_keys):
+    return sum(float(warehouse_stock.get(k, 0) or 0) for k in warehouse_keys)
+
+
+def _stock_breakdown(warehouse_stock, warehouse_keys):
+    parts = []
+    for key in warehouse_keys:
+        qty = int(warehouse_stock.get(key, 0) or 0)
+        if qty > 0:
+            parts.append(f"{WAREHOUSE_LABELS.get(key, key)} {qty}")
+    return " + ".join(parts) if parts else ""
+
+
+def _apply_store_stock(product, store, region_key):
+    """按店面重算库存、有货状态。"""
+    warehouse_stock = product.get("warehouse_stock") or {}
+    warehouse_keys = _warehouses_for_store(store, region_key)
+    if warehouse_stock:
+        qty = _qty_from_warehouses(warehouse_stock, warehouse_keys)
+        breakdown = _stock_breakdown(warehouse_stock, warehouse_keys)
+    else:
+        qty = float(product.get("stock_qty") or 0)
+        breakdown = ""
+    item = dict(product)
+    item["stock_qty"] = qty
+    item["in_stock"] = qty > 0
+    item["stock_warehouses"] = warehouse_keys
+    item["stock_breakdown"] = breakdown
+    return item
 
 
 def _read_csv(path):
@@ -340,12 +435,17 @@ def _load_stock(rows, data_dir):
         code = _pick(row, CODE_KEYS)
         if not code:
             continue
-        qty = _to_float(_pick(row, STOCK_KEYS)) or 0.0
+        warehouse_stock = _extract_warehouse_stock(row)
+        if warehouse_stock:
+            qty = sum(warehouse_stock.values())
+        else:
+            qty = _to_float(_pick(row, STOCK_KEYS)) or 0.0
         out.append({
             "code": str(code).strip(),
             "name": str(_pick(row, NAME_KEYS) or "").strip(),
             "family": str(_pick(row, FAMILY_KEYS) or "未分类").strip(),
             "stock_qty": qty,
+            "warehouse_stock": warehouse_stock,
             "price": _to_float(_pick(row, PRICE_KEYS)),
             "discontinued": _is_discontinued(_pick(row, DISCONTINUE_KEYS)),
             "in_stock": qty > 0,
@@ -398,9 +498,9 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
 
     products = []
     for p in stock_rows:
-        displayed = _norm_code(p["code"]) in displayed_codes
-        gap = p["in_stock"] and (not p["discontinued"]) and (not displayed)
-        item = dict(p)
+        item = _apply_store_stock(p, store, region_key)
+        displayed = _norm_code(item["code"]) in displayed_codes
+        gap = item["in_stock"] and (not item["discontinued"]) and (not displayed)
         item["displayed"] = displayed
         item["gap"] = gap
         products.append(item)
@@ -421,6 +521,9 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         "displayed_in_stock_count": len(displayed_in_stock),
         "display_coverage_rate": round(len(displayed_in_stock) / in_stock_n * 100, 2) if in_stock_n else None,
         "not_displayed_count": len(not_displayed),
+        "stock_sources": " + ".join(
+            WAREHOUSE_LABELS.get(k, k) for k in _warehouses_for_store(store, region_key)
+        ),
     }
 
     view = products
