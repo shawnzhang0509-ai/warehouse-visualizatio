@@ -7,7 +7,6 @@
 1. 环境变量 INSTOCK_STOCK_CSV / INSTOCK_DISPLAY_CSV
 2. INSTOCK_DATA_DIR 目录下的 stock.csv / display.csv
 3. INSTOCK_REGION（如 NZ/CA）→ Output-{region}/ 下的 stock/display 文件
-4. 仓库自带 sample_data/（默认，开箱即用）
 
 支持 CSV 和 Excel（.xlsx）；列名不需要完全一致，_pick 会做模糊匹配。
 """
@@ -25,7 +24,6 @@ except ImportError:
     load_workbook = None
 
 ROOT_DIR = Path(__file__).parent
-SAMPLE_DIR = ROOT_DIR / "sample_data"
 RUNNER_CONFIG_FILE = ROOT_DIR / "region_runner_config.json"
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
@@ -50,7 +48,9 @@ IMAGE_KEYS = ["imagefile", "image", "imageurl", "image_url", "img",
               "picture", "photo", "thumbnail", "thumb"]
 
 ALL_STORES = "全部店面"
-SAMPLE_REGION = "sample"
+
+# region_key -> cached bundle (invalidated when file mtime changes)
+_REGION_CACHE = {}
 
 
 def _pick(row, keys):
@@ -127,6 +127,11 @@ def _read_table(path):
     if path.suffix.lower() == ".xlsx":
         return _read_xlsx(path)
     return _read_csv(path)
+
+
+def _file_mtime(path):
+    p = Path(path)
+    return p.stat().st_mtime if p.is_file() else 0.0
 
 
 def normalize_url(url):
@@ -226,7 +231,7 @@ def resolve_sources(region=None):
     if data_dir:
         d = Path(data_dir)
         return d / "stock.csv", d / "display.csv", "csv", d
-    if region_key and region_key != SAMPLE_REGION.upper():
+    if region_key:
         d = _region_output_dir(region_key)
         stock_path = _find_region_data_file(d, _region_stock_stems(region_key))
         display_path = _find_region_data_file(d, _region_display_stems(region_key))
@@ -235,11 +240,13 @@ def resolve_sources(region=None):
         if display_path is None:
             display_path = d / "display.xlsx"
         return stock_path, display_path, f"region-{region_key}", d
-    return SAMPLE_DIR / "stock.csv", SAMPLE_DIR / "display.csv", "sample", SAMPLE_DIR
+    raise ValueError(
+        "未指定地区。请在界面选择 NZ/AU/CA，或设置环境变量 INSTOCK_REGION。"
+    )
 
 
 def list_regions():
-    options = [{"key": SAMPLE_REGION, "label": "示例数据", "has_latest": True}]
+    options = []
     for key, cfg in _load_runner_regions().items():
         out_dir = _region_output_dir(key)
         has_data = _find_region_data_file(out_dir, _region_stock_stems(key)) is not None
@@ -249,6 +256,60 @@ def list_regions():
             "has_latest": has_data,
         })
     return options
+
+
+def default_region():
+    """返回第一个已有导出数据的地区，否则返回配置里的第一个地区。"""
+    regions = list_regions()
+    for r in regions:
+        if r.get("has_latest"):
+            return r["key"]
+    return regions[0]["key"] if regions else None
+
+
+def clear_region_cache(region=None):
+    if region is None:
+        _REGION_CACHE.clear()
+        return
+    _REGION_CACHE.pop(str(region).strip().upper(), None)
+
+
+def _load_region_bundle(region, force=False):
+    """读取并缓存某地区的 stock/display 原始表（切换店面时复用，避免重复读 Excel）。"""
+    region_key = str(region).strip().upper()
+    stock_path, display_path, source, data_dir = resolve_sources(region_key)
+    stock_mtime = _file_mtime(stock_path)
+    display_mtime = _file_mtime(display_path)
+
+    cached = _REGION_CACHE.get(region_key)
+    if (
+        not force
+        and cached
+        and cached["stock_mtime"] == stock_mtime
+        and cached["display_mtime"] == display_mtime
+    ):
+        return cached
+
+    if not Path(stock_path).is_file():
+        raise FileNotFoundError(stock_path)
+    if not Path(display_path).is_file():
+        raise FileNotFoundError(display_path)
+
+    display_rows = _read_table(display_path)
+    bundle = {
+        "region": region_key,
+        "stock_path": stock_path,
+        "display_path": display_path,
+        "source": source,
+        "data_dir": data_dir,
+        "stock_mtime": stock_mtime,
+        "display_mtime": display_mtime,
+        "stock_rows": _load_stock(_read_table(stock_path), data_dir),
+        "by_store": _load_display(display_rows),
+        "display_row_count": len(display_rows),
+    }
+    _REGION_CACHE[region_key] = bundle
+    return bundle
 
 
 def _resolve_image(raw, code, data_dir):
@@ -263,17 +324,11 @@ def _resolve_image(raw, code, data_dir):
         if p.is_file():
             return str(p)
 
-    search_dirs = [
-        ROOT_DIR / "sample_images",
-        Path(data_dir) / "images",
-        SAMPLE_DIR / "images",
-    ]
-    for base in search_dirs:
-        if not base.is_dir():
-            continue
+    images_dir = Path(data_dir) / "images"
+    if images_dir.is_dir():
         for stem in (str(code).strip(), str(code).strip().upper(), str(code).strip().lower()):
             for ext in IMAGE_EXTS:
-                candidate = base / f"{stem}{ext}"
+                candidate = images_dir / f"{stem}{ext}"
                 if candidate.is_file():
                     return str(candidate)
     return None
@@ -313,20 +368,24 @@ def _load_display(rows):
 
 
 def list_stores(region=None):
-    _, display_path, _, _ = resolve_sources(region)
-    by_store = _load_display(_read_table(display_path))
+    bundle = _load_region_bundle(region or default_region())
+    by_store = bundle["by_store"]
     return [ALL_STORES] + sorted(by_store.keys())
 
 
-def build_products(store=None, only_gap=False, include_discontinued=False, region=None):
+def build_products(store=None, only_gap=False, include_discontinued=False, region=None,
+                   force_refresh=False):
     """核心：按店面逐个产品计算 有货/展示 状态与汇总指标。"""
-    stock_path, display_path, source, data_dir = resolve_sources(region)
-    if not Path(stock_path).is_file():
-        raise FileNotFoundError(stock_path)
-    if not Path(display_path).is_file():
-        raise FileNotFoundError(display_path)
-    stock_rows = _load_stock(_read_table(stock_path), data_dir)
-    by_store = _load_display(_read_table(display_path))
+    region_key = region or default_region()
+    if not region_key:
+        raise ValueError("region_runner_config.json 中未配置任何地区。")
+
+    bundle = _load_region_bundle(region_key, force=force_refresh)
+    stock_rows = bundle["stock_rows"]
+    by_store = bundle["by_store"]
+    stock_path = bundle["stock_path"]
+    display_path = bundle["display_path"]
+    source = bundle["source"]
 
     stores = [ALL_STORES] + sorted(by_store.keys())
     if store is None:
@@ -355,7 +414,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
     in_stock_n = len(in_stock)
     summary = {
         "store": store,
-        "region": region or SAMPLE_REGION,
+        "region": region_key,
         "total_non_discontinue": total_nd,
         "in_stock_count": in_stock_n,
         "in_stock_rate": round(in_stock_n / total_nd * 100, 2) if total_nd else None,
@@ -372,12 +431,12 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
     view.sort(key=lambda p: (not p["gap"], not p["in_stock"], -p["stock_qty"], p["code"]))
 
     diagnostics = []
-    display_rows = _read_table(display_path)
-    if len(display_rows) < 5:
+    display_row_count = bundle["display_row_count"]
+    if display_row_count < 5:
         diagnostics.append({
             "level": "warning",
             "message": (
-                f"展示数据几乎为空（display 仅 {len(display_rows)} 行）："
+                f"展示数据几乎为空（display 仅 {display_row_count} 行）："
                 f"{display_path}。请检查 Data-NZ/display_with_families.sql 并重新执行导出。"
             ),
         })
@@ -397,10 +456,10 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
 
     return {
         "source": source,
-        "region": region or SAMPLE_REGION,
+        "region": region_key,
         "stock_path": str(stock_path),
         "display_path": str(display_path),
-        "display_row_count": len(display_rows),
+        "display_row_count": display_row_count,
         "stores": stores,
         "selected_store": store,
         "summary": summary,
@@ -411,10 +470,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
 
 
 if __name__ == "__main__":
-    import json
-    data = build_products(store="Walls Road")
-    print("stores:", data["stores"])
-    print("summary:", json.dumps(data["summary"], ensure_ascii=False))
-    for p in data["products"]:
-        print(f"  {p['code']:10} 有货={'Y' if p['in_stock'] else 'N'}({int(p['stock_qty'])})"
-              f" 展示={'Y' if p['displayed'] else 'N'} gap={'*' if p['gap'] else ' '} {p['name']}")
+    import json as _json
+    data = build_products(store=ALL_STORES, region=default_region())
+    print("stores:", data["stores"][:5], "...")
+    print("summary:", _json.dumps(data["summary"], ensure_ascii=False))
