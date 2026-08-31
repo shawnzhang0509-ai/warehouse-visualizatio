@@ -520,7 +520,11 @@ def _resolve_exemption_group(product, config):
 
 
 def _apply_family_exemptions(products):
-    """同 exemption 组内已有展示 SKU 时，豁免组内其他有货未展示 SKU。"""
+    """同 exemption 组内已有展示 SKU 时，豁免组内其他有货未展示 SKU。
+
+    锚点条件：在所选店面「已展示」即可，不要求该展示款当前有货
+    （例如 Queen 已上样但无货，仍可豁免同系列 King 有货未展示）。
+    """
     config = _load_exemption_config()
     for p in products:
         p["exempted"] = False
@@ -539,7 +543,7 @@ def _apply_family_exemptions(products):
     for members in by_group.values():
         anchors = [
             m for m in members
-            if m.get("displayed") and m.get("in_stock") and not m.get("discontinued")
+            if m.get("displayed") and not m.get("discontinued")
         ]
         if not anchors:
             continue
