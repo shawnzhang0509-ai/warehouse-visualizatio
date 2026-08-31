@@ -1,6 +1,6 @@
 """有货未展示看板 —— 纯本地桌面软件（Tkinter，不走浏览器）。
 
-表格每行内嵌产品缩略图；库存按店面交叉读取 Carbine/Walls/GC。
+表格每行内嵌产品缩略图；支持搜索、筛选、排序、按系列分组。
 
 运行：
     python panel_app.py          # 或双击 start_panel.bat
@@ -27,14 +27,13 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.1"
+APP_VERSION = "1.2"
 ROW_HEIGHT = 58
 THUMB = (52, 52)
 IMAGE_BATCH = 40
 PLACEHOLDER_COLOR = "#d1d5db"
 SCROLL_UNITS = 8
 
-# 参考智能库存决策系统的配色
 C_HEADER = "#1e4f8a"
 C_BG = "#f0f4f8"
 C_CARD_GAP = "#dc2626"
@@ -51,8 +50,22 @@ C_ROW_GAP = "#fff1f2"
 C_ROW_EXEMPT = "#fffbeb"
 C_ROW_OK = "#f0fdf4"
 C_ROW_ALT = "#fafbfc"
+C_ROW_DISC = "#f3f4f6"
 C_TEXT = "#1e293b"
 C_MUTED = "#64748b"
+
+SORTABLE_COLS = {
+    "code": lambda p: (p.get("code") or "").lower(),
+    "name": lambda p: (p.get("name") or "").lower(),
+    "family": lambda p: (p.get("family") or "").lower(),
+    "price": lambda p: p.get("price") if p.get("price") is not None else -1,
+    "stock": lambda p: float(p.get("stock_qty") or 0),
+    "display": lambda p: 0 if p.get("displayed") else 1,
+    "discontinue": lambda p: 0 if p.get("discontinued") else 1,
+    "status": lambda p: (
+        0 if p.get("gap") else 1 if p.get("exempted") else 2 if p.get("in_stock") else 3
+    ),
+}
 
 
 class PanelApp:
@@ -61,8 +74,8 @@ class PanelApp:
             raise RuntimeError("当前 Python 缺少 Tkinter，无法启动桌面界面。")
         self.root = tk.Tk()
         self.root.title("有货未展示看板")
-        self.root.geometry("1320x820")
-        self.root.minsize(1024, 680)
+        self.root.geometry("1360x860")
+        self.root.minsize(1080, 700)
         self.root.configure(bg=C_BG)
 
         self._img_cache = {}
@@ -73,6 +86,11 @@ class PanelApp:
         self._products_by_iid = {}
         self._iid_to_url = {}
         self._scroll_after_id = None
+        self._filter_after_id = None
+        self._cached_products = []
+        self._cached_summary = {}
+        self._sort_col = None
+        self._sort_reverse = False
 
         self._tree = None
         self._tree_vscroll = None
@@ -88,10 +106,17 @@ class PanelApp:
         self.store_var = tk.StringVar(value=panel_data.ALL_STORES)
         self.only_gap_var = tk.BooleanVar(value=False)
         self.source_var = tk.StringVar(value="")
+        self.search_var = tk.StringVar()
+        self.stock_filter_var = tk.StringVar(value="全部")
+        self.display_filter_var = tk.StringVar(value="全部")
+        self.discontinue_filter_var = tk.StringVar(value="在产")
+        self.group_sort_var = tk.StringVar(value="字母序")
+        self.result_count_var = tk.StringVar(value="")
 
         self._region_labels = {r["key"]: r["label"] for r in regions}
         self._setup_styles()
         self._build_ui(stores, regions)
+        self.search_var.trace_add("write", lambda *_: self._debounce_refresh())
         self.reload()
 
     def _setup_styles(self):
@@ -100,22 +125,16 @@ class PanelApp:
             style.theme_use("clam")
         except Exception:
             pass
-        style.configure("Treeview",
-                        rowheight=ROW_HEIGHT,
-                        font=("Segoe UI", 10),
-                        background="white",
-                        fieldbackground="white")
-        style.configure("Treeview.Heading",
-                        font=("Segoe UI", 10, "bold"),
-                        background="#e2e8f0",
-                        foreground=C_TEXT)
+        style.configure("Treeview", rowheight=ROW_HEIGHT, font=("Segoe UI", 10),
+                        background="white", fieldbackground="white")
+        style.configure("Treeview.Heading", font=("Segoe UI", 10, "bold"),
+                        background="#e2e8f0", foreground=C_TEXT)
         style.map("Treeview", background=[("selected", "#bfdbfe")])
         style.configure("TCombobox", padding=4)
         style.configure("Tool.TButton", padding=(10, 4))
         style.configure("Vertical.TScrollbar", width=18, arrowsize=14)
 
     def _build_ui(self, stores, regions):
-        # ── 顶栏（深蓝） ──
         header = tk.Frame(self.root, bg=C_HEADER, padx=16, pady=10)
         header.pack(fill=tk.X)
         tk.Label(header, text="有货未展示看板", bg=C_HEADER, fg="white",
@@ -125,12 +144,10 @@ class PanelApp:
         tk.Label(header, textvariable=self.source_var, bg=C_HEADER, fg="#cbd5e1",
                  font=("Segoe UI", 9)).pack(side=tk.RIGHT)
 
-        # ── 筛选工具栏 ──
         toolbar = tk.Frame(self.root, bg="white", padx=14, pady=10)
         toolbar.pack(fill=tk.X, padx=12, pady=(10, 0))
 
-        tk.Label(toolbar, text="地区", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).grid(
-            row=0, column=0, sticky="w")
+        tk.Label(toolbar, text="地区", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).grid(row=0, column=0, sticky="w")
         region_values = []
         default_index = 0
         for i, r in enumerate(regions):
@@ -140,28 +157,49 @@ class PanelApp:
             region_values.append(f"{r['key']} {label}")
             if r["key"] == panel_data.default_region():
                 default_index = i
-        self.region_combo = ttk.Combobox(toolbar, width=18, state="readonly", values=region_values)
+        self.region_combo = ttk.Combobox(toolbar, width=16, state="readonly", values=region_values)
         self.region_combo.current(default_index)
-        self.region_combo.grid(row=1, column=0, sticky="w", padx=(0, 14), pady=(2, 0))
+        self.region_combo.grid(row=1, column=0, sticky="w", padx=(0, 12), pady=(2, 0))
         self.region_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_region_change())
 
-        tk.Label(toolbar, text="店面", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).grid(
-            row=0, column=1, sticky="w")
-        self.store_combo = ttk.Combobox(toolbar, width=22, state="readonly",
+        tk.Label(toolbar, text="店面", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).grid(row=0, column=1, sticky="w")
+        self.store_combo = ttk.Combobox(toolbar, width=20, state="readonly",
                                          values=stores, textvariable=self.store_var, height=18)
-        self.store_combo.grid(row=1, column=1, sticky="w", padx=(0, 14), pady=(2, 0))
+        self.store_combo.grid(row=1, column=1, sticky="w", padx=(0, 12), pady=(2, 0))
         self.store_combo.bind("<<ComboboxSelected>>", lambda _e: self.reload())
 
-        btn_frame = tk.Frame(toolbar, bg="white")
-        btn_frame.grid(row=1, column=2, sticky="w", pady=(2, 0))
-        self.reload_btn = ttk.Button(btn_frame, text="刷新数据", style="Tool.TButton",
+        self.reload_btn = ttk.Button(toolbar, text="刷新数据", style="Tool.TButton",
                                      command=lambda: self.reload(force=True))
-        self.reload_btn.pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Checkbutton(btn_frame, text="只看有货未展示",
-                        variable=self.only_gap_var, command=self.reload).pack(side=tk.LEFT)
+        self.reload_btn.grid(row=1, column=2, sticky="w", pady=(2, 0))
 
-        # ── 统计卡片 ──
-        cards = tk.Frame(self.root, bg=C_BG, padx=12, pady=10)
+        filter_bar = tk.Frame(self.root, bg="white", padx=14, pady=8)
+        filter_bar.pack(fill=tk.X, padx=12, pady=(6, 0))
+
+        tk.Label(filter_bar, text="搜索", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).grid(row=0, column=0, sticky="w")
+        search_entry = ttk.Entry(filter_bar, textvariable=self.search_var, width=28)
+        search_entry.grid(row=1, column=0, sticky="w", padx=(0, 12), pady=(2, 0))
+
+        filters = [
+            ("库存", self.stock_filter_var, ("全部", "有货", "无货"), 1),
+            ("展示", self.display_filter_var, ("全部", "已展示", "未展示"), 2),
+            ("停产", self.discontinue_filter_var, ("在产", "全部", "已停产"), 3),
+            ("组排序", self.group_sort_var, ("字母序", "数量多到少"), 4),
+        ]
+        for label, var, values, col in filters:
+            tk.Label(filter_bar, text=label, bg="white", fg=C_MUTED, font=("Segoe UI", 9)).grid(
+                row=0, column=col, sticky="w")
+            cb = ttk.Combobox(filter_bar, width=10, state="readonly", textvariable=var, values=values)
+            cb.grid(row=1, column=col, sticky="w", padx=(0, 10), pady=(2, 0))
+            cb.bind("<<ComboboxSelected>>", lambda _e: self._refresh_view())
+
+        ttk.Checkbutton(filter_bar, text="只看有货未展示", variable=self.only_gap_var,
+                        command=self._refresh_view).grid(row=1, column=5, sticky="w", padx=(4, 0))
+
+        tk.Label(filter_bar, textvariable=self.result_count_var, bg="white", fg=C_MUTED,
+                 font=("Segoe UI", 9)).grid(row=1, column=6, sticky="e", padx=(12, 0))
+        filter_bar.columnconfigure(6, weight=1)
+
+        cards = tk.Frame(self.root, bg=C_BG, padx=12, pady=8)
         cards.pack(fill=tk.X)
         card_defs = [
             ("gap", "有货未展示", "0", C_CARD_GAP_BG, C_CARD_GAP),
@@ -171,40 +209,38 @@ class PanelApp:
             ("total", "纳入分析", "0", C_CARD_NEUTRAL_BG, C_CARD_NEUTRAL),
         ]
         for i, (key, title, val, bg, fg) in enumerate(card_defs):
-            card = tk.Frame(cards, bg=bg, padx=18, pady=12)
+            card = tk.Frame(cards, bg=bg, padx=16, pady=10)
             card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0 if i == 0 else 6, 0))
             tk.Label(card, text=title, bg=bg, fg=fg, font=("Segoe UI", 9)).pack(anchor="w")
-            lbl = tk.Label(card, text=val, bg=bg, fg=fg, font=("Segoe UI", 20, "bold"))
+            lbl = tk.Label(card, text=val, bg=bg, fg=fg, font=("Segoe UI", 18, "bold"))
             lbl.pack(anchor="w", pady=(2, 0))
             self._stat_labels[key] = lbl
 
         self._stock_source_lbl = tk.Label(cards, text="", bg=C_BG, fg=C_MUTED, font=("Segoe UI", 9))
         self._stock_source_lbl.pack(side=tk.RIGHT, padx=8)
 
-        # ── 产品表格（首列图片） ──
-        table_wrap = tk.Frame(self.root, bg="white", padx=1, pady=1)
+        table_wrap = tk.Frame(self.root, bg="white")
         table_wrap.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
-
         inner = tk.Frame(table_wrap, bg="white")
         inner.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
 
-        columns = ("code", "name", "family", "price", "stock", "display", "status")
+        columns = ("code", "name", "family", "price", "stock", "display", "discontinue", "status")
         self._tree = ttk.Treeview(inner, columns=columns, show="tree headings", selectmode="browse")
         self._tree.heading("#0", text="产品图")
         self._tree.column("#0", width=68, stretch=False, anchor="center")
         headings = {
-            "code": ("编码", 100), "name": ("名称", 300), "family": ("系列", 100),
-            "price": ("价格", 80), "stock": ("库存", 64), "display": ("展示", 72), "status": ("状态", 120),
+            "code": ("编码", 96), "name": ("名称", 280), "family": ("系列", 96),
+            "price": ("价格", 72), "stock": ("库存", 80), "display": ("展示", 64),
+            "discontinue": ("停产", 56), "status": ("状态", 116),
         }
         for col, (text, width) in headings.items():
-            self._tree.heading(col, text=text)
+            self._tree.heading(col, text=text, command=lambda c=col: self._on_sort_column(c))
             anchor = "w" if col in ("code", "name", "family") else "center"
             self._tree.column(col, width=width, anchor=anchor, stretch=(col == "name"))
-        self._tree.tag_configure("gap", background=C_ROW_GAP)
-        self._tree.tag_configure("exempted", background=C_ROW_EXEMPT)
-        self._tree.tag_configure("ok", background=C_ROW_OK)
-        self._tree.tag_configure("alt", background=C_ROW_ALT)
-        self._tree.tag_configure("group", background="#e2e8f0")
+
+        for tag, bg in (("gap", C_ROW_GAP), ("exempted", C_ROW_EXEMPT), ("ok", C_ROW_OK),
+                        ("alt", C_ROW_ALT), ("discontinued", C_ROW_DISC), ("group", "#e2e8f0")):
+            self._tree.tag_configure(tag, background=bg)
 
         self._tree_vscroll = ttk.Scrollbar(inner, orient="vertical", command=self._on_tree_yscroll)
         self._tree.configure(yscrollcommand=self._tree_vscroll.set)
@@ -219,8 +255,7 @@ class PanelApp:
 
     def _make_placeholder_photo(self):
         if Image is not None and ImageTk is not None:
-            im = Image.new("RGB", THUMB, PLACEHOLDER_COLOR)
-            return ImageTk.PhotoImage(im)
+            return ImageTk.PhotoImage(Image.new("RGB", THUMB, PLACEHOLDER_COLOR))
         img = tk.PhotoImage(width=THUMB[0], height=THUMB[1])
         img.put(PLACEHOLDER_COLOR, to=(0, 0, THUMB[0], THUMB[1]))
         return img
@@ -234,6 +269,11 @@ class PanelApp:
             self.root.after_cancel(self._scroll_after_id)
         self._scroll_after_id = self.root.after(80, self._load_visible_images)
 
+    def _debounce_refresh(self):
+        if self._filter_after_id:
+            self.root.after_cancel(self._filter_after_id)
+        self._filter_after_id = self.root.after(250, self._refresh_view)
+
     def _scroll_tree(self, direction):
         if self._tree:
             self._tree.yview_scroll(direction * SCROLL_UNITS, "units")
@@ -242,27 +282,17 @@ class PanelApp:
     def _on_wheel(self, event):
         if not self._tree:
             return
-        if hasattr(event, "delta"):
-            step = -1 if event.delta > 0 else 1
-        else:
-            step = -1
+        step = -1 if (hasattr(event, "delta") and event.delta > 0) else 1
         self._scroll_tree(step)
 
     def _visible_iids(self):
         if not self._tree:
             return []
         height = max(self._tree.winfo_height(), ROW_HEIGHT)
-        seen = []
-        y = 0
+        seen, y = [], 0
         while y < height + ROW_HEIGHT * 4:
             iid = self._tree.identify_row(y)
-            if not iid:
-                y += ROW_HEIGHT
-                continue
-            if iid in seen:
-                y += ROW_HEIGHT
-                continue
-            if iid not in self._iid_to_url:
+            if not iid or iid in seen or iid not in self._iid_to_url:
                 y += ROW_HEIGHT
                 continue
             seen.append(iid)
@@ -275,10 +305,9 @@ class PanelApp:
 
     def _set_controls_state(self, enabled):
         state = "readonly" if enabled else "disabled"
-        normal = tk.NORMAL if enabled else tk.DISABLED
         self.region_combo.configure(state=state)
         self.store_combo.configure(state=state)
-        self.reload_btn.configure(state=normal)
+        self.reload_btn.configure(state=tk.NORMAL if enabled else tk.DISABLED)
 
     def _set_busy(self, busy):
         self.root.config(cursor="watch" if busy else "")
@@ -289,10 +318,8 @@ class PanelApp:
                 result = worker()
                 err = None
             except Exception as exc:
-                result = None
-                err = exc
+                result, err = None, exc
             self.root.after(0, lambda: on_done(err, result))
-
         threading.Thread(target=_thread, daemon=True).start()
 
     def _on_region_change(self):
@@ -301,20 +328,17 @@ class PanelApp:
         self._set_controls_state(False)
         self._set_busy(True)
 
-        def worker():
-            return panel_data.list_stores(region)
-
         def done(err, stores):
             self._set_busy(False)
+            self._set_controls_state(True)
             if err:
-                self._set_controls_state(True)
                 return
             self.store_combo.configure(values=stores)
             if self.store_var.get() not in stores:
                 self.store_var.set(stores[0] if stores else panel_data.ALL_STORES)
             self.reload()
 
-        self._run_bg(worker, done)
+        self._run_bg(lambda: panel_data.list_stores(region), done)
 
     def _pil_to_photo(self, im):
         if Image is None or ImageTk is None:
@@ -332,10 +356,9 @@ class PanelApp:
         return ImageTk.PhotoImage(im)
 
     def _fetch_image_bytes(self, url):
-        safe_url = panel_data.normalize_url(url)
         req = urllib.request.Request(
-            safe_url,
-            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) WarehousePanel/1.0"},
+            panel_data.normalize_url(url),
+            headers={"User-Agent": "Mozilla/5.0 WarehousePanel/1.2"},
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
             return resp.read()
@@ -345,11 +368,9 @@ class PanelApp:
             return
         cache_key = f"{raw}@{THUMB[0]}x{THUMB[1]}"
         if cache_key in self._img_cache:
-            photo = self._img_cache[cache_key]
             if self._tree.exists(iid):
-                self._tree.item(iid, image=photo)
+                self._tree.item(iid, image=self._img_cache[cache_key])
             return
-
         self._pending_images.add(raw)
 
         def worker():
@@ -359,19 +380,17 @@ class PanelApp:
                     if str(raw).lower().startswith(("http://", "https://")):
                         data = self._fetch_image_bytes(raw)
                         if Image is not None:
-                            im = Image.open(io.BytesIO(data))
-                            photo = self._pil_to_photo(im)
+                            photo = self._pil_to_photo(Image.open(io.BytesIO(data)))
                     elif Path(raw).exists() and Image is not None:
-                        im = Image.open(raw)
-                        photo = self._pil_to_photo(im)
+                        photo = self._pil_to_photo(Image.open(raw))
             except Exception:
-                photo = None
+                pass
 
             def apply():
                 self._pending_images.discard(raw)
                 if render_token != self._render_token:
                     return
-                if photo is not None:
+                if photo:
                     self._img_cache[cache_key] = photo
                 if self._tree.exists(iid):
                     self._tree.item(iid, image=photo or self._placeholder_photo)
@@ -384,28 +403,24 @@ class PanelApp:
     def _load_visible_images(self):
         if not self._tree:
             return
-        render_token = self._render_token
-        iids = self._visible_iids()[:IMAGE_BATCH]
-        for iid in iids:
+        token = self._render_token
+        for iid in self._visible_iids()[:IMAGE_BATCH]:
             raw = self._iid_to_url.get(iid)
             if raw:
-                self._schedule_row_image(iid, raw, render_token)
+                self._schedule_row_image(iid, raw, token)
 
     def reload(self, force=False):
         self._reload_token += 1
-        self._render_token += 1
-        self._pending_images.clear()
         token = self._reload_token
         region = self._current_region()
         store = self.store_var.get()
-        only_gap = self.only_gap_var.get()
-
         self._set_controls_state(False)
         self._set_busy(True)
 
         def worker():
             return panel_data.build_products(
-                store=store, only_gap=only_gap, region=region, force_refresh=force,
+                store=store, only_gap=False, include_discontinued=True,
+                region=region, force_refresh=force,
             )
 
         def done(err, data):
@@ -416,31 +431,101 @@ class PanelApp:
             if err:
                 self._stat_labels["gap"].configure(text="!")
                 return
-            self._apply_data(data, region)
+            self._cached_products = data["products"]
+            self._cached_summary = data["summary"]
+            src = self._region_labels.get(region, region)
+            self.source_var.set(f"数据源：{src}  |  {Path(data['stock_path']).name}")
+            self._refresh_view()
 
         self._run_bg(worker, done)
 
-    def _apply_data(self, data, region):
-        s = data["summary"]
-        src = self._region_labels.get(region, region) if str(data["source"]).startswith("region") else "CSV"
-        self.source_var.set(f"数据源：{src}  |  {Path(data['stock_path']).name}")
+    def _apply_client_filters(self, products):
+        q = self.search_var.get().strip().lower()
+        stock_f = self.stock_filter_var.get()
+        display_f = self.display_filter_var.get()
+        disc_f = self.discontinue_filter_var.get()
+        only_gap = self.only_gap_var.get()
+
+        out = []
+        for p in products:
+            if q:
+                hay = f"{p.get('code', '')} {p.get('name', '')} {p.get('family', '')}".lower()
+                if q not in hay:
+                    continue
+            if stock_f == "有货" and not p.get("in_stock"):
+                continue
+            if stock_f == "无货" and p.get("in_stock"):
+                continue
+            if display_f == "已展示" and not p.get("displayed"):
+                continue
+            if display_f == "未展示" and p.get("displayed"):
+                continue
+            if disc_f == "在产" and p.get("discontinued"):
+                continue
+            if disc_f == "已停产" and not p.get("discontinued"):
+                continue
+            if only_gap and not p.get("gap"):
+                continue
+            out.append(p)
+        return out
+
+    def _sort_products(self, items):
+        if self._sort_col and self._sort_col in SORTABLE_COLS:
+            key_fn = SORTABLE_COLS[self._sort_col]
+            return sorted(items, key=key_fn, reverse=self._sort_reverse)
+        return sorted(items, key=lambda p: (
+            not p.get("gap"), not p.get("exempted"), not p.get("in_stock"),
+            -float(p.get("stock_qty") or 0), p.get("code") or "",
+        ))
+
+    def _group_products(self, products):
+        groups = {}
+        for item in products:
+            label = item.get("exemption_group_label") or item.get("family") or "未分类"
+            groups.setdefault(label, []).append(item)
+
+        result = []
+        for label, items in groups.items():
+            result.append((label, self._sort_products(items)))
+
+        if self.group_sort_var.get() == "数量多到少":
+            result.sort(key=lambda x: -len(x[1]))
+        else:
+            result.sort(key=lambda x: x[0].lower())
+        return result
+
+    def _on_sort_column(self, col):
+        if self._sort_col == col:
+            self._sort_reverse = not self._sort_reverse
+        else:
+            self._sort_col = col
+            self._sort_reverse = False
+        self._refresh_view()
+
+    def _refresh_view(self):
+        if not self._cached_products:
+            return
+        s = self._cached_summary
 
         def pct(v):
             return "-" if v is None else f"{v:.1f}%"
 
-        self._stat_labels["gap"].configure(text=str(s["not_displayed_count"]))
+        self._stat_labels["gap"].configure(text=str(s.get("not_displayed_count", 0)))
         self._stat_labels["exempted"].configure(text=str(s.get("exempted_count", 0)))
-        self._stat_labels["in_stock"].configure(text=str(s["in_stock_count"]))
-        self._stat_labels["rate"].configure(text=pct(s["in_stock_rate"]))
-        self._stat_labels["total"].configure(text=str(s["total_non_discontinue"]))
+        self._stat_labels["in_stock"].configure(text=str(s.get("in_stock_count", 0)))
+        self._stat_labels["rate"].configure(text=pct(s.get("in_stock_rate")))
+        self._stat_labels["total"].configure(text=str(s.get("total_non_discontinue", 0)))
         self._stock_source_lbl.configure(
-            text=f"店面：{s['store']}  |  库存来源：{s.get('stock_sources', '-')}"
+            text=f"店面：{s.get('store', '-')}  |  库存来源：{s.get('stock_sources', '-')}"
         )
 
-        products = data["products"]
-        self._render_tree(products)
+        filtered = self._apply_client_filters(self._cached_products)
+        self.result_count_var.set(f"显示 {len(filtered)} / 共 {len(self._cached_products)} 条")
+        self._render_tree(filtered)
 
     def _row_tag(self, item, index):
+        if item.get("discontinued"):
+            return ("discontinued",)
         if item.get("gap"):
             return ("gap",)
         if item.get("exempted"):
@@ -457,6 +542,7 @@ class PanelApp:
         if item.get("stock_breakdown") and item.get("in_stock"):
             stock = f"{stock} ({item['stock_breakdown']})"
         displayed = "已展示" if item.get("displayed") else "未展示"
+        discontinue = "是" if item.get("discontinued") else "否"
         if item.get("gap"):
             status = "★ 有货未展示"
         elif item.get("exempted"):
@@ -469,30 +555,16 @@ class PanelApp:
             status = "无货"
         return (
             item["code"], item.get("name") or "", item.get("family") or "",
-            price, stock, displayed, status,
+            price, stock, displayed, discontinue, status,
         )
-
-    def _group_products(self, products):
-        groups = {}
-        order = []
-        for item in products:
-            label = item.get("exemption_group_label") or item.get("family") or "未分类"
-            if label not in groups:
-                groups[label] = []
-                order.append(label)
-            groups[label].append(item)
-        return [(label, groups[label]) for label in order]
 
     def _render_tree(self, products):
         self._render_token += 1
         render_token = self._render_token
-
-        children = self._tree.get_children()
-        if children:
-            self._tree.delete(*children)
+        if self._tree.get_children():
+            self._tree.delete(*self._tree.get_children())
         self._products_by_iid.clear()
         self._iid_to_url.clear()
-
         grouped = self._group_products(products)
 
         def fill():
@@ -501,28 +573,23 @@ class PanelApp:
             for family_label, items in grouped:
                 gap_n = sum(1 for i in items if i.get("gap"))
                 exempt_n = sum(1 for i in items if i.get("exempted"))
+                disc_n = sum(1 for i in items if i.get("discontinued"))
                 summary = f"（{len(items)} 个"
                 if gap_n:
                     summary += f"，{gap_n} 待处理"
                 if exempt_n:
                     summary += f"，{exempt_n} 已豁免"
+                if disc_n:
+                    summary += f"，{disc_n} 停产"
                 summary += "）"
                 parent = self._tree.insert(
-                    "", tk.END,
-                    text=f"{family_label} {summary}",
-                    values=("", "", "", "", "", "", ""),
-                    tags=("group",),
-                    open=True,
+                    "", tk.END, text=f"{family_label} {summary}",
+                    values=("", "", "", "", "", "", "", ""), tags=("group",), open=True,
                 )
                 for idx, item in enumerate(items):
-                    values = self._tree_row_values(item)
-                    tags = self._row_tag(item, idx)
                     iid = self._tree.insert(
-                        parent, tk.END,
-                        image=self._placeholder_photo,
-                        text="",
-                        values=values,
-                        tags=tags,
+                        parent, tk.END, image=self._placeholder_photo, text="",
+                        values=self._tree_row_values(item), tags=self._row_tag(item, idx),
                     )
                     self._products_by_iid[iid] = item
                     if item.get("image"):
