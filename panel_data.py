@@ -552,6 +552,48 @@ def list_stores(region=None):
     return [ALL_STORES] + sorted(by_store.keys())
 
 
+SKU_PREFIX_LEN = 3
+
+
+def sku_prefix(code, length=SKU_PREFIX_LEN):
+    """取 SKU/编码前 N 位作为分类前缀（如 107-381 → 107）。"""
+    text = str(code or "").strip().upper()
+    return text[:length] if text else "???"
+
+
+def aggregate_by_sku_prefix(products, prefix_len=SKU_PREFIX_LEN, active_only=True):
+    """按 SKU 前三位汇总有货率、展示覆盖率、有货未展示等。"""
+    buckets = {}
+    for p in products:
+        if active_only and p.get("discontinued"):
+            continue
+        key = sku_prefix(p.get("code"), prefix_len)
+        buckets.setdefault(key, []).append(p)
+
+    rows = []
+    for prefix, items in buckets.items():
+        total = len(items)
+        in_stock = [i for i in items if i.get("in_stock")]
+        in_stock_n = len(in_stock)
+        displayed_is = [i for i in in_stock if i.get("displayed")]
+        gap_items = [i for i in items if i.get("gap")]
+        exempted = [i for i in items if i.get("exempted")]
+        rows.append({
+            "prefix": prefix,
+            "total": total,
+            "in_stock_count": in_stock_n,
+            "in_stock_rate": round(in_stock_n / total * 100, 1) if total else None,
+            "displayed_in_stock": len(displayed_is),
+            "display_coverage_rate": (
+                round(len(displayed_is) / in_stock_n * 100, 1) if in_stock_n else None
+            ),
+            "gap_count": len(gap_items),
+            "exempted_count": len(exempted),
+        })
+    rows.sort(key=lambda r: (-r["gap_count"], -(r["in_stock_rate"] or 0), r["prefix"]))
+    return rows
+
+
 def build_products(store=None, only_gap=False, include_discontinued=False, region=None,
                    force_refresh=False):
     """核心：按店面逐个产品计算 有货/展示 状态与汇总指标。"""

@@ -27,7 +27,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.2"
+APP_VERSION = "1.3"
 ROW_HEIGHT = 58
 THUMB = (52, 52)
 IMAGE_BATCH = 40
@@ -94,6 +94,10 @@ class PanelApp:
 
         self._tree = None
         self._tree_vscroll = None
+        self._prefix_tree = None
+        self._prefix_vscroll = None
+        self._notebook = None
+        self._tab_products = None
         self._placeholder_photo = None
         self._stat_labels = {}
 
@@ -133,6 +137,7 @@ class PanelApp:
         style.configure("TCombobox", padding=4)
         style.configure("Tool.TButton", padding=(10, 4))
         style.configure("Vertical.TScrollbar", width=18, arrowsize=14)
+        style.configure("Prefix.Treeview", rowheight=34, font=("Segoe UI", 10))
 
     def _build_ui(self, stores, regions):
         header = tk.Frame(self.root, bg=C_HEADER, padx=16, pady=10)
@@ -221,8 +226,16 @@ class PanelApp:
 
         table_wrap = tk.Frame(self.root, bg="white")
         table_wrap.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
-        inner = tk.Frame(table_wrap, bg="white")
-        inner.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        self._notebook = ttk.Notebook(table_wrap)
+        self._notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self._tab_products = ttk.Frame(self._notebook)
+        tab_prefix = ttk.Frame(self._notebook)
+        self._notebook.add(self._tab_products, text="产品明细")
+        self._notebook.add(tab_prefix, text="SKU前三位汇总")
+
+        inner = tk.Frame(self._tab_products, bg="white")
+        inner.pack(fill=tk.BOTH, expand=True)
 
         columns = ("code", "name", "family", "price", "stock", "display", "discontinue", "status")
         self._tree = ttk.Treeview(inner, columns=columns, show="tree headings", selectmode="browse")
@@ -247,11 +260,49 @@ class PanelApp:
         self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._tree_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
 
+        # ── SKU 前三位汇总表 ──
+        prefix_inner = tk.Frame(tab_prefix, bg="white")
+        prefix_inner.pack(fill=tk.BOTH, expand=True)
+        tk.Label(
+            prefix_inner,
+            text="按 SKU 编码前三位汇总（仅统计在产产品）· 双击某行可筛选该前缀产品",
+            bg="white", fg=C_MUTED, font=("Segoe UI", 9),
+        ).pack(anchor="w", padx=4, pady=(0, 6))
+
+        pcols = ("prefix", "total", "in_stock", "in_stock_rate", "displayed",
+                 "display_rate", "gap", "exempted")
+        self._prefix_tree = ttk.Treeview(
+            prefix_inner, columns=pcols, show="headings",
+            selectmode="browse", style="Prefix.Treeview",
+        )
+        pheads = {
+            "prefix": ("SKU前缀", 72), "total": ("产品数", 64), "in_stock": ("有货数", 64),
+            "in_stock_rate": ("有货率", 72), "displayed": ("有货已展示", 88),
+            "display_rate": ("展示覆盖率", 88), "gap": ("有货未展示", 88), "exempted": ("同组豁免", 72),
+        }
+        for col, (text, width) in pheads.items():
+            self._prefix_tree.heading(col, text=text)
+            self._prefix_tree.column(col, width=width, anchor="center" if col != "prefix" else "w")
+        self._prefix_tree.tag_configure("gap", background=C_ROW_GAP)
+        self._prefix_tree.tag_configure("warn", background="#fff7ed")
+        self._prefix_tree.tag_configure("ok", background=C_ROW_OK)
+        self._prefix_tree.tag_configure("alt", background=C_ROW_ALT)
+
+        self._prefix_vscroll = ttk.Scrollbar(prefix_inner, orient="vertical", command=self._on_prefix_yscroll)
+        self._prefix_tree.configure(yscrollcommand=self._prefix_vscroll.set)
+        self._prefix_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._prefix_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._prefix_tree.bind("<Double-1>", self._on_prefix_double_click)
+
         self._placeholder_photo = self._make_placeholder_photo()
-        for widget in (inner, table_wrap, self._tree):
-            widget.bind("<MouseWheel>", self._on_wheel)
+        for widget in (inner, self._tab_products, self._tree):
+            widget.bind("<MouseWheel>", self._on_product_wheel)
             widget.bind("<Button-4>", lambda _e: self._scroll_tree(-1))
             widget.bind("<Button-5>", lambda _e: self._scroll_tree(1))
+        for widget in (prefix_inner, tab_prefix, self._prefix_tree):
+            widget.bind("<MouseWheel>", self._on_prefix_wheel)
+            widget.bind("<Button-4>", lambda _e: self._scroll_prefix(-1))
+            widget.bind("<Button-5>", lambda _e: self._scroll_prefix(1))
 
     def _make_placeholder_photo(self):
         if Image is not None and ImageTk is not None:
@@ -263,6 +314,10 @@ class PanelApp:
     def _on_tree_yscroll(self, *args):
         self._tree.yview(*args)
         self._debounce_visible_images()
+
+    def _on_prefix_yscroll(self, *args):
+        if self._prefix_tree:
+            self._prefix_tree.yview(*args)
 
     def _debounce_visible_images(self):
         if self._scroll_after_id:
@@ -279,11 +334,19 @@ class PanelApp:
             self._tree.yview_scroll(direction * SCROLL_UNITS, "units")
             self._debounce_visible_images()
 
-    def _on_wheel(self, event):
+    def _scroll_prefix(self, direction):
+        if self._prefix_tree:
+            self._prefix_tree.yview_scroll(direction * SCROLL_UNITS, "units")
+
+    def _on_product_wheel(self, event):
         if not self._tree:
             return
         step = -1 if (hasattr(event, "delta") and event.delta > 0) else 1
         self._scroll_tree(step)
+
+    def _on_prefix_wheel(self, event):
+        step = -1 if (hasattr(event, "delta") and event.delta > 0) else 1
+        self._scroll_prefix(step)
 
     def _visible_iids(self):
         if not self._tree:
@@ -522,6 +585,57 @@ class PanelApp:
         filtered = self._apply_client_filters(self._cached_products)
         self.result_count_var.set(f"显示 {len(filtered)} / 共 {len(self._cached_products)} 条")
         self._render_tree(filtered)
+        self._render_prefix_table()
+
+    def _prefix_row_tag(self, row, index):
+        if row.get("gap_count", 0) > 0:
+            return ("gap",)
+        rate = row.get("display_coverage_rate")
+        if rate is not None and rate < 50 and row.get("in_stock_count", 0) > 0:
+            return ("warn",)
+        if rate is not None and rate >= 80:
+            return ("ok",)
+        if index % 2 == 1:
+            return ("alt",)
+        return ()
+
+    def _render_prefix_table(self):
+        if not self._prefix_tree:
+            return
+        rows = panel_data.aggregate_by_sku_prefix(self._cached_products, active_only=True)
+        if self._prefix_tree.get_children():
+            self._prefix_tree.delete(*self._prefix_tree.get_children())
+
+        def pct(v):
+            return "-" if v is None else f"{v:.1f}%"
+
+        for idx, row in enumerate(rows):
+            self._prefix_tree.insert(
+                "", tk.END,
+                values=(
+                    row["prefix"],
+                    row["total"],
+                    row["in_stock_count"],
+                    pct(row["in_stock_rate"]),
+                    row["displayed_in_stock"],
+                    pct(row["display_coverage_rate"]),
+                    row["gap_count"],
+                    row["exempted_count"],
+                ),
+                tags=self._prefix_row_tag(row, idx),
+            )
+
+    def _on_prefix_double_click(self, _event=None):
+        sel = self._prefix_tree.selection() if self._prefix_tree else ()
+        if not sel:
+            return
+        values = self._prefix_tree.item(sel[0], "values")
+        if not values:
+            return
+        self.search_var.set(str(values[0]))
+        if self._notebook:
+            self._notebook.select(self._tab_products)
+        self._refresh_view()
 
     def _row_tag(self, item, index):
         if item.get("discontinued"):
