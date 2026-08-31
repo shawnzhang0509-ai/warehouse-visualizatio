@@ -49,6 +49,7 @@ IMAGE_KEYS = ["imagefile", "image", "imageurl", "image_url", "img",
               "picture", "photo", "thumbnail", "thumb"]
 
 ALL_STORES = "全部店面"
+UNCATEGORIZED_FAMILIES = frozenset({"", "未分类", "UNCATEGORIZED", "N/A", "NONE", "未知"})
 
 # 店面展示名 → 库存列（stock.xlsx 多仓交叉读取）
 WAREHOUSE_LABELS = {
@@ -494,14 +495,26 @@ def _product_matches_group(product, group):
     return False
 
 
+def _is_uncategorized_family(family):
+    text = str(family or "").strip()
+    if not text:
+        return True
+    upper = text.upper()
+    return text in UNCATEGORIZED_FAMILIES or upper in UNCATEGORIZED_FAMILIES
+
+
 def _resolve_exemption_group(product, config):
     for group in config.get("groups") or []:
         if _product_matches_group(product, group):
             label = (group.get("label") or group.get("key") or "").strip()
             key = (group.get("key") or label or "").strip()
+            if _is_uncategorized_family(label) or _is_uncategorized_family(key):
+                return None, label or "未分类"
             return _norm_group_token(key), label or key
     if config.get("auto_by_family", True):
         fam = str(product.get("family") or "未分类").strip()
+        if _is_uncategorized_family(fam):
+            return None, fam or "未分类"
         return _norm_group_token(fam), fam
     return None, None
 
@@ -561,11 +574,11 @@ def sku_prefix(code, length=SKU_PREFIX_LEN):
     return text[:length] if text else "???"
 
 
-def aggregate_by_sku_prefix(products, prefix_len=SKU_PREFIX_LEN, active_only=True):
-    """按 SKU 前三位汇总有货率、展示覆盖率、有货未展示等。"""
+def aggregate_by_sku_prefix(products, prefix_len=SKU_PREFIX_LEN, store_specific=True):
+    """按 SKU 前三位汇总；产品数仅计在产（non-discontinue）SKU。"""
     buckets = {}
     for p in products:
-        if active_only and p.get("discontinued"):
+        if p.get("discontinued"):
             continue
         key = sku_prefix(p.get("code"), prefix_len)
         buckets.setdefault(key, []).append(p)
@@ -576,8 +589,12 @@ def aggregate_by_sku_prefix(products, prefix_len=SKU_PREFIX_LEN, active_only=Tru
         in_stock = [i for i in items if i.get("in_stock")]
         in_stock_n = len(in_stock)
         displayed_is = [i for i in in_stock if i.get("displayed")]
-        gap_items = [i for i in items if i.get("gap")]
-        exempted = [i for i in items if i.get("exempted")]
+        if store_specific:
+            gap_items = [i for i in items if i.get("gap")]
+            exempted = [i for i in items if i.get("exempted")]
+        else:
+            gap_items = []
+            exempted = []
         rows.append({
             "prefix": prefix,
             "total": total,
@@ -617,16 +634,30 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
     else:
         displayed_codes = by_store.get(store, set())
 
+    store_specific = store != ALL_STORES
+
     products = []
     for p in stock_rows:
         item = _apply_store_stock(p, store, region_key)
         displayed = _norm_code(item["code"]) in displayed_codes
-        gap = item["in_stock"] and (not item["discontinued"]) and (not displayed)
+        if store_specific:
+            gap = item["in_stock"] and (not item["discontinued"]) and (not displayed)
+        else:
+            gap = False
         item["displayed"] = displayed
         item["gap"] = gap
         products.append(item)
 
-    exempted_count = _apply_family_exemptions(products)
+    if store_specific:
+        exempted_count = _apply_family_exemptions(products)
+    else:
+        for p in products:
+            p["exempted"] = False
+            p["exemption_reason"] = ""
+            gkey, glabel = _resolve_exemption_group(p, _load_exemption_config())
+            p["exemption_group"] = gkey
+            p["exemption_group_label"] = glabel
+        exempted_count = 0
 
     non_discontinue = [p for p in products if not p["discontinued"]]
     in_stock = [p for p in non_discontinue if p["in_stock"]]
@@ -638,13 +669,14 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
     summary = {
         "store": store,
         "region": region_key,
+        "store_specific": store_specific,
         "total_non_discontinue": total_nd,
         "in_stock_count": in_stock_n,
         "in_stock_rate": round(in_stock_n / total_nd * 100, 2) if total_nd else None,
         "displayed_in_stock_count": len(displayed_in_stock),
         "display_coverage_rate": round(len(displayed_in_stock) / in_stock_n * 100, 2) if in_stock_n else None,
-        "not_displayed_count": len(not_displayed),
-        "exempted_count": exempted_count,
+        "not_displayed_count": len(not_displayed) if store_specific else None,
+        "exempted_count": exempted_count if store_specific else None,
         "stock_sources": " + ".join(
             WAREHOUSE_LABELS.get(k, k) for k in _warehouses_for_store(store, region_key)
         ),

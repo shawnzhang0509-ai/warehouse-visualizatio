@@ -27,7 +27,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.3"
+APP_VERSION = "1.3.1"
 ROW_HEIGHT = 58
 THUMB = (52, 52)
 IMAGE_BATCH = 40
@@ -100,6 +100,8 @@ class PanelApp:
         self._tab_products = None
         self._placeholder_photo = None
         self._stat_labels = {}
+        self._stat_cards = {}
+        self._quick_filter = None
 
         regions = panel_data.list_regions()
         if not regions:
@@ -109,6 +111,7 @@ class PanelApp:
 
         self.store_var = tk.StringVar(value=panel_data.ALL_STORES)
         self.only_gap_var = tk.BooleanVar(value=False)
+        self.only_exempted_var = tk.BooleanVar(value=False)
         self.source_var = tk.StringVar(value="")
         self.search_var = tk.StringVar()
         self.stock_filter_var = tk.StringVar(value="全部")
@@ -198,11 +201,13 @@ class PanelApp:
             cb.bind("<<ComboboxSelected>>", lambda _e: self._refresh_view())
 
         ttk.Checkbutton(filter_bar, text="只看有货未展示", variable=self.only_gap_var,
-                        command=self._refresh_view).grid(row=1, column=5, sticky="w", padx=(4, 0))
+                        command=self._on_only_gap_toggle).grid(row=1, column=5, sticky="w", padx=(4, 0))
+        ttk.Checkbutton(filter_bar, text="只看同组豁免", variable=self.only_exempted_var,
+                        command=self._on_only_exempted_toggle).grid(row=1, column=6, sticky="w", padx=(8, 0))
 
         tk.Label(filter_bar, textvariable=self.result_count_var, bg="white", fg=C_MUTED,
-                 font=("Segoe UI", 9)).grid(row=1, column=6, sticky="e", padx=(12, 0))
-        filter_bar.columnconfigure(6, weight=1)
+                 font=("Segoe UI", 9)).grid(row=1, column=7, sticky="e", padx=(12, 0))
+        filter_bar.columnconfigure(7, weight=1)
 
         cards = tk.Frame(self.root, bg=C_BG, padx=12, pady=8)
         cards.pack(fill=tk.X)
@@ -214,12 +219,20 @@ class PanelApp:
             ("total", "纳入分析", "0", C_CARD_NEUTRAL_BG, C_CARD_NEUTRAL),
         ]
         for i, (key, title, val, bg, fg) in enumerate(card_defs):
-            card = tk.Frame(cards, bg=bg, padx=16, pady=10)
+            card = tk.Frame(cards, bg=bg, padx=16, pady=10, cursor="hand2",
+                            highlightthickness=2, highlightbackground=bg)
             card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0 if i == 0 else 6, 0))
-            tk.Label(card, text=title, bg=bg, fg=fg, font=("Segoe UI", 9)).pack(anchor="w")
-            lbl = tk.Label(card, text=val, bg=bg, fg=fg, font=("Segoe UI", 18, "bold"))
-            lbl.pack(anchor="w", pady=(2, 0))
-            self._stat_labels[key] = lbl
+            title_lbl = tk.Label(card, text=title, bg=bg, fg=fg, font=("Segoe UI", 9), cursor="hand2")
+            title_lbl.pack(anchor="w")
+            val_lbl = tk.Label(card, text=val, bg=bg, fg=fg, font=("Segoe UI", 18, "bold"), cursor="hand2")
+            val_lbl.pack(anchor="w", pady=(2, 0))
+            if key in ("gap", "exempted", "in_stock"):
+                hint = tk.Label(card, text="点击筛选", bg=bg, fg=fg, font=("Segoe UI", 8), cursor="hand2")
+                hint.pack(anchor="w")
+                for w in (card, title_lbl, val_lbl, hint):
+                    w.bind("<Button-1>", lambda _e, k=key: self._on_stat_card_click(k))
+            self._stat_labels[key] = val_lbl
+            self._stat_cards[key] = card
 
         self._stock_source_lbl = tk.Label(cards, text="", bg=C_BG, fg=C_MUTED, font=("Segoe UI", 9))
         self._stock_source_lbl.pack(side=tk.RIGHT, padx=8)
@@ -265,7 +278,7 @@ class PanelApp:
         prefix_inner.pack(fill=tk.BOTH, expand=True)
         tk.Label(
             prefix_inner,
-            text="按 SKU 编码前三位汇总（仅统计在产产品）· 双击某行可筛选该前缀产品",
+            text="按 SKU 编码前三位汇总（在产 SKU 数量）· 双击某行可筛选该前缀 · 有货未展示/豁免需先选店面",
             bg="white", fg=C_MUTED, font=("Segoe UI", 9),
         ).pack(anchor="w", padx=4, pady=(0, 6))
 
@@ -276,7 +289,7 @@ class PanelApp:
             selectmode="browse", style="Prefix.Treeview",
         )
         pheads = {
-            "prefix": ("SKU前缀", 72), "total": ("产品数", 64), "in_stock": ("有货数", 64),
+            "prefix": ("SKU前缀", 72), "total": ("在产SKU数", 80), "in_stock": ("有货数", 64),
             "in_stock_rate": ("有货率", 72), "displayed": ("有货已展示", 88),
             "display_rate": ("展示覆盖率", 88), "gap": ("有货未展示", 88), "exempted": ("同组豁免", 72),
         }
@@ -361,6 +374,50 @@ class PanelApp:
             seen.append(iid)
             y += ROW_HEIGHT
         return seen
+
+    def _is_store_selected(self):
+        return self.store_var.get() != panel_data.ALL_STORES
+
+    def _on_only_gap_toggle(self):
+        if self.only_gap_var.get():
+            self.only_exempted_var.set(False)
+            self._quick_filter = "gap"
+        elif self._quick_filter == "gap":
+            self._quick_filter = None
+        self._refresh_view()
+
+    def _on_only_exempted_toggle(self):
+        if self.only_exempted_var.get():
+            self.only_gap_var.set(False)
+            self._quick_filter = "exempted"
+        elif self._quick_filter == "exempted":
+            self._quick_filter = None
+        self._refresh_view()
+
+    def _on_stat_card_click(self, key):
+        if key in ("gap", "exempted") and not self._is_store_selected():
+            return
+        if key == "gap":
+            self.only_exempted_var.set(False)
+            self.only_gap_var.set(not self.only_gap_var.get())
+            self._quick_filter = "gap" if self.only_gap_var.get() else None
+        elif key == "exempted":
+            self.only_gap_var.set(False)
+            self.only_exempted_var.set(not self.only_exempted_var.get())
+            self._quick_filter = "exempted" if self.only_exempted_var.get() else None
+        elif key == "in_stock":
+            self.stock_filter_var.set("无货" if self.stock_filter_var.get() == "有货" else "有货")
+        self._refresh_view()
+
+    def _update_stat_card_highlight(self):
+        highlights = {
+            "gap": self.only_gap_var.get(),
+            "exempted": self.only_exempted_var.get(),
+            "in_stock": self.stock_filter_var.get() == "有货",
+        }
+        for key, card in self._stat_cards.items():
+            color = "#1e40af" if highlights.get(key) else card.cget("bg")
+            card.configure(highlightbackground=color)
 
     def _current_region(self):
         text = self.region_combo.get().strip()
@@ -508,6 +565,7 @@ class PanelApp:
         display_f = self.display_filter_var.get()
         disc_f = self.discontinue_filter_var.get()
         only_gap = self.only_gap_var.get()
+        only_exempted = self.only_exempted_var.get()
 
         out = []
         for p in products:
@@ -528,6 +586,8 @@ class PanelApp:
             if disc_f == "已停产" and not p.get("discontinued"):
                 continue
             if only_gap and not p.get("gap"):
+                continue
+            if only_exempted and not p.get("exempted"):
                 continue
             out.append(p)
         return out
@@ -570,22 +630,30 @@ class PanelApp:
             return
         s = self._cached_summary
 
+        store_specific = s.get("store_specific", self._is_store_selected())
+
         def pct(v):
             return "-" if v is None else f"{v:.1f}%"
 
-        self._stat_labels["gap"].configure(text=str(s.get("not_displayed_count", 0)))
-        self._stat_labels["exempted"].configure(text=str(s.get("exempted_count", 0)))
+        if store_specific:
+            self._stat_labels["gap"].configure(text=str(s.get("not_displayed_count", 0)), font=("Segoe UI", 18, "bold"))
+            self._stat_labels["exempted"].configure(text=str(s.get("exempted_count", 0)), font=("Segoe UI", 18, "bold"))
+        else:
+            self._stat_labels["gap"].configure(text="请选择店面", font=("Segoe UI", 11, "bold"))
+            self._stat_labels["exempted"].configure(text="请选择店面", font=("Segoe UI", 11, "bold"))
         self._stat_labels["in_stock"].configure(text=str(s.get("in_stock_count", 0)))
         self._stat_labels["rate"].configure(text=pct(s.get("in_stock_rate")))
         self._stat_labels["total"].configure(text=str(s.get("total_non_discontinue", 0)))
         self._stock_source_lbl.configure(
             text=f"店面：{s.get('store', '-')}  |  库存来源：{s.get('stock_sources', '-')}"
         )
+        self._update_stat_card_highlight()
 
         filtered = self._apply_client_filters(self._cached_products)
-        self.result_count_var.set(f"显示 {len(filtered)} / 共 {len(self._cached_products)} 条")
+        active_total = sum(1 for p in self._cached_products if not p.get("discontinued"))
+        self.result_count_var.set(f"显示 {len(filtered)} / 在产 {active_total} 条")
         self._render_tree(filtered)
-        self._render_prefix_table()
+        self._render_prefix_table(store_specific)
 
     def _prefix_row_tag(self, row, index):
         if row.get("gap_count", 0) > 0:
@@ -599,10 +667,12 @@ class PanelApp:
             return ("alt",)
         return ()
 
-    def _render_prefix_table(self):
+    def _render_prefix_table(self, store_specific=True):
         if not self._prefix_tree:
             return
-        rows = panel_data.aggregate_by_sku_prefix(self._cached_products, active_only=True)
+        rows = panel_data.aggregate_by_sku_prefix(
+            self._cached_products, store_specific=store_specific,
+        )
         if self._prefix_tree.get_children():
             self._prefix_tree.delete(*self._prefix_tree.get_children())
 
@@ -610,6 +680,8 @@ class PanelApp:
             return "-" if v is None else f"{v:.1f}%"
 
         for idx, row in enumerate(rows):
+            gap_val = row["gap_count"] if store_specific else "-"
+            exempt_val = row["exempted_count"] if store_specific else "-"
             self._prefix_tree.insert(
                 "", tk.END,
                 values=(
@@ -619,10 +691,10 @@ class PanelApp:
                     pct(row["in_stock_rate"]),
                     row["displayed_in_stock"],
                     pct(row["display_coverage_rate"]),
-                    row["gap_count"],
-                    row["exempted_count"],
+                    gap_val,
+                    exempt_val,
                 ),
-                tags=self._prefix_row_tag(row, idx),
+                tags=self._prefix_row_tag(row, idx) if store_specific else ("alt",),
             )
 
     def _on_prefix_double_click(self, _event=None):
