@@ -25,6 +25,7 @@ except ImportError:
 
 ROOT_DIR = Path(__file__).parent
 RUNNER_CONFIG_FILE = ROOT_DIR / "region_runner_config.json"
+EXEMPTION_CONFIG_FILE = ROOT_DIR / "family_exemption.json"
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
 CODE_KEYS = ["productcode", "product_code", "sku", "itemcode", "item_code",
@@ -165,7 +166,6 @@ def _stock_breakdown(warehouse_stock, warehouse_keys):
 
 
 def _apply_store_stock(product, store, region_key):
-    """按店面重算库存、有货状态。"""
     warehouse_stock = product.get("warehouse_stock") or {}
     warehouse_keys = _warehouses_for_store(store, region_key)
     if warehouse_stock:
@@ -467,6 +467,85 @@ def _load_display(rows):
     return by_store
 
 
+def _load_exemption_config():
+    if not EXEMPTION_CONFIG_FILE.is_file():
+        return {"auto_by_family": True, "groups": []}
+    try:
+        with EXEMPTION_CONFIG_FILE.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {"auto_by_family": True, "groups": []}
+    except Exception:
+        return {"auto_by_family": True, "groups": []}
+
+
+def _norm_group_token(text):
+    return re.sub(r"\s+", " ", str(text).strip().upper())
+
+
+def _product_matches_group(product, group):
+    fam = _norm_group_token(product.get("family") or "")
+    name = str(product.get("name") or "").lower()
+    for f in group.get("families") or []:
+        if fam == _norm_group_token(f):
+            return True
+    for pat in group.get("name_patterns") or []:
+        if str(pat).lower() in name:
+            return True
+    return False
+
+
+def _resolve_exemption_group(product, config):
+    for group in config.get("groups") or []:
+        if _product_matches_group(product, group):
+            label = (group.get("label") or group.get("key") or "").strip()
+            key = (group.get("key") or label or "").strip()
+            return _norm_group_token(key), label or key
+    if config.get("auto_by_family", True):
+        fam = str(product.get("family") or "未分类").strip()
+        return _norm_group_token(fam), fam
+    return None, None
+
+
+def _apply_family_exemptions(products):
+    """同 exemption 组内已有展示 SKU 时，豁免组内其他有货未展示 SKU。"""
+    config = _load_exemption_config()
+    for p in products:
+        p["exempted"] = False
+        p["exemption_reason"] = ""
+        gkey, glabel = _resolve_exemption_group(p, config)
+        p["exemption_group"] = gkey
+        p["exemption_group_label"] = glabel
+
+    by_group = {}
+    for p in products:
+        gk = p.get("exemption_group")
+        if gk:
+            by_group.setdefault(gk, []).append(p)
+
+    exempted_n = 0
+    for members in by_group.values():
+        anchors = [
+            m for m in members
+            if m.get("displayed") and m.get("in_stock") and not m.get("discontinued")
+        ]
+        if not anchors:
+            continue
+        codes = [m["code"] for m in anchors]
+        reason = f"同组已展示：{codes[0]}"
+        if len(codes) > 1:
+            extra = ", ".join(codes[1:3])
+            suffix = "…" if len(codes) > 3 else ""
+            reason = f"同组已展示：{codes[0]}, {extra}{suffix}"
+        for m in members:
+            if not m.get("gap"):
+                continue
+            m["exempted"] = True
+            m["gap"] = False
+            m["exemption_reason"] = reason
+            exempted_n += 1
+    return exempted_n
+
+
 def list_stores(region=None):
     bundle = _load_region_bundle(region or default_region())
     by_store = bundle["by_store"]
@@ -505,10 +584,12 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         item["gap"] = gap
         products.append(item)
 
+    exempted_count = _apply_family_exemptions(products)
+
     non_discontinue = [p for p in products if not p["discontinued"]]
     in_stock = [p for p in non_discontinue if p["in_stock"]]
     displayed_in_stock = [p for p in in_stock if p["displayed"]]
-    not_displayed = [p for p in in_stock if not p["displayed"]]
+    not_displayed = [p for p in in_stock if p["gap"]]
 
     total_nd = len(non_discontinue)
     in_stock_n = len(in_stock)
@@ -521,6 +602,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         "displayed_in_stock_count": len(displayed_in_stock),
         "display_coverage_rate": round(len(displayed_in_stock) / in_stock_n * 100, 2) if in_stock_n else None,
         "not_displayed_count": len(not_displayed),
+        "exempted_count": exempted_count,
         "stock_sources": " + ".join(
             WAREHOUSE_LABELS.get(k, k) for k in _warehouses_for_store(store, region_key)
         ),
@@ -531,7 +613,14 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         view = [p for p in view if not p["discontinued"]]
     if only_gap:
         view = [p for p in view if p["gap"]]
-    view.sort(key=lambda p: (not p["gap"], not p["in_stock"], -p["stock_qty"], p["code"]))
+    view.sort(key=lambda p: (
+        p.get("exemption_group_label") or p.get("family") or "未分类",
+        not p["gap"],
+        not p.get("exempted"),
+        not p["in_stock"],
+        -p["stock_qty"],
+        p["code"],
+    ))
 
     diagnostics = []
     display_row_count = bundle["display_row_count"]

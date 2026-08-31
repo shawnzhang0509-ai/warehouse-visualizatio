@@ -1,0 +1,12 @@
+{
+  "auto_by_family": true,
+  "description": "同组内任一 SKU 在所选店面已展示，则该组其他「有货未展示」SKU 自动豁免。可按系列名自动分组，也可在下面手动定义跨系列分组。",
+  "groups": [
+    {
+      "key": "luna",
+      "label": "Luna 床垫系列",
+      "families": ["Luna", "LUNA"],
+      "name_patterns": ["luna"]
+    }
+  ]
+}

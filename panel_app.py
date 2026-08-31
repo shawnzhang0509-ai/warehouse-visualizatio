@@ -27,17 +27,20 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.0"
+APP_VERSION = "1.1"
 ROW_HEIGHT = 58
 THUMB = (52, 52)
 IMAGE_BATCH = 40
 PLACEHOLDER_COLOR = "#d1d5db"
+SCROLL_UNITS = 8
 
 # 参考智能库存决策系统的配色
 C_HEADER = "#1e4f8a"
 C_BG = "#f0f4f8"
 C_CARD_GAP = "#dc2626"
 C_CARD_GAP_BG = "#fee2e2"
+C_CARD_EXEMPT = "#ca8a04"
+C_CARD_EXEMPT_BG = "#fef9c3"
 C_CARD_OK = "#16a34a"
 C_CARD_OK_BG = "#dcfce7"
 C_CARD_INFO = "#2563eb"
@@ -45,6 +48,7 @@ C_CARD_INFO_BG = "#dbeafe"
 C_CARD_NEUTRAL = "#64748b"
 C_CARD_NEUTRAL_BG = "#f1f5f9"
 C_ROW_GAP = "#fff1f2"
+C_ROW_EXEMPT = "#fffbeb"
 C_ROW_OK = "#f0fdf4"
 C_ROW_ALT = "#fafbfc"
 C_TEXT = "#1e293b"
@@ -108,6 +112,7 @@ class PanelApp:
         style.map("Treeview", background=[("selected", "#bfdbfe")])
         style.configure("TCombobox", padding=4)
         style.configure("Tool.TButton", padding=(10, 4))
+        style.configure("Vertical.TScrollbar", width=18, arrowsize=14)
 
     def _build_ui(self, stores, regions):
         # ── 顶栏（深蓝） ──
@@ -143,7 +148,7 @@ class PanelApp:
         tk.Label(toolbar, text="店面", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).grid(
             row=0, column=1, sticky="w")
         self.store_combo = ttk.Combobox(toolbar, width=22, state="readonly",
-                                         values=stores, textvariable=self.store_var)
+                                         values=stores, textvariable=self.store_var, height=18)
         self.store_combo.grid(row=1, column=1, sticky="w", padx=(0, 14), pady=(2, 0))
         self.store_combo.bind("<<ComboboxSelected>>", lambda _e: self.reload())
 
@@ -160,6 +165,7 @@ class PanelApp:
         cards.pack(fill=tk.X)
         card_defs = [
             ("gap", "有货未展示", "0", C_CARD_GAP_BG, C_CARD_GAP),
+            ("exempted", "同组豁免", "0", C_CARD_EXEMPT_BG, C_CARD_EXEMPT),
             ("in_stock", "有货产品", "0", C_CARD_OK_BG, C_CARD_OK),
             ("rate", "有货率", "-", C_CARD_INFO_BG, C_CARD_INFO),
             ("total", "纳入分析", "0", C_CARD_NEUTRAL_BG, C_CARD_NEUTRAL),
@@ -195,18 +201,21 @@ class PanelApp:
             anchor = "w" if col in ("code", "name", "family") else "center"
             self._tree.column(col, width=width, anchor=anchor, stretch=(col == "name"))
         self._tree.tag_configure("gap", background=C_ROW_GAP)
+        self._tree.tag_configure("exempted", background=C_ROW_EXEMPT)
         self._tree.tag_configure("ok", background=C_ROW_OK)
         self._tree.tag_configure("alt", background=C_ROW_ALT)
+        self._tree.tag_configure("group", background="#e2e8f0")
 
-        self._tree_vscroll = ttk.Scrollbar(inner, orient="vertical", command=self._on_tree_scroll)
+        self._tree_vscroll = ttk.Scrollbar(inner, orient="vertical", command=self._on_tree_yscroll)
         self._tree.configure(yscrollcommand=self._tree_vscroll.set)
         self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._tree_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         self._placeholder_photo = self._make_placeholder_photo()
-        self.root.bind_all("<MouseWheel>", self._on_wheel)
-        self.root.bind_all("<Button-4>", lambda _e: self._on_wheel(-1))
-        self.root.bind_all("<Button-5>", lambda _e: self._on_wheel(1))
+        for widget in (inner, table_wrap, self._tree):
+            widget.bind("<MouseWheel>", self._on_wheel)
+            widget.bind("<Button-4>", lambda _e: self._scroll_tree(-1))
+            widget.bind("<Button-5>", lambda _e: self._scroll_tree(1))
 
     def _make_placeholder_photo(self):
         if Image is not None and ImageTk is not None:
@@ -216,9 +225,8 @@ class PanelApp:
         img.put(PLACEHOLDER_COLOR, to=(0, 0, THUMB[0], THUMB[1]))
         return img
 
-    def _on_tree_scroll(self, *args):
-        if self._tree_vscroll:
-            self._tree_vscroll.set(*args)
+    def _on_tree_yscroll(self, *args):
+        self._tree.yview(*args)
         self._debounce_visible_images()
 
     def _debounce_visible_images(self):
@@ -226,12 +234,19 @@ class PanelApp:
             self.root.after_cancel(self._scroll_after_id)
         self._scroll_after_id = self.root.after(80, self._load_visible_images)
 
-    def _on_wheel(self, delta):
+    def _scroll_tree(self, direction):
+        if self._tree:
+            self._tree.yview_scroll(direction * SCROLL_UNITS, "units")
+            self._debounce_visible_images()
+
+    def _on_wheel(self, event):
         if not self._tree:
             return
-        step = delta if isinstance(delta, int) else (-1 if delta.delta > 0 else 1)
-        self._tree.yview_scroll(step, "units")
-        self._debounce_visible_images()
+        if hasattr(event, "delta"):
+            step = -1 if event.delta > 0 else 1
+        else:
+            step = -1
+        self._scroll_tree(step)
 
     def _visible_iids(self):
         if not self._tree:
@@ -239,11 +254,15 @@ class PanelApp:
         height = max(self._tree.winfo_height(), ROW_HEIGHT)
         seen = []
         y = 0
-        while y < height + ROW_HEIGHT * 3:
+        while y < height + ROW_HEIGHT * 4:
             iid = self._tree.identify_row(y)
-            if not iid or iid in seen:
-                if y > height:
-                    break
+            if not iid:
+                y += ROW_HEIGHT
+                continue
+            if iid in seen:
+                y += ROW_HEIGHT
+                continue
+            if iid not in self._iid_to_url:
                 y += ROW_HEIGHT
                 continue
             seen.append(iid)
@@ -410,6 +429,7 @@ class PanelApp:
             return "-" if v is None else f"{v:.1f}%"
 
         self._stat_labels["gap"].configure(text=str(s["not_displayed_count"]))
+        self._stat_labels["exempted"].configure(text=str(s.get("exempted_count", 0)))
         self._stat_labels["in_stock"].configure(text=str(s["in_stock_count"]))
         self._stat_labels["rate"].configure(text=pct(s["in_stock_rate"]))
         self._stat_labels["total"].configure(text=str(s["total_non_discontinue"]))
@@ -423,6 +443,8 @@ class PanelApp:
     def _row_tag(self, item, index):
         if item.get("gap"):
             return ("gap",)
+        if item.get("exempted"):
+            return ("exempted",)
         if item.get("in_stock") and item.get("displayed"):
             return ("ok",)
         if index % 2 == 1:
@@ -437,6 +459,8 @@ class PanelApp:
         displayed = "已展示" if item.get("displayed") else "未展示"
         if item.get("gap"):
             status = "★ 有货未展示"
+        elif item.get("exempted"):
+            status = "○ 同组已展示"
         elif item.get("discontinued"):
             status = "已停产"
         elif item.get("in_stock"):
@@ -448,6 +472,17 @@ class PanelApp:
             price, stock, displayed, status,
         )
 
+    def _group_products(self, products):
+        groups = {}
+        order = []
+        for item in products:
+            label = item.get("exemption_group_label") or item.get("family") or "未分类"
+            if label not in groups:
+                groups[label] = []
+                order.append(label)
+            groups[label].append(item)
+        return [(label, groups[label]) for label in order]
+
     def _render_tree(self, products):
         self._render_token += 1
         render_token = self._render_token
@@ -458,22 +493,40 @@ class PanelApp:
         self._products_by_iid.clear()
         self._iid_to_url.clear()
 
+        grouped = self._group_products(products)
+
         def fill():
             if render_token != self._render_token:
                 return
-            for idx, item in enumerate(products):
-                values = self._tree_row_values(item)
-                tags = self._row_tag(item, idx)
-                iid = self._tree.insert(
+            for family_label, items in grouped:
+                gap_n = sum(1 for i in items if i.get("gap"))
+                exempt_n = sum(1 for i in items if i.get("exempted"))
+                summary = f"（{len(items)} 个"
+                if gap_n:
+                    summary += f"，{gap_n} 待处理"
+                if exempt_n:
+                    summary += f"，{exempt_n} 已豁免"
+                summary += "）"
+                parent = self._tree.insert(
                     "", tk.END,
-                    image=self._placeholder_photo,
-                    text="",
-                    values=values,
-                    tags=tags,
+                    text=f"{family_label} {summary}",
+                    values=("", "", "", "", "", "", ""),
+                    tags=("group",),
+                    open=True,
                 )
-                self._products_by_iid[iid] = item
-                if item.get("image"):
-                    self._iid_to_url[iid] = item["image"]
+                for idx, item in enumerate(items):
+                    values = self._tree_row_values(item)
+                    tags = self._row_tag(item, idx)
+                    iid = self._tree.insert(
+                        parent, tk.END,
+                        image=self._placeholder_photo,
+                        text="",
+                        values=values,
+                        tags=tags,
+                    )
+                    self._products_by_iid[iid] = item
+                    if item.get("image"):
+                        self._iid_to_url[iid] = item["image"]
             self._load_visible_images()
 
         self.root.after_idle(fill)
