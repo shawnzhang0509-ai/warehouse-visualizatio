@@ -27,7 +27,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.3.5"
+APP_VERSION = "1.3.6"
 ROW_HEIGHT = 58
 THUMB = (52, 52)
 IMAGE_BATCH = 40
@@ -192,7 +192,7 @@ class PanelApp:
             ("库存", self.stock_filter_var, ("全部", "有货", "无货"), 1),
             ("展示", self.display_filter_var, ("全部", "已展示", "未展示"), 2),
             ("停产", self.discontinue_filter_var, ("在产", "全部", "已停产"), 3),
-            ("组排序", self.group_sort_var, ("字母序", "数量多到少"), 4),
+            ("组排序", self.group_sort_var, ("字母序", "SKU数量多到少", "库存总数多到少"), 4),
         ]
         for label, var, values, col in filters:
             tk.Label(filter_bar, text=label, bg="white", fg=C_MUTED, font=("Segoe UI", 9)).grid(
@@ -646,6 +646,9 @@ class PanelApp:
             -float(p.get("stock_qty") or 0), p.get("code") or "",
         ))
 
+    def _group_stock_total(self, items):
+        return sum(float(i.get("stock_qty") or 0) for i in items)
+
     def _group_products(self, products):
         groups = {}
         for item in products:
@@ -656,8 +659,11 @@ class PanelApp:
         for label, items in groups.items():
             result.append((label, self._sort_products(items)))
 
-        if self.group_sort_var.get() == "数量多到少":
-            result.sort(key=lambda x: -len(x[1]))
+        sort_mode = self.group_sort_var.get()
+        if sort_mode in ("数量多到少", "SKU数量多到少"):
+            result.sort(key=lambda x: (-len(x[1]), x[0].lower()))
+        elif sort_mode == "库存总数多到少":
+            result.sort(key=lambda x: (-self._group_stock_total(x[1]), -len(x[1]), x[0].lower()))
         else:
             result.sort(key=lambda x: x[0].lower())
         return result
@@ -838,7 +844,7 @@ class PanelApp:
                 )
                 summary = f"（{len(items)} 个"
                 if store_specific:
-                    stock_total = int(sum(float(i.get("stock_qty") or 0) for i in items))
+                    stock_total = int(self._group_stock_total(items))
                     summary += f"，库存合计 {stock_total}"
                 if gap_n:
                     summary += f"，{gap_n} 待处理"
