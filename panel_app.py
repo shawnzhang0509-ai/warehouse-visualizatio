@@ -27,7 +27,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.3.4"
+APP_VERSION = "1.3.5"
 ROW_HEIGHT = 58
 THUMB = (52, 52)
 IMAGE_BATCH = 40
@@ -833,7 +833,13 @@ class PanelApp:
                 gap_n = sum(1 for i in items if i.get("gap"))
                 exempt_n = sum(1 for i in items if i.get("exempted"))
                 disc_n = sum(1 for i in items if i.get("discontinued"))
+                store_specific = self._cached_summary.get(
+                    "store_specific", self._is_store_selected()
+                )
                 summary = f"（{len(items)} 个"
+                if store_specific:
+                    stock_total = int(sum(float(i.get("stock_qty") or 0) for i in items))
+                    summary += f"，库存合计 {stock_total}"
                 if gap_n:
                     summary += f"，{gap_n} 待处理"
                 if exempt_n:
