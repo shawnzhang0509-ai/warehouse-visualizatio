@@ -682,9 +682,13 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         in_stock_not_displayed_all = [
             p for p in products if p["in_stock"] and not p["displayed"]
         ]
+        in_stock_not_displayed_discontinued = [
+            p for p in in_stock_not_displayed_all if p["discontinued"]
+        ]
     else:
         raw_gap_active = []
         in_stock_not_displayed_all = []
+        in_stock_not_displayed_discontinued = []
 
     total_nd = len(non_discontinue)
     in_stock_n = len(in_stock)
@@ -701,6 +705,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         "not_displayed_count": len(not_displayed) if store_specific else None,
         "exempted_count": exempted_count if store_specific else None,
         "in_stock_not_displayed_all": len(in_stock_not_displayed_all) if store_specific else None,
+        "in_stock_not_displayed_discontinued": len(in_stock_not_displayed_discontinued) if store_specific else None,
         "stock_sources": " + ".join(
             WAREHOUSE_LABELS.get(k, k) for k in _warehouses_for_store(store, region_key)
         ),
