@@ -27,7 +27,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.3.3"
+APP_VERSION = "1.3.4"
 ROW_HEIGHT = 58
 THUMB = (52, 52)
 IMAGE_BATCH = 40
@@ -252,29 +252,33 @@ class PanelApp:
 
         inner = tk.Frame(self._tab_products, bg="white")
         inner.pack(fill=tk.BOTH, expand=True)
+        inner.grid_rowconfigure(0, weight=1)
+        inner.grid_columnconfigure(0, weight=1)
 
         columns = ("code", "name", "family", "price", "stock", "display", "discontinue", "status")
         self._tree = ttk.Treeview(inner, columns=columns, show="tree headings", selectmode="browse")
         self._tree.heading("#0", text="产品图")
-        self._tree.column("#0", width=68, stretch=False, anchor="center")
+        self._tree.column("#0", width=64, minwidth=64, stretch=False, anchor="center")
         headings = {
-            "code": ("编码", 96), "name": ("名称", 280), "family": ("系列", 96),
-            "price": ("价格", 72), "stock": ("库存", 80), "display": ("展示", 64),
-            "discontinue": ("停产", 56), "status": ("状态", 116),
+            "code": ("编码", 100), "name": ("名称", 200), "family": ("系列", 88),
+            "price": ("价格", 72), "stock": ("库存", 96), "display": ("展示", 56),
+            "discontinue": ("停产", 48), "status": ("状态", 132),
         }
         for col, (text, width) in headings.items():
             self._tree.heading(col, text=text, command=lambda c=col: self._on_sort_column(c))
             anchor = "w" if col in ("code", "name", "family") else "center"
-            self._tree.column(col, width=width, anchor=anchor, stretch=(col == "name"))
+            self._tree.column(col, width=width, minwidth=width, anchor=anchor, stretch=False)
 
         for tag, bg in (("gap", C_ROW_GAP), ("exempted", C_ROW_EXEMPT), ("ok", C_ROW_OK),
                         ("alt", C_ROW_ALT), ("discontinued", C_ROW_DISC), ("group", "#e2e8f0")):
             self._tree.tag_configure(tag, background=bg)
 
         self._tree_vscroll = ttk.Scrollbar(inner, orient="vertical", command=self._on_tree_yscroll)
-        self._tree.configure(yscrollcommand=self._tree_vscroll.set)
-        self._tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        self._tree_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._tree_hscroll = ttk.Scrollbar(inner, orient="horizontal", command=self._tree.xview)
+        self._tree.configure(yscrollcommand=self._tree_vscroll.set, xscrollcommand=self._tree_hscroll.set)
+        self._tree.grid(row=0, column=0, sticky="nsew")
+        self._tree_vscroll.grid(row=0, column=1, sticky="ns")
+        self._tree_hscroll.grid(row=1, column=0, sticky="ew")
 
         # ── SKU 前三位汇总表 ──
         prefix_inner = tk.Frame(tab_prefix, bg="white")
