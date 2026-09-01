@@ -399,6 +399,7 @@ def _load_region_bundle(region, force=False):
         raise FileNotFoundError(display_path)
 
     display_rows = _read_table(display_path)
+    by_store, display_details = _load_display(display_rows)
     bundle = {
         "region": region_key,
         "stock_path": stock_path,
@@ -408,7 +409,8 @@ def _load_region_bundle(region, force=False):
         "stock_mtime": stock_mtime,
         "display_mtime": display_mtime,
         "stock_rows": _load_stock(_read_table(stock_path), data_dir),
-        "by_store": _load_display(display_rows),
+        "by_store": by_store,
+        "display_details": display_details,
         "display_row_count": len(display_rows),
     }
     _REGION_CACHE[region_key] = bundle
@@ -463,16 +465,27 @@ def _load_stock(rows, data_dir):
 
 
 def _load_display(rows):
-    """返回 {store_name: set(codes)}。"""
+    """返回 (by_store, display_details)。
+
+    by_store: {store_name: set(codes)}
+    display_details: {store_name: {norm_code: {code, family, name}}}
+    """
     by_store = {}
+    display_details = {}
     for row in rows:
         code = _pick(row, CODE_KEYS)
         if not code:
             continue
         store = _pick(row, STORE_KEYS)
         store = str(store).strip() if store else "（未标注店面）"
-        by_store.setdefault(store, set()).add(_norm_code(code))
-    return by_store
+        norm = _norm_code(code)
+        by_store.setdefault(store, set()).add(norm)
+        display_details.setdefault(store, {})[norm] = {
+            "code": str(code).strip(),
+            "family": str(_pick(row, FAMILY_KEYS) or "").strip(),
+            "name": str(_pick(row, NAME_KEYS) or "").strip(),
+        }
+    return by_store, display_details
 
 
 def _load_exemption_config():
@@ -526,11 +539,51 @@ def _resolve_exemption_group(product, config):
     return None, None
 
 
-def _apply_family_exemptions(products):
+def _display_anchor_codes(members, displayed_details, config):
+    """同组内在该店面已展示的 SKU（含 display 表有、stock 表无的款）。"""
+    group_key = next((m.get("exemption_group") for m in members if m.get("exemption_group")), None)
+    if not group_key:
+        return []
+
+    codes = []
+    seen = set()
+    for m in members:
+        if not m.get("displayed"):
+            continue
+        code = m.get("code")
+        norm = _norm_code(code)
+        if norm and norm not in seen:
+            seen.add(norm)
+            codes.append(code)
+
+    for norm, meta in (displayed_details or {}).items():
+        if norm in seen:
+            continue
+        pseudo = {
+            "code": meta.get("code") or norm,
+            "family": meta.get("family") or "",
+            "name": meta.get("name") or "",
+        }
+        gkey, _ = _resolve_exemption_group(pseudo, config)
+        if gkey == group_key:
+            seen.add(norm)
+            codes.append(pseudo["code"])
+    return codes
+
+
+def _eligible_for_exemption(product):
+    if product.get("displayed") or not product.get("in_stock"):
+        return False
+    if product.get("gap"):
+        return True
+    return bool(product.get("discontinued"))
+
+
+def _apply_family_exemptions(products, displayed_details=None):
     """同 exemption 组内已有展示 SKU 时，豁免组内其他有货未展示 SKU。
 
-    锚点条件：在所选店面「已展示」即可，不要求该展示款当前有货
-    （例如 Queen 已上样但无货，仍可豁免同系列 King 有货未展示）。
+    锚点条件：在所选店面「已展示」即可（含 display 表有展示、stock 表无库存的款），
+    不要求锚点有货。停产但有货未展示的 SKU 也可被同组已展示款豁免。
     """
     config = _load_exemption_config()
     for p in products:
@@ -548,23 +601,20 @@ def _apply_family_exemptions(products):
 
     exempted_n = 0
     for members in by_group.values():
-        anchors = [
-            m for m in members
-            if m.get("displayed") and not m.get("discontinued")
-        ]
-        if not anchors:
+        anchor_codes = _display_anchor_codes(members, displayed_details, config)
+        if not anchor_codes:
             continue
-        codes = [m["code"] for m in anchors]
-        reason = f"同组已展示：{codes[0]}"
-        if len(codes) > 1:
-            extra = ", ".join(codes[1:3])
-            suffix = "…" if len(codes) > 3 else ""
-            reason = f"同组已展示：{codes[0]}, {extra}{suffix}"
+        reason = f"同组已展示：{anchor_codes[0]}"
+        if len(anchor_codes) > 1:
+            extra = ", ".join(anchor_codes[1:3])
+            suffix = "…" if len(anchor_codes) > 3 else ""
+            reason = f"同组已展示：{anchor_codes[0]}, {extra}{suffix}"
         for m in members:
-            if not m.get("gap"):
+            if not _eligible_for_exemption(m):
                 continue
             m["exempted"] = True
-            m["gap"] = False
+            if m.get("gap"):
+                m["gap"] = False
             m["exemption_reason"] = reason
             exempted_n += 1
     return exempted_n
@@ -660,7 +710,8 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         products.append(item)
 
     if store_specific:
-        exempted_count = _apply_family_exemptions(products)
+        store_display_details = bundle.get("display_details", {}).get(store, {})
+        exempted_count = _apply_family_exemptions(products, store_display_details)
     else:
         for p in products:
             p["exempted"] = False
@@ -680,7 +731,8 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
             if p["in_stock"] and not p["discontinued"] and not p["displayed"]
         ]
         in_stock_not_displayed_all = [
-            p for p in products if p["in_stock"] and not p["displayed"]
+            p for p in products
+            if p["in_stock"] and not p["displayed"] and not p.get("exempted")
         ]
         in_stock_not_displayed_discontinued = [
             p for p in in_stock_not_displayed_all if p["discontinued"]

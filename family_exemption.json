@@ -1,6 +1,6 @@
 {
   "auto_by_family": true,
-  "description": "同组内任一款在所选店面已展示（不要求有货），则该组其他「有货未展示」SKU 自动豁免。未分类系列不豁免。",
+  "description": "同组内任一款在所选店面已展示（含 display 表有展示、stock 无库存的款），则该组其他有货未展示 SKU（含停产）自动豁免。未分类系列不豁免。",
   "groups": [
     {
       "key": "luna",

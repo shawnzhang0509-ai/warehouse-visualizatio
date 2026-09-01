@@ -27,7 +27,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.3.6"
+APP_VERSION = "1.3.7"
 ROW_HEIGHT = 58
 THUMB = (52, 52)
 IMAGE_BATCH = 40
@@ -634,6 +634,14 @@ class PanelApp:
                 continue
             if only_exempted and not p.get("exempted"):
                 continue
+            if (
+                stock_f == "有货"
+                and display_f == "未展示"
+                and not only_exempted
+                and not only_gap
+                and p.get("exempted")
+            ):
+                continue
             out.append(p)
         return out
 
@@ -786,12 +794,12 @@ class PanelApp:
         self._refresh_view()
 
     def _row_tag(self, item, index):
-        if item.get("discontinued"):
-            return ("discontinued",)
-        if item.get("gap"):
-            return ("gap",)
         if item.get("exempted"):
             return ("exempted",)
+        if item.get("gap"):
+            return ("gap",)
+        if item.get("discontinued"):
+            return ("discontinued",)
         if item.get("in_stock") and item.get("displayed"):
             return ("ok",)
         if index % 2 == 1:
