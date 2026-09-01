@@ -92,10 +92,17 @@ def _to_float(value):
 def _is_discontinued(value):
     if value is None:
         return False
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        try:
+            return float(value) != 0
+        except (TypeError, ValueError):
+            pass
     text = str(value).strip().lower()
-    if text in ("", "0", "false", "no", "n", "active", "live"):
+    if text in ("", "0", "0.0", "false", "no", "n", "active", "live"):
         return False
-    if text in ("1", "true", "yes", "y"):
+    if text in ("1", "1.0", "true", "yes", "y"):
         return True
     return "discontinue" in text
 

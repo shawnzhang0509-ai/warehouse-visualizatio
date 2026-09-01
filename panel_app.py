@@ -198,7 +198,7 @@ class PanelApp:
                 row=0, column=col, sticky="w")
             cb = ttk.Combobox(filter_bar, width=10, state="readonly", textvariable=var, values=values)
             cb.grid(row=1, column=col, sticky="w", padx=(0, 10), pady=(2, 0))
-            cb.bind("<<ComboboxSelected>>", lambda _e: self._refresh_view())
+            cb.bind("<<ComboboxSelected>>", lambda _e: self._on_filter_combo_change())
 
         ttk.Checkbutton(filter_bar, text="只看有货未展示", variable=self.only_gap_var,
                         command=self._on_only_gap_toggle).grid(row=1, column=5, sticky="w", padx=(4, 0))
@@ -378,7 +378,18 @@ class PanelApp:
     def _is_store_selected(self):
         return self.store_var.get() != panel_data.ALL_STORES
 
+    def _on_filter_combo_change(self):
+        if self.discontinue_filter_var.get() == "已停产":
+            if self.only_gap_var.get():
+                self.only_gap_var.set(False)
+            if self.only_exempted_var.get():
+                self.only_exempted_var.set(False)
+            self._quick_filter = None
+        self._refresh_view()
+
     def _on_only_gap_toggle(self):
+        if self.only_gap_var.get() and self.discontinue_filter_var.get() == "已停产":
+            self.discontinue_filter_var.set("在产")
         if self.only_gap_var.get():
             self.only_exempted_var.set(False)
             self._quick_filter = "gap"
@@ -651,7 +662,22 @@ class PanelApp:
 
         filtered = self._apply_client_filters(self._cached_products)
         active_total = sum(1 for p in self._cached_products if not p.get("discontinued"))
-        self.result_count_var.set(f"显示 {len(filtered)} / 在产 {active_total} 条")
+        disc_total = sum(1 for p in self._cached_products if p.get("discontinued"))
+        disc_f = self.discontinue_filter_var.get()
+        if disc_f == "已停产":
+            self.result_count_var.set(f"显示 {len(filtered)} / 停产 {disc_total} 条")
+        elif disc_f == "在产":
+            self.result_count_var.set(f"显示 {len(filtered)} / 在产 {active_total} 条")
+        else:
+            self.result_count_var.set(
+                f"显示 {len(filtered)} / 共 {len(self._cached_products)} 条"
+                f"（在产 {active_total}，停产 {disc_total}）"
+            )
+        if disc_f == "已停产" and len(filtered) == 0 and disc_total > 0:
+            if self.stock_filter_var.get() == "有货":
+                self.result_count_var.set(
+                    f"显示 0 / 停产 {disc_total} 条（可尝试将「库存」改为「全部」）"
+                )
         self._render_tree(filtered)
         self._render_prefix_table(store_specific)
 
