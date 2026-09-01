@@ -674,6 +674,17 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
     in_stock = [p for p in non_discontinue if p["in_stock"]]
     displayed_in_stock = [p for p in in_stock if p["displayed"]]
     not_displayed = [p for p in in_stock if p["gap"]]
+    if store_specific:
+        raw_gap_active = [
+            p for p in products
+            if p["in_stock"] and not p["discontinued"] and not p["displayed"]
+        ]
+        in_stock_not_displayed_all = [
+            p for p in products if p["in_stock"] and not p["displayed"]
+        ]
+    else:
+        raw_gap_active = []
+        in_stock_not_displayed_all = []
 
     total_nd = len(non_discontinue)
     in_stock_n = len(in_stock)
@@ -686,8 +697,10 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         "in_stock_rate": round(in_stock_n / total_nd * 100, 2) if total_nd else None,
         "displayed_in_stock_count": len(displayed_in_stock),
         "display_coverage_rate": round(len(displayed_in_stock) / in_stock_n * 100, 2) if in_stock_n else None,
+        "raw_gap_active_count": len(raw_gap_active) if store_specific else None,
         "not_displayed_count": len(not_displayed) if store_specific else None,
         "exempted_count": exempted_count if store_specific else None,
+        "in_stock_not_displayed_all": len(in_stock_not_displayed_all) if store_specific else None,
         "stock_sources": " + ".join(
             WAREHOUSE_LABELS.get(k, k) for k in _warehouses_for_store(store, region_key)
         ),

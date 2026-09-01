@@ -27,7 +27,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
 ROW_HEIGHT = 58
 THUMB = (52, 52)
 IMAGE_BATCH = 40
@@ -50,7 +50,7 @@ C_ROW_GAP = "#fff1f2"
 C_ROW_EXEMPT = "#fffbeb"
 C_ROW_OK = "#f0fdf4"
 C_ROW_ALT = "#fafbfc"
-C_ROW_DISC = "#f3f4f6"
+C_ROW_DISC = "#fee2e2"
 C_TEXT = "#1e293b"
 C_MUTED = "#64748b"
 
@@ -100,6 +100,7 @@ class PanelApp:
         self._tab_products = None
         self._placeholder_photo = None
         self._stat_labels = {}
+        self._stat_hints = {}
         self._stat_cards = {}
         self._quick_filter = None
 
@@ -227,8 +228,10 @@ class PanelApp:
             val_lbl = tk.Label(card, text=val, bg=bg, fg=fg, font=("Segoe UI", 18, "bold"), cursor="hand2")
             val_lbl.pack(anchor="w", pady=(2, 0))
             if key in ("gap", "exempted", "in_stock"):
-                hint = tk.Label(card, text="点击筛选", bg=bg, fg=fg, font=("Segoe UI", 8), cursor="hand2")
+                hint_text = "豁免后在产待处理 · 点击筛选" if key == "gap" else "点击筛选"
+                hint = tk.Label(card, text=hint_text, bg=bg, fg=fg, font=("Segoe UI", 8), cursor="hand2")
                 hint.pack(anchor="w")
+                self._stat_hints[key] = hint
                 for w in (card, title_lbl, val_lbl, hint):
                     w.bind("<Button-1>", lambda _e, k=key: self._on_stat_card_click(k))
             self._stat_labels[key] = val_lbl
@@ -410,8 +413,23 @@ class PanelApp:
             return
         if key == "gap":
             self.only_exempted_var.set(False)
-            self.only_gap_var.set(not self.only_gap_var.get())
-            self._quick_filter = "gap" if self.only_gap_var.get() else None
+            self.only_gap_var.set(False)
+            is_raw_gap_view = (
+                self.stock_filter_var.get() == "有货"
+                and self.display_filter_var.get() == "未展示"
+                and self.discontinue_filter_var.get() == "在产"
+                and self._quick_filter == "raw_gap"
+            )
+            if is_raw_gap_view:
+                self.stock_filter_var.set("全部")
+                self.display_filter_var.set("全部")
+                self.discontinue_filter_var.set("全部")
+                self._quick_filter = None
+            else:
+                self.stock_filter_var.set("有货")
+                self.display_filter_var.set("未展示")
+                self.discontinue_filter_var.set("在产")
+                self._quick_filter = "raw_gap"
         elif key == "exempted":
             self.only_gap_var.set(False)
             self.only_exempted_var.set(not self.only_exempted_var.get())
@@ -422,7 +440,12 @@ class PanelApp:
 
     def _update_stat_card_highlight(self):
         highlights = {
-            "gap": self.only_gap_var.get(),
+            "gap": (
+                self.stock_filter_var.get() == "有货"
+                and self.display_filter_var.get() == "未展示"
+                and self.discontinue_filter_var.get() == "在产"
+                and self._quick_filter == "raw_gap"
+            ),
             "exempted": self.only_exempted_var.get(),
             "in_stock": self.stock_filter_var.get() == "有货",
         }
@@ -647,17 +670,26 @@ class PanelApp:
             return "-" if v is None else f"{v:.1f}%"
 
         if store_specific:
-            self._stat_labels["gap"].configure(text=str(s.get("not_displayed_count", 0)), font=("Segoe UI", 18, "bold"))
+            raw_gap = s.get("raw_gap_active_count", 0)
+            actionable = s.get("not_displayed_count", 0)
+            self._stat_labels["gap"].configure(text=str(raw_gap), font=("Segoe UI", 18, "bold"))
+            if "gap" in self._stat_hints:
+                self._stat_hints["gap"].configure(
+                    text=f"豁免后待处理 {actionable} · 点击筛选在产有货未展示"
+                )
             self._stat_labels["exempted"].configure(text=str(s.get("exempted_count", 0)), font=("Segoe UI", 18, "bold"))
         else:
             self._stat_labels["gap"].configure(text="请选择店面", font=("Segoe UI", 11, "bold"))
+            if "gap" in self._stat_hints:
+                self._stat_hints["gap"].configure(text="豁免后在产待处理 · 点击筛选")
             self._stat_labels["exempted"].configure(text="请选择店面", font=("Segoe UI", 11, "bold"))
         self._stat_labels["in_stock"].configure(text=str(s.get("in_stock_count", 0)))
         self._stat_labels["rate"].configure(text=pct(s.get("in_stock_rate")))
         self._stat_labels["total"].configure(text=str(s.get("total_non_discontinue", 0)))
-        self._stock_source_lbl.configure(
-            text=f"店面：{s.get('store', '-')}  |  库存来源：{s.get('stock_sources', '-')}"
-        )
+        stock_line = f"店面：{s.get('store', '-')}  |  库存来源：{s.get('stock_sources', '-')}"
+        if store_specific and s.get("in_stock_not_displayed_all") is not None:
+            stock_line += f"  |  含停产有货未展示 {s['in_stock_not_displayed_all']}"
+        self._stock_source_lbl.configure(text=stock_line)
         self._update_stat_card_highlight()
 
         filtered = self._apply_client_filters(self._cached_products)
