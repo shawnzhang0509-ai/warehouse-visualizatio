@@ -7,6 +7,7 @@
 """
 
 import io
+import os
 import sys
 import threading
 import urllib.request
@@ -27,12 +28,15 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.4.2"
+APP_VERSION = "1.4.3"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
 PLACEHOLDER_COLOR = "#d1d5db"
 SCROLL_UNITS = 8
+MAX_TREE_ROWS = 500
+FLAT_LIST_THRESHOLD = 80
+LOAD_IMAGES = os.getenv("PANEL_LOAD_IMAGES", "").lower() in ("1", "true", "yes")
 
 C_HEADER = "#1e4f8a"
 C_BG = "#f0f4f8"
@@ -128,6 +132,7 @@ class PanelApp:
         self.discontinue_filter_var = tk.StringVar(value="在产")
         self.group_sort_var = tk.StringVar(value="字母序")
         self.result_count_var = tk.StringVar(value="")
+        self._status_var = tk.StringVar(value="")
 
         self._region_labels = {r["key"]: r["label"] for r in regions}
         self._setup_styles()
@@ -216,6 +221,8 @@ class PanelApp:
 
         tk.Label(filter_bar, textvariable=self.result_count_var, bg="white", fg=C_MUTED,
                  font=("Segoe UI", 9)).grid(row=1, column=7, sticky="e", padx=(12, 0))
+        tk.Label(filter_bar, textvariable=self._status_var, bg="white", fg=C_CARD_GAP,
+                 font=("Segoe UI", 9)).grid(row=0, column=7, sticky="e", padx=(12, 0))
         filter_bar.columnconfigure(7, weight=1)
 
         cards = tk.Frame(self.root, bg=C_BG, padx=12, pady=8)
@@ -397,11 +404,12 @@ class PanelApp:
         return store != panel_data.ALL_STORES
 
     def _include_discontinued(self):
-        return self.discontinue_filter_var.get() != "在产"
+        """仅在「已停产」筛选时加载 1.3 万+ 停产 SKU；「全部」仍只用快路径在产数据。"""
+        return self.discontinue_filter_var.get() == "已停产"
 
     def _on_filter_combo_change(self):
         disc_f = self.discontinue_filter_var.get()
-        need_disc = disc_f != "在产"
+        need_disc = disc_f == "已停产"
         if need_disc != self._loaded_include_discontinued:
             if disc_f == "已停产":
                 if self.only_gap_var.get():
@@ -409,6 +417,7 @@ class PanelApp:
                 if self.only_exempted_var.get():
                     self.only_exempted_var.set(False)
                 self._quick_filter = None
+                self._status_var.set("正在加载停产数据，请稍候…")
             self.reload()
             return
         if disc_f == "已停产":
@@ -597,7 +606,7 @@ class PanelApp:
         threading.Thread(target=worker, daemon=True).start()
 
     def _load_visible_images(self):
-        if not self._tree:
+        if not LOAD_IMAGES or not self._tree:
             return
         token = self._render_token
         for iid in self._visible_iids()[:IMAGE_BATCH]:
@@ -637,6 +646,8 @@ class PanelApp:
                 f"在产 {len(active_nd)}（待处理 {pending_active}）"
                 f" · 停产 {len(disc_nd)} · 点击筛选"
             )
+            if not self._loaded_include_discontinued and disc_f == "全部":
+                hint += " · 列表仅在产，停产请切「已停产」"
         return {
             "main_count": len(not_displayed),
             "hint": hint,
@@ -644,7 +655,8 @@ class PanelApp:
             "exempted": len(exempted),
         }
 
-    def _show_loading_state(self):
+    def _show_loading_state(self, message="正在计算店面数据…"):
+        self._status_var.set(message)
         for key in ("gap", "exempted", "in_stock"):
             if key in self._stat_labels:
                 self._stat_labels[key].configure(text="…", font=("Segoe UI", 14))
@@ -830,21 +842,42 @@ class PanelApp:
             self.result_count_var.set(f"显示 {len(filtered)} / 停产 {disc_total} 条")
         elif disc_f == "在产":
             self.result_count_var.set(f"显示 {len(filtered)} / 在产 {active_total} 条")
-        else:
+        elif disc_f == "全部":
             self.result_count_var.set(
-                f"显示 {len(filtered)} / 共 {len(self._cached_products)} 条"
-                f"（在产 {active_total}，停产 {disc_total}）"
+                f"显示 {len(filtered)} / 在产 {active_total} 条"
+                + ("" if self._loaded_include_discontinued else "（停产请切「已停产」）")
             )
+        else:
+            self.result_count_var.set(f"显示 {len(filtered)} 条")
         if disc_f == "已停产" and len(filtered) == 0 and disc_total > 0:
             if self.stock_filter_var.get() == "有货":
                 self.result_count_var.set(
                     f"显示 0 / 停产 {disc_total} 条（可尝试将「库存」改为「全部」）"
                 )
+        self._status_var.set(f"正在渲染 {len(filtered)} 条…")
+        self.root.update_idletasks()
         self._render_tree(filtered)
         prefix_key = (s.get("region"), s.get("store"))
         if prefix_key != self._prefix_rendered_for:
-            self._render_prefix_table(store_specific)
-            self._prefix_rendered_for = prefix_key
+            self.root.after_idle(
+                lambda: self._render_prefix_table_deferred(prefix_key, store_specific)
+            )
+        else:
+            self._status_var.set(
+                f"就绪 · {len(filtered)} 条"
+                + ("" if LOAD_IMAGES else " · 图片已关（设 PANEL_LOAD_IMAGES=1 开启）")
+            )
+
+    def _render_prefix_table_deferred(self, prefix_key, store_specific):
+        if prefix_key != (self._cached_summary.get("region"), self._cached_summary.get("store")):
+            return
+        self._render_prefix_table(store_specific)
+        self._prefix_rendered_for = prefix_key
+        n = len(self._apply_client_filters(self._cached_products))
+        self._status_var.set(
+            f"就绪 · {n} 条"
+            + ("" if LOAD_IMAGES else " · 图片已关")
+        )
 
     def _prefix_row_tag(self, row, index):
         if row.get("gap_count", 0) > 0:
@@ -968,6 +1001,11 @@ class PanelApp:
             self._tree.delete(*self._tree.get_children())
         self._products_by_iid.clear()
         self._iid_to_url.clear()
+
+        if len(products) > FLAT_LIST_THRESHOLD:
+            self._render_tree_flat(products, render_token)
+            return
+
         grouped = self._group_products(products)
         store_specific = self._cached_summary.get(
             "store_specific", self._is_store_selected()
@@ -1015,6 +1053,31 @@ class PanelApp:
             self.root.after_idle(lambda: fill_batch(0))
         else:
             self._load_visible_images()
+
+    def _render_tree_flat(self, products, render_token):
+        """行数较多时用平铺列表，避免创建上千个分组节点卡死界面。"""
+        shown = products[:MAX_TREE_ROWS]
+        for idx, item in enumerate(shown):
+            if render_token != self._render_token:
+                return
+            iid = self._tree.insert(
+                "", tk.END, image=self._placeholder_photo, text="",
+                values=self._tree_row_values(item), tags=self._row_tag(item, idx),
+            )
+            self._products_by_iid[iid] = item
+            if item.get("image"):
+                self._iid_to_url[iid] = item["image"]
+        if len(products) > MAX_TREE_ROWS:
+            self._tree.insert(
+                "", tk.END, text="",
+                values=(
+                    "",
+                    f"… 还有 {len(products) - MAX_TREE_ROWS} 条未显示，请缩小筛选范围",
+                    "", "", "", "", "", "",
+                ),
+                tags=("group",),
+            )
+        self._load_visible_images()
 
     def run(self):
         self.root.mainloop()
