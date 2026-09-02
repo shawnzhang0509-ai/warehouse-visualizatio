@@ -402,6 +402,12 @@ def _resolve_blacklist_path(data_dir):
     return _find_region_data_file(data_dir, BLACKLIST_STEMS)
 
 
+def expected_blacklist_path(region=None):
+    """黑名单 Excel 默认放置路径（Output-{region}/blacklist.xlsx）。"""
+    region_key = str(region or default_region() or "NZ").strip().upper()
+    return _region_output_dir(region_key) / "blacklist.xlsx"
+
+
 def _load_region_bundle(region, force=False):
     """读取并缓存某地区的 stock/display 原始表（切换店面时复用，避免重复读 Excel）。"""
     region_key = str(region).strip().upper()
@@ -822,6 +828,9 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
             WAREHOUSE_LABELS.get(k, k) for k in _warehouses_for_store(store, region_key)
         ),
         "blacklist_count": len(blacklist),
+        "blacklist_path": blacklist_path,
+        "blacklist_file_found": bool(blacklist_path),
+        "blacklist_expected_path": str(expected_blacklist_path(region_key)),
     }
 
     products.sort(key=lambda p: (
@@ -864,6 +873,8 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         "display_path": str(display_path),
         "blacklist_path": blacklist_path,
         "blacklist_count": len(blacklist),
+        "blacklist_file_found": bool(blacklist_path),
+        "blacklist_expected_path": str(expected_blacklist_path(region_key)),
         "display_row_count": display_row_count,
         "stores": stores,
         "selected_store": store,

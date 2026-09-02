@@ -30,7 +30,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.4.4"
+APP_VERSION = "1.4.5"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -95,6 +95,7 @@ class PanelApp:
         self._filter_after_id = None
         self._cached_products = []
         self._cached_summary = {}
+        self._cached_blacklist_meta = {}
         self._products_cache = {}
         self._prefix_rendered_for = None
         self._lazy_groups = {}
@@ -262,6 +263,20 @@ class PanelApp:
 
         self._stock_source_lbl = tk.Label(cards, text="", bg=C_BG, fg=C_MUTED, font=("Segoe UI", 9))
         self._stock_source_lbl.pack(side=tk.RIGHT, padx=8)
+
+        info_row = tk.Frame(self.root, bg=C_BG, padx=12, pady=(0, 6))
+        info_row.pack(fill=tk.X)
+        self._blacklist_lbl = tk.Label(
+            info_row,
+            text="黑名单：加载中…",
+            bg=C_BG, fg=C_MUTED, font=("Segoe UI", 9), anchor="w", justify=tk.LEFT,
+        )
+        self._blacklist_lbl.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        tk.Label(
+            info_row,
+            text="黑名单文件列名：sku / 编码 / ProductCode",
+            bg=C_BG, fg="#94a3b8", font=("Segoe UI", 8),
+        ).pack(side=tk.RIGHT, padx=(8, 0))
 
         table_wrap = tk.Frame(self.root, bg="white")
         table_wrap.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
@@ -754,15 +769,42 @@ class PanelApp:
         self._products_by_iid.clear()
         self._iid_to_url.clear()
 
+    def _update_blacklist_label(self):
+        if not getattr(self, "_blacklist_lbl", None):
+            return
+        meta = self._cached_blacklist_meta or {}
+        s = self._cached_summary or {}
+        count = meta.get("blacklist_count", s.get("blacklist_count", 0))
+        region = self._current_region()
+        expected = Path(meta.get("blacklist_expected_path") or panel_data.expected_blacklist_path(region))
+        found = meta.get("blacklist_file_found", False)
+        path = meta.get("blacklist_path")
+        if found and path:
+            fname = Path(path).name
+            text = f"黑名单：已排除 {count} 个 SKU  |  文件：{fname}（{Path(path).parent.name}/）"
+            fg = C_CARD_GAP if count else C_MUTED
+        else:
+            text = (
+                f"黑名单：当前 0 个  |  未找到文件，可在以下路径新建 blacklist.xlsx：{expected}"
+            )
+            fg = C_MUTED
+        self._blacklist_lbl.configure(text=text, fg=fg)
+
     def _apply_loaded_data(self, data, region):
         self._cached_products = data["products"]
         self._cached_summary = data["summary"]
+        self._cached_blacklist_meta = {
+            "blacklist_count": data.get("blacklist_count", 0),
+            "blacklist_path": data.get("blacklist_path"),
+            "blacklist_file_found": data.get("blacklist_file_found", False),
+            "blacklist_expected_path": data.get(
+                "blacklist_expected_path", str(panel_data.expected_blacklist_path(region))
+            ),
+        }
         src = self._region_labels.get(region, region)
-        bl = data.get("blacklist_count", 0)
         src_line = f"数据源：{src}  |  {Path(data['stock_path']).name}"
-        if bl:
-            src_line += f"  |  黑名单 {bl} 个"
         self.source_var.set(src_line)
+        self._update_blacklist_label()
         self._prefix_rendered_for = None
         self._loaded_include_discontinued = self._include_discontinued()
         self._refresh_view()
@@ -919,8 +961,8 @@ class PanelApp:
         self._stat_labels["total"].configure(text=str(s.get("total_non_discontinue", 0)))
         self._stock_source_lbl.configure(
             text=f"店面：{s.get('store', '-')}  |  库存来源：{s.get('stock_sources', '-')}"
-            + (f"  |  已排除黑名单 {s['blacklist_count']} 个" if s.get("blacklist_count") else "")
         )
+        self._update_blacklist_label()
         self._update_stat_card_highlight()
 
         filtered = self._apply_client_filters(self._cached_products)
