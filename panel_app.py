@@ -526,8 +526,12 @@ class PanelApp:
             if err:
                 return
             self.store_combo.configure(values=stores)
+            default_store = next(
+                (s for s in stores if s != panel_data.ALL_STORES),
+                stores[0] if stores else panel_data.ALL_STORES,
+            )
             if self.store_var.get() not in stores:
-                self.store_var.set(stores[0] if stores else panel_data.ALL_STORES)
+                self.store_var.set(default_store)
             self.reload()
 
         self._run_bg(lambda: panel_data.list_stores(region), done)
