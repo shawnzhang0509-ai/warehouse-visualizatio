@@ -27,9 +27,9 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.3.7"
-ROW_HEIGHT = 58
-THUMB = (52, 52)
+APP_VERSION = "1.4.0"
+ROW_HEIGHT = 62
+THUMB = (56, 56)
 IMAGE_BATCH = 40
 PLACEHOLDER_COLOR = "#d1d5db"
 SCROLL_UNITS = 8
@@ -89,6 +89,8 @@ class PanelApp:
         self._filter_after_id = None
         self._cached_products = []
         self._cached_summary = {}
+        self._products_cache = {}
+        self._prefix_rendered_for = None
         self._sort_col = None
         self._sort_reverse = False
 
@@ -258,27 +260,28 @@ class PanelApp:
         columns = ("code", "name", "family", "price", "stock", "display", "discontinue", "status")
         self._tree = ttk.Treeview(inner, columns=columns, show="tree headings", selectmode="browse")
         self._tree.heading("#0", text="产品图")
-        self._tree.column("#0", width=64, minwidth=64, stretch=False, anchor="center")
+        self._tree.column("#0", width=72, minwidth=68, stretch=False, anchor="center")
         headings = {
-            "code": ("编码", 100), "name": ("名称", 200), "family": ("系列", 88),
-            "price": ("价格", 72), "stock": ("库存", 96), "display": ("展示", 56),
-            "discontinue": ("停产", 48), "status": ("状态", 132),
+            "code": ("编码", 104), "name": ("名称", 280), "family": ("系列", 92),
+            "price": ("价格", 76), "stock": ("库存", 108), "display": ("展示", 58),
+            "discontinue": ("停产", 52), "status": ("状态", 136),
         }
         for col, (text, width) in headings.items():
             self._tree.heading(col, text=text, command=lambda c=col: self._on_sort_column(c))
             anchor = "w" if col in ("code", "name", "family") else "center"
-            self._tree.column(col, width=width, minwidth=width, anchor=anchor, stretch=False)
+            stretch = col == "name"
+            min_w = 72 if col == "name" else width
+            self._tree.column(col, width=width, minwidth=min_w, anchor=anchor, stretch=stretch)
 
         for tag, bg in (("gap", C_ROW_GAP), ("exempted", C_ROW_EXEMPT), ("ok", C_ROW_OK),
                         ("alt", C_ROW_ALT), ("discontinued", C_ROW_DISC), ("group", "#e2e8f0")):
             self._tree.tag_configure(tag, background=bg)
+        self._tree.tag_configure("group", font=("Segoe UI", 10, "bold"))
 
         self._tree_vscroll = ttk.Scrollbar(inner, orient="vertical", command=self._on_tree_yscroll)
-        self._tree_hscroll = ttk.Scrollbar(inner, orient="horizontal", command=self._tree.xview)
-        self._tree.configure(yscrollcommand=self._tree_vscroll.set, xscrollcommand=self._tree_hscroll.set)
+        self._tree.configure(yscrollcommand=self._tree_vscroll.set)
         self._tree.grid(row=0, column=0, sticky="nsew")
         self._tree_vscroll.grid(row=0, column=1, sticky="ns")
-        self._tree_hscroll.grid(row=1, column=0, sticky="ew")
 
         # ── SKU 前三位汇总表 ──
         prefix_inner = tk.Frame(tab_prefix, bg="white")
@@ -490,6 +493,8 @@ class PanelApp:
     def _on_region_change(self):
         region = self._current_region()
         panel_data.clear_region_cache(region)
+        self._products_cache = {}
+        self._prefix_rendered_for = None
         self._set_controls_state(False)
         self._set_busy(True)
 
@@ -574,11 +579,87 @@ class PanelApp:
             if raw:
                 self._schedule_row_image(iid, raw, token)
 
+    def _disc_matches(self, product, disc_f):
+        if disc_f == "在产":
+            return not product.get("discontinued")
+        if disc_f == "已停产":
+            return bool(product.get("discontinued"))
+        return True
+
+    def _compute_gap_stats(self, products, disc_f):
+        not_displayed = [
+            p for p in products
+            if p.get("in_stock") and not p.get("displayed") and not p.get("exempted")
+            and self._disc_matches(p, disc_f)
+        ]
+        pending = [p for p in not_displayed if p.get("gap")]
+        exempted = [
+            p for p in products
+            if p.get("exempted") and p.get("in_stock") and not p.get("displayed")
+            and self._disc_matches(p, disc_f)
+        ]
+        active_nd = [p for p in not_displayed if not p.get("discontinued")]
+        disc_nd = [p for p in not_displayed if p.get("discontinued")]
+
+        if disc_f == "在产":
+            hint = f"待处理 {len(pending)} · 已豁免 {len(exempted)} · 点击筛选"
+        elif disc_f == "已停产":
+            hint = "停产有货未展示 · 点击筛选"
+        else:
+            pending_active = len([p for p in pending if not p.get("discontinued")])
+            hint = (
+                f"在产 {len(active_nd)}（待处理 {pending_active}）"
+                f" · 停产 {len(disc_nd)} · 点击筛选"
+            )
+        return {
+            "main_count": len(not_displayed),
+            "hint": hint,
+            "pending": len(pending),
+            "exempted": len(exempted),
+        }
+
+    def _apply_loaded_data(self, data, region):
+        self._cached_products = data["products"]
+        self._cached_summary = data["summary"]
+        src = self._region_labels.get(region, region)
+        self.source_var.set(f"数据源：{src}  |  {Path(data['stock_path']).name}")
+        self._prefix_rendered_for = None
+        self._refresh_view()
+
+    def _preload_other_stores(self, region, current_store):
+        stores = list(self.store_combo.cget("values") or [])
+        targets = [s for s in stores if s != current_store][:14]
+
+        def worker():
+            for store in targets:
+                key = (region, store)
+                if key in self._products_cache:
+                    continue
+                try:
+                    self._products_cache[key] = panel_data.build_products(
+                        store=store, only_gap=False, include_discontinued=True,
+                        region=region, force_refresh=False,
+                    )
+                except Exception:
+                    pass
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def reload(self, force=False):
         self._reload_token += 1
         token = self._reload_token
         region = self._current_region()
         store = self.store_var.get()
+        cache_key = (region, store)
+
+        if force:
+            self._products_cache = {k: v for k, v in self._products_cache.items() if k[0] != region}
+            panel_data.clear_region_cache(region)
+
+        if not force and cache_key in self._products_cache:
+            self._apply_loaded_data(self._products_cache[cache_key], region)
+            return
+
         self._set_controls_state(False)
         self._set_busy(True)
 
@@ -596,11 +677,9 @@ class PanelApp:
             if err:
                 self._stat_labels["gap"].configure(text="!")
                 return
-            self._cached_products = data["products"]
-            self._cached_summary = data["summary"]
-            src = self._region_labels.get(region, region)
-            self.source_var.set(f"数据源：{src}  |  {Path(data['stock_path']).name}")
-            self._refresh_view()
+            self._products_cache[cache_key] = data
+            self._apply_loaded_data(data, region)
+            self._preload_other_stores(region, store)
 
         self._run_bg(worker, done)
 
@@ -690,21 +769,23 @@ class PanelApp:
         s = self._cached_summary
 
         store_specific = s.get("store_specific", self._is_store_selected())
+        disc_f = self.discontinue_filter_var.get()
 
         def pct(v):
             return "-" if v is None else f"{v:.1f}%"
 
         if store_specific:
-            total_gap = s.get("in_stock_not_displayed_all", 0)
-            raw_gap = s.get("raw_gap_active_count", 0)
-            actionable = s.get("not_displayed_count", 0)
-            disc_gap = s.get("in_stock_not_displayed_discontinued", 0)
-            self._stat_labels["gap"].configure(text=str(total_gap), font=("Segoe UI", 18, "bold"))
+            gap_stats = self._compute_gap_stats(self._cached_products, disc_f)
+            self._stat_labels["gap"].configure(
+                text=str(gap_stats["main_count"]), font=("Segoe UI", 18, "bold"),
+            )
             if "gap" in self._stat_hints:
-                self._stat_hints["gap"].configure(
-                    text=f"在产 {raw_gap}（待处理 {actionable}）· 停产 {disc_gap} · 点击筛选"
-                )
-            self._stat_labels["exempted"].configure(text=str(s.get("exempted_count", 0)), font=("Segoe UI", 18, "bold"))
+                self._stat_hints["gap"].configure(text=gap_stats["hint"])
+            exempted_n = sum(
+                1 for p in self._cached_products
+                if p.get("exempted") and self._disc_matches(p, disc_f)
+            )
+            self._stat_labels["exempted"].configure(text=str(exempted_n), font=("Segoe UI", 18, "bold"))
         else:
             self._stat_labels["gap"].configure(text="请选择店面", font=("Segoe UI", 11, "bold"))
             if "gap" in self._stat_hints:
@@ -721,7 +802,6 @@ class PanelApp:
         filtered = self._apply_client_filters(self._cached_products)
         active_total = sum(1 for p in self._cached_products if not p.get("discontinued"))
         disc_total = sum(1 for p in self._cached_products if p.get("discontinued"))
-        disc_f = self.discontinue_filter_var.get()
         if disc_f == "已停产":
             self.result_count_var.set(f"显示 {len(filtered)} / 停产 {disc_total} 条")
         elif disc_f == "在产":
@@ -737,7 +817,10 @@ class PanelApp:
                     f"显示 0 / 停产 {disc_total} 条（可尝试将「库存」改为「全部」）"
                 )
         self._render_tree(filtered)
-        self._render_prefix_table(store_specific)
+        prefix_key = (s.get("region"), s.get("store"))
+        if prefix_key != self._prefix_rendered_for:
+            self._render_prefix_table(store_specific)
+            self._prefix_rendered_for = prefix_key
 
     def _prefix_row_tag(self, row, index):
         if row.get("gap_count", 0) > 0:
@@ -839,43 +922,55 @@ class PanelApp:
         self._products_by_iid.clear()
         self._iid_to_url.clear()
         grouped = self._group_products(products)
+        store_specific = self._cached_summary.get(
+            "store_specific", self._is_store_selected()
+        )
 
-        def fill():
+        def insert_group(family_label, items):
+            gap_n = sum(1 for i in items if i.get("gap"))
+            exempt_n = sum(1 for i in items if i.get("exempted"))
+            disc_n = sum(1 for i in items if i.get("discontinued"))
+            summary = f"（{len(items)} 个"
+            if store_specific:
+                stock_total = int(self._group_stock_total(items))
+                summary += f"，库存合计 {stock_total}"
+            if gap_n:
+                summary += f"，{gap_n} 待处理"
+            if exempt_n:
+                summary += f"，{exempt_n} 已豁免"
+            if disc_n:
+                summary += f"，{disc_n} 停产"
+            summary += "）"
+            parent = self._tree.insert(
+                "", tk.END, text="",
+                values=("", f"{family_label} {summary}", "", "", "", "", "", ""),
+                tags=("group",), open=True,
+            )
+            for idx, item in enumerate(items):
+                iid = self._tree.insert(
+                    parent, tk.END, image=self._placeholder_photo, text="",
+                    values=self._tree_row_values(item), tags=self._row_tag(item, idx),
+                )
+                self._products_by_iid[iid] = item
+                if item.get("image"):
+                    self._iid_to_url[iid] = item["image"]
+            return parent
+
+        def fill_batch(start=0):
             if render_token != self._render_token:
                 return
-            for family_label, items in grouped:
-                gap_n = sum(1 for i in items if i.get("gap"))
-                exempt_n = sum(1 for i in items if i.get("exempted"))
-                disc_n = sum(1 for i in items if i.get("discontinued"))
-                store_specific = self._cached_summary.get(
-                    "store_specific", self._is_store_selected()
-                )
-                summary = f"（{len(items)} 个"
-                if store_specific:
-                    stock_total = int(self._group_stock_total(items))
-                    summary += f"，库存合计 {stock_total}"
-                if gap_n:
-                    summary += f"，{gap_n} 待处理"
-                if exempt_n:
-                    summary += f"，{exempt_n} 已豁免"
-                if disc_n:
-                    summary += f"，{disc_n} 停产"
-                summary += "）"
-                parent = self._tree.insert(
-                    "", tk.END, text=f"{family_label} {summary}",
-                    values=("", "", "", "", "", "", "", ""), tags=("group",), open=True,
-                )
-                for idx, item in enumerate(items):
-                    iid = self._tree.insert(
-                        parent, tk.END, image=self._placeholder_photo, text="",
-                        values=self._tree_row_values(item), tags=self._row_tag(item, idx),
-                    )
-                    self._products_by_iid[iid] = item
-                    if item.get("image"):
-                        self._iid_to_url[iid] = item["image"]
-            self._load_visible_images()
+            end = min(start + 12, len(grouped))
+            for family_label, items in grouped[start:end]:
+                insert_group(family_label, items)
+            if end < len(grouped):
+                self.root.after(1, lambda: fill_batch(end))
+            else:
+                self._load_visible_images()
 
-        self.root.after_idle(fill)
+        if grouped:
+            self.root.after_idle(lambda: fill_batch(0))
+        else:
+            self._load_visible_images()
 
     def run(self):
         self.root.mainloop()
