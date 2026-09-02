@@ -27,7 +27,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.4.1"
+APP_VERSION = "1.4.2"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -91,6 +91,8 @@ class PanelApp:
         self._cached_summary = {}
         self._products_cache = {}
         self._prefix_rendered_for = None
+        self._lazy_groups = {}
+        self._loaded_include_discontinued = False
         self._sort_col = None
         self._sort_reverse = False
 
@@ -112,7 +114,11 @@ class PanelApp:
         default_region = panel_data.default_region()
         stores = panel_data.list_stores(default_region)
 
-        self.store_var = tk.StringVar(value=panel_data.ALL_STORES)
+        default_store = next(
+            (s for s in stores if s != panel_data.ALL_STORES),
+            stores[0] if stores else panel_data.ALL_STORES,
+        )
+        self.store_var = tk.StringVar(value=default_store)
         self.only_gap_var = tk.BooleanVar(value=False)
         self.only_exempted_var = tk.BooleanVar(value=False)
         self.source_var = tk.StringVar(value="")
@@ -282,6 +288,7 @@ class PanelApp:
         self._tree.configure(yscrollcommand=self._tree_vscroll.set)
         self._tree.grid(row=0, column=0, sticky="nsew")
         self._tree_vscroll.grid(row=0, column=1, sticky="ns")
+        self._tree.bind("<<TreeviewOpen>>", self._on_tree_group_open)
 
         # ── SKU 前三位汇总表 ──
         prefix_inner = tk.Frame(tab_prefix, bg="white")
@@ -386,10 +393,25 @@ class PanelApp:
         return seen
 
     def _is_store_selected(self):
-        return self.store_var.get() != panel_data.ALL_STORES
+        store = self.store_combo.get() if self.store_combo else self.store_var.get()
+        return store != panel_data.ALL_STORES
+
+    def _include_discontinued(self):
+        return self.discontinue_filter_var.get() != "在产"
 
     def _on_filter_combo_change(self):
-        if self.discontinue_filter_var.get() == "已停产":
+        disc_f = self.discontinue_filter_var.get()
+        need_disc = disc_f != "在产"
+        if need_disc != self._loaded_include_discontinued:
+            if disc_f == "已停产":
+                if self.only_gap_var.get():
+                    self.only_gap_var.set(False)
+                if self.only_exempted_var.get():
+                    self.only_exempted_var.set(False)
+                self._quick_filter = None
+            self.reload()
+            return
+        if disc_f == "已停产":
             if self.only_gap_var.get():
                 self.only_gap_var.set(False)
             if self.only_exempted_var.get():
@@ -618,6 +640,16 @@ class PanelApp:
             "exempted": len(exempted),
         }
 
+    def _show_loading_state(self):
+        for key in ("gap", "exempted", "in_stock"):
+            if key in self._stat_labels:
+                self._stat_labels[key].configure(text="…", font=("Segoe UI", 14))
+        self._lazy_groups.clear()
+        if self._tree and self._tree.get_children():
+            self._tree.delete(*self._tree.get_children())
+        self._products_by_iid.clear()
+        self._iid_to_url.clear()
+
     def _apply_loaded_data(self, data, region):
         self._cached_products = data["products"]
         self._cached_summary = data["summary"]
@@ -628,48 +660,32 @@ class PanelApp:
             src_line += f"  |  黑名单 {bl} 个"
         self.source_var.set(src_line)
         self._prefix_rendered_for = None
+        self._loaded_include_discontinued = self._include_discontinued()
         self._refresh_view()
-
-    def _preload_other_stores(self, region, current_store):
-        stores = list(self.store_combo.cget("values") or [])
-        targets = [s for s in stores if s != current_store][:14]
-
-        def worker():
-            for store in targets:
-                key = (region, store)
-                if key in self._products_cache:
-                    continue
-                try:
-                    self._products_cache[key] = panel_data.build_products(
-                        store=store, only_gap=False, include_discontinued=True,
-                        region=region, force_refresh=False,
-                    )
-                except Exception:
-                    pass
-
-        threading.Thread(target=worker, daemon=True).start()
 
     def reload(self, force=False):
         self._reload_token += 1
         token = self._reload_token
         region = self._current_region()
-        store = self.store_var.get()
-        cache_key = (region, store)
+        store = self.store_combo.get() if self.store_combo else self.store_var.get()
+        include_disc = self._include_discontinued()
+        cache_key = (region, store, include_disc)
 
         if force:
-            self._products_cache = {k: v for k, v in self._products_cache.items() if k[0] != region}
+            self._products_cache = {}
             panel_data.clear_region_cache(region)
 
         if not force and cache_key in self._products_cache:
             self._apply_loaded_data(self._products_cache[cache_key], region)
             return
 
+        self._show_loading_state()
         self._set_controls_state(False)
         self._set_busy(True)
 
         def worker():
             return panel_data.build_products(
-                store=store, only_gap=False, include_discontinued=True,
+                store=store, only_gap=False, include_discontinued=include_disc,
                 region=region, force_refresh=force,
             )
 
@@ -683,7 +699,6 @@ class PanelApp:
                 return
             self._products_cache[cache_key] = data
             self._apply_loaded_data(data, region)
-            self._preload_other_stores(region, store)
 
         self._run_bg(worker, done)
 
@@ -919,9 +934,32 @@ class PanelApp:
             price, stock, displayed, discontinue, status,
         )
 
+    def _insert_group_children(self, parent, items, render_token):
+        if render_token != self._render_token:
+            return
+        for idx, item in enumerate(items):
+            iid = self._tree.insert(
+                parent, tk.END, image=self._placeholder_photo, text="",
+                values=self._tree_row_values(item), tags=self._row_tag(item, idx),
+            )
+            self._products_by_iid[iid] = item
+            if item.get("image"):
+                self._iid_to_url[iid] = item["image"]
+
+    def _on_tree_group_open(self, _event=None):
+        if not self._tree:
+            return
+        iid = self._tree.focus()
+        if not iid or iid not in self._lazy_groups:
+            return
+        items, render_token = self._lazy_groups.pop(iid)
+        self._insert_group_children(iid, items, render_token)
+        self._debounce_visible_images()
+
     def _render_tree(self, products):
         self._render_token += 1
         render_token = self._render_token
+        self._lazy_groups.clear()
         if self._tree.get_children():
             self._tree.delete(*self._tree.get_children())
         self._products_by_iid.clear()
@@ -946,29 +984,26 @@ class PanelApp:
             if disc_n:
                 summary += f"，{disc_n} 停产"
             summary += "）"
+            has_attention = any(i.get("gap") or i.get("exempted") for i in items)
             parent = self._tree.insert(
                 "", tk.END, text="",
                 values=("", f"{family_label} {summary}", "", "", "", "", "", ""),
-                tags=("group",), open=True,
+                tags=("group",), open=has_attention,
             )
-            for idx, item in enumerate(items):
-                iid = self._tree.insert(
-                    parent, tk.END, image=self._placeholder_photo, text="",
-                    values=self._tree_row_values(item), tags=self._row_tag(item, idx),
-                )
-                self._products_by_iid[iid] = item
-                if item.get("image"):
-                    self._iid_to_url[iid] = item["image"]
+            if has_attention:
+                self._insert_group_children(parent, items, render_token)
+            else:
+                self._lazy_groups[parent] = (items, render_token)
             return parent
 
         def fill_batch(start=0):
             if render_token != self._render_token:
                 return
-            end = min(start + 12, len(grouped))
+            end = min(start + 40, len(grouped))
             for family_label, items in grouped[start:end]:
                 insert_group(family_label, items)
             if end < len(grouped):
-                self.root.after(1, lambda: fill_batch(end))
+                self.root.after(1, lambda s=end: fill_batch(s))
             else:
                 self._load_visible_images()
 

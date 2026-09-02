@@ -70,6 +70,8 @@ DEFAULT_ALL_WAREHOUSES = ("carbine", "walls", "geraldconnelly")
 
 # region_key -> cached bundle (invalidated when file mtime changes)
 _REGION_CACHE = {}
+_STORE_VIEW_CACHE = {}
+_EXEMPTION_CONFIG_CACHE = None
 
 
 def _pick(row, keys):
@@ -375,8 +377,13 @@ def default_region():
 def clear_region_cache(region=None):
     if region is None:
         _REGION_CACHE.clear()
+        _STORE_VIEW_CACHE.clear()
         return
-    _REGION_CACHE.pop(str(region).strip().upper(), None)
+    region_key = str(region).strip().upper()
+    _REGION_CACHE.pop(region_key, None)
+    for key in list(_STORE_VIEW_CACHE):
+        if key[0] == region_key:
+            _STORE_VIEW_CACHE.pop(key, None)
 
 
 def _load_blacklist(path):
@@ -514,14 +521,19 @@ def _load_display(rows):
 
 
 def _load_exemption_config():
+    global _EXEMPTION_CONFIG_CACHE
+    if _EXEMPTION_CONFIG_CACHE is not None:
+        return _EXEMPTION_CONFIG_CACHE
     if not EXEMPTION_CONFIG_FILE.is_file():
-        return {"auto_by_family": True, "groups": []}
+        _EXEMPTION_CONFIG_CACHE = {"auto_by_family": True, "groups": []}
+        return _EXEMPTION_CONFIG_CACHE
     try:
         with EXEMPTION_CONFIG_FILE.open("r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {"auto_by_family": True, "groups": []}
+        _EXEMPTION_CONFIG_CACHE = data if isinstance(data, dict) else {"auto_by_family": True, "groups": []}
     except Exception:
-        return {"auto_by_family": True, "groups": []}
+        _EXEMPTION_CONFIG_CACHE = {"auto_by_family": True, "groups": []}
+    return _EXEMPTION_CONFIG_CACHE
 
 
 def _norm_group_token(text):
@@ -705,6 +717,22 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         raise ValueError("region_runner_config.json 中未配置任何地区。")
 
     bundle = _load_region_bundle(region_key, force=force_refresh)
+    view_key = (
+        region_key,
+        store or ALL_STORES,
+        bool(include_discontinued),
+        bundle.get("stock_mtime"),
+        bundle.get("display_mtime"),
+        bundle.get("blacklist_mtime"),
+    )
+    if not force_refresh and view_key in _STORE_VIEW_CACHE:
+        cached = _STORE_VIEW_CACHE[view_key]
+        if only_gap:
+            out = dict(cached)
+            out["products"] = [p for p in cached["products"] if p["gap"]]
+            return out
+        return cached
+
     stock_rows = bundle["stock_rows"]
     by_store = bundle["by_store"]
     stock_path = bundle["stock_path"]
@@ -728,6 +756,8 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
     for p in stock_rows:
         if _norm_code(p["code"]) in blacklist:
             continue
+        if not include_discontinued and p.get("discontinued"):
+            continue
         item = _apply_store_stock(p, store, region_key)
         displayed = _norm_code(item["code"]) in displayed_codes
         if store_specific:
@@ -742,10 +772,11 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         store_display_details = bundle.get("display_details", {}).get(store, {})
         exempted_count = _apply_family_exemptions(products, store_display_details)
     else:
+        config = _load_exemption_config()
         for p in products:
             p["exempted"] = False
             p["exemption_reason"] = ""
-            gkey, glabel = _resolve_exemption_group(p, _load_exemption_config())
+            gkey, glabel = _resolve_exemption_group(p, config)
             p["exemption_group"] = gkey
             p["exemption_group_label"] = glabel
         exempted_count = 0
@@ -793,12 +824,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         "blacklist_count": len(blacklist),
     }
 
-    view = products
-    if not include_discontinued:
-        view = [p for p in view if not p["discontinued"]]
-    if only_gap:
-        view = [p for p in view if p["gap"]]
-    view.sort(key=lambda p: (
+    products.sort(key=lambda p: (
         p.get("exemption_group_label") or p.get("family") or "未分类",
         not p["gap"],
         not p.get("exempted"),
@@ -831,7 +857,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
             "message": "展示数据未包含有效店面，店面下拉只会显示「全部店面」。",
         })
 
-    return {
+    result = {
         "source": source,
         "region": region_key,
         "stock_path": str(stock_path),
@@ -842,10 +868,16 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         "stores": stores,
         "selected_store": store,
         "summary": summary,
-        "products": view,
+        "products": products,
         "regions": list_regions(),
         "diagnostics": diagnostics,
     }
+    _STORE_VIEW_CACHE[view_key] = result
+    if only_gap:
+        out = dict(result)
+        out["products"] = [p for p in products if p["gap"]]
+        return out
+    return result
 
 
 if __name__ == "__main__":
