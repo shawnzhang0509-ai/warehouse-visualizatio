@@ -30,7 +30,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.4.5"
+APP_VERSION = "1.4.6"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -264,8 +264,8 @@ class PanelApp:
         self._stock_source_lbl = tk.Label(cards, text="", bg=C_BG, fg=C_MUTED, font=("Segoe UI", 9))
         self._stock_source_lbl.pack(side=tk.RIGHT, padx=8)
 
-        info_row = tk.Frame(self.root, bg=C_BG, padx=12, pady=(0, 6))
-        info_row.pack(fill=tk.X)
+        info_row = tk.Frame(self.root, bg=C_BG)
+        info_row.pack(fill=tk.X, padx=12, pady=(0, 6))
         self._blacklist_lbl = tk.Label(
             info_row,
             text="黑名单：加载中…",
