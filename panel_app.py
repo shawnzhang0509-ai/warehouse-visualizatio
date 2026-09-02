@@ -27,7 +27,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.4.0"
+APP_VERSION = "1.4.1"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -622,7 +622,11 @@ class PanelApp:
         self._cached_products = data["products"]
         self._cached_summary = data["summary"]
         src = self._region_labels.get(region, region)
-        self.source_var.set(f"数据源：{src}  |  {Path(data['stock_path']).name}")
+        bl = data.get("blacklist_count", 0)
+        src_line = f"数据源：{src}  |  {Path(data['stock_path']).name}"
+        if bl:
+            src_line += f"  |  黑名单 {bl} 个"
+        self.source_var.set(src_line)
         self._prefix_rendered_for = None
         self._refresh_view()
 
@@ -796,6 +800,7 @@ class PanelApp:
         self._stat_labels["total"].configure(text=str(s.get("total_non_discontinue", 0)))
         self._stock_source_lbl.configure(
             text=f"店面：{s.get('store', '-')}  |  库存来源：{s.get('stock_sources', '-')}"
+            + (f"  |  已排除黑名单 {s['blacklist_count']} 个" if s.get("blacklist_count") else "")
         )
         self._update_stat_card_highlight()
 

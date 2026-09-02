@@ -30,6 +30,8 @@ IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
 CODE_KEYS = ["productcode", "product_code", "sku", "itemcode", "item_code",
              "code", "productid", "product_id", "product", "item"]
+BLACKLIST_STEMS = ["blacklist", "sku_blacklist", "black_list", "product_blacklist"]
+BLACKLIST_KEYS = ["sku", "blacklist", "blacklistsku"] + CODE_KEYS
 NAME_KEYS = ["productname", "product_name", "name", "description", "desc", "title"]
 FAMILY_KEYS = ["family", "productfamily", "product_family", "category",
                "categoryname", "category_name", "group", "producttype", "type",
@@ -377,12 +379,30 @@ def clear_region_cache(region=None):
     _REGION_CACHE.pop(str(region).strip().upper(), None)
 
 
+def _load_blacklist(path):
+    """读取黑名单 SKU 集合（列名 sku / 编码 / ProductCode 等均可）。"""
+    codes = set()
+    if not path or not Path(path).is_file():
+        return codes
+    for row in _read_table(path):
+        code = _pick(row, BLACKLIST_KEYS)
+        if code:
+            codes.add(_norm_code(code))
+    return codes
+
+
+def _resolve_blacklist_path(data_dir):
+    return _find_region_data_file(data_dir, BLACKLIST_STEMS)
+
+
 def _load_region_bundle(region, force=False):
     """读取并缓存某地区的 stock/display 原始表（切换店面时复用，避免重复读 Excel）。"""
     region_key = str(region).strip().upper()
     stock_path, display_path, source, data_dir = resolve_sources(region_key)
     stock_mtime = _file_mtime(stock_path)
     display_mtime = _file_mtime(display_path)
+    blacklist_path = _resolve_blacklist_path(data_dir)
+    blacklist_mtime = _file_mtime(blacklist_path) if blacklist_path else None
 
     cached = _REGION_CACHE.get(region_key)
     if (
@@ -390,6 +410,7 @@ def _load_region_bundle(region, force=False):
         and cached
         and cached["stock_mtime"] == stock_mtime
         and cached["display_mtime"] == display_mtime
+        and cached.get("blacklist_mtime") == blacklist_mtime
     ):
         return cached
 
@@ -400,14 +421,18 @@ def _load_region_bundle(region, force=False):
 
     display_rows = _read_table(display_path)
     by_store, display_details = _load_display(display_rows)
+    blacklist = _load_blacklist(blacklist_path)
     bundle = {
         "region": region_key,
         "stock_path": stock_path,
         "display_path": display_path,
+        "blacklist_path": str(blacklist_path) if blacklist_path else None,
+        "blacklist": blacklist,
         "source": source,
         "data_dir": data_dir,
         "stock_mtime": stock_mtime,
         "display_mtime": display_mtime,
+        "blacklist_mtime": blacklist_mtime,
         "stock_rows": _load_stock(_read_table(stock_path), data_dir),
         "by_store": by_store,
         "display_details": display_details,
@@ -685,6 +710,8 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
     stock_path = bundle["stock_path"]
     display_path = bundle["display_path"]
     source = bundle["source"]
+    blacklist = bundle.get("blacklist") or set()
+    blacklist_path = bundle.get("blacklist_path")
 
     stores = [ALL_STORES] + sorted(by_store.keys())
     if store is None:
@@ -699,6 +726,8 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
 
     products = []
     for p in stock_rows:
+        if _norm_code(p["code"]) in blacklist:
+            continue
         item = _apply_store_stock(p, store, region_key)
         displayed = _norm_code(item["code"]) in displayed_codes
         if store_specific:
@@ -761,6 +790,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         "stock_sources": " + ".join(
             WAREHOUSE_LABELS.get(k, k) for k in _warehouses_for_store(store, region_key)
         ),
+        "blacklist_count": len(blacklist),
     }
 
     view = products
@@ -806,6 +836,8 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         "region": region_key,
         "stock_path": str(stock_path),
         "display_path": str(display_path),
+        "blacklist_path": blacklist_path,
+        "blacklist_count": len(blacklist),
         "display_row_count": display_row_count,
         "stores": stores,
         "selected_store": store,
