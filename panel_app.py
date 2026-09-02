@@ -11,16 +11,18 @@ import os
 import sys
 import threading
 import urllib.request
+import webbrowser
 from pathlib import Path
 
 import panel_data
 
 try:
     import tkinter as tk
-    from tkinter import ttk
+    from tkinter import ttk, messagebox
 except Exception:
     tk = None
     ttk = None
+    messagebox = None
 
 try:
     from PIL import Image, ImageTk
@@ -28,7 +30,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.4.3"
+APP_VERSION = "1.4.4"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -130,7 +132,8 @@ class PanelApp:
         self.stock_filter_var = tk.StringVar(value="全部")
         self.display_filter_var = tk.StringVar(value="全部")
         self.discontinue_filter_var = tk.StringVar(value="在产")
-        self.group_sort_var = tk.StringVar(value="字母序")
+        self.group_sort_var = tk.StringVar(value="库存总数多到少")
+        self.load_images_var = tk.BooleanVar(value=False)
         self.result_count_var = tk.StringVar(value="")
         self._status_var = tk.StringVar(value="")
 
@@ -192,7 +195,10 @@ class PanelApp:
 
         self.reload_btn = ttk.Button(toolbar, text="刷新数据", style="Tool.TButton",
                                      command=lambda: self.reload(force=True))
-        self.reload_btn.grid(row=1, column=2, sticky="w", pady=(2, 0))
+        self.reload_btn.grid(row=1, column=2, sticky="w", padx=(0, 8), pady=(2, 0))
+        self.view_img_btn = ttk.Button(toolbar, text="查看图片", style="Tool.TButton",
+                                       command=self._open_selected_image)
+        self.view_img_btn.grid(row=1, column=3, sticky="w", pady=(2, 0))
 
         filter_bar = tk.Frame(self.root, bg="white", padx=14, pady=8)
         filter_bar.pack(fill=tk.X, padx=12, pady=(6, 0))
@@ -218,12 +224,14 @@ class PanelApp:
                         command=self._on_only_gap_toggle).grid(row=1, column=5, sticky="w", padx=(4, 0))
         ttk.Checkbutton(filter_bar, text="只看同组豁免", variable=self.only_exempted_var,
                         command=self._on_only_exempted_toggle).grid(row=1, column=6, sticky="w", padx=(8, 0))
+        ttk.Checkbutton(filter_bar, text="行内缩略图", variable=self.load_images_var,
+                        command=self._on_toggle_inline_images).grid(row=1, column=7, sticky="w", padx=(8, 0))
 
         tk.Label(filter_bar, textvariable=self.result_count_var, bg="white", fg=C_MUTED,
-                 font=("Segoe UI", 9)).grid(row=1, column=7, sticky="e", padx=(12, 0))
+                 font=("Segoe UI", 9)).grid(row=1, column=8, sticky="e", padx=(12, 0))
         tk.Label(filter_bar, textvariable=self._status_var, bg="white", fg=C_CARD_GAP,
-                 font=("Segoe UI", 9)).grid(row=0, column=7, sticky="e", padx=(12, 0))
-        filter_bar.columnconfigure(7, weight=1)
+                 font=("Segoe UI", 9)).grid(row=0, column=8, sticky="e", padx=(12, 0))
+        filter_bar.columnconfigure(8, weight=1)
 
         cards = tk.Frame(self.root, bg=C_BG, padx=12, pady=8)
         cards.pack(fill=tk.X)
@@ -296,6 +304,7 @@ class PanelApp:
         self._tree.grid(row=0, column=0, sticky="nsew")
         self._tree_vscroll.grid(row=0, column=1, sticky="ns")
         self._tree.bind("<<TreeviewOpen>>", self._on_tree_group_open)
+        self._tree.bind("<Double-1>", self._on_tree_double_click)
 
         # ── SKU 前三位汇总表 ──
         prefix_inner = tk.Frame(tab_prefix, bg="white")
@@ -605,8 +614,87 @@ class PanelApp:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _images_enabled(self):
+        return self.load_images_var.get() or LOAD_IMAGES
+
+    def _on_toggle_inline_images(self):
+        if self._images_enabled():
+            self._load_visible_images()
+        elif self._tree:
+            for iid in self._products_by_iid:
+                if self._tree.exists(iid):
+                    self._tree.item(iid, image=self._placeholder_photo)
+
+    def _open_selected_image(self):
+        if not self._tree or messagebox is None:
+            return
+        sel = self._tree.selection()
+        if not sel:
+            messagebox.showinfo("查看图片", "请先选中一行产品（可双击分组展开）。")
+            return
+        iid = sel[0]
+        if iid in self._lazy_groups:
+            self._populate_lazy_group(iid)
+            messagebox.showinfo("查看图片", "已展开分组，请再选中具体产品行。")
+            return
+        item = self._products_by_iid.get(iid)
+        if not item:
+            messagebox.showinfo("查看图片", "请选中具体产品行，不要选分组标题。")
+            return
+        self._open_image_for_item(item)
+
+    def _open_image_for_item(self, item):
+        if messagebox is None:
+            return
+        raw = item.get("image")
+        code = item.get("code") or "产品"
+        if not raw:
+            messagebox.showinfo("查看图片", f"{code} 没有图片路径/URL。")
+            return
+        text = str(raw).strip()
+        if text.lower().startswith(("http://", "https://")):
+            webbrowser.open(panel_data.normalize_url(text))
+            return
+        path = Path(text)
+        if not path.is_absolute():
+            path = Path(panel_data.ROOT_DIR) / path
+        if path.is_file():
+            if Image is not None and ImageTk is not None:
+                self._show_image_window(path, code)
+            else:
+                webbrowser.open(path.as_uri())
+            return
+        messagebox.showinfo("查看图片", f"找不到图片文件：\n{text}")
+
+    def _show_image_window(self, path, title):
+        win = tk.Toplevel(self.root)
+        win.title(f"{title} - 产品图")
+        win.transient(self.root)
+        try:
+            im = Image.open(path)
+            im.thumbnail((720, 720))
+            photo = ImageTk.PhotoImage(im)
+            lbl = tk.Label(win, image=photo)
+            lbl.image = photo
+            lbl.pack(padx=8, pady=8)
+        except Exception as exc:
+            tk.Label(win, text=f"无法打开图片：{exc}").pack(padx=12, pady=12)
+
+    def _on_tree_double_click(self, event):
+        if not self._tree:
+            return
+        iid = self._tree.identify_row(event.y)
+        if not iid:
+            return
+        if iid in self._lazy_groups:
+            self._populate_lazy_group(iid)
+            return
+        item = self._products_by_iid.get(iid)
+        if item:
+            self._open_image_for_item(item)
+
     def _load_visible_images(self):
-        if not LOAD_IMAGES or not self._tree:
+        if not self._images_enabled() or not self._tree:
             return
         token = self._render_token
         for iid in self._visible_iids()[:IMAGE_BATCH]:
@@ -865,7 +953,7 @@ class PanelApp:
         else:
             self._status_var.set(
                 f"就绪 · {len(filtered)} 条"
-                + ("" if LOAD_IMAGES else " · 图片已关（设 PANEL_LOAD_IMAGES=1 开启）")
+                + ("" if self._images_enabled() else " · 双击行或点「查看图片」")
             )
 
     def _render_prefix_table_deferred(self, prefix_key, store_specific):
@@ -876,7 +964,7 @@ class PanelApp:
         n = len(self._apply_client_filters(self._cached_products))
         self._status_var.set(
             f"就绪 · {n} 条"
-            + ("" if LOAD_IMAGES else " · 图片已关")
+            + ("" if self._images_enabled() else " · 可点「查看图片」")
         )
 
     def _prefix_row_tag(self, row, index):
@@ -983,15 +1071,19 @@ class PanelApp:
             if item.get("image"):
                 self._iid_to_url[iid] = item["image"]
 
-    def _on_tree_group_open(self, _event=None):
-        if not self._tree:
-            return
-        iid = self._tree.focus()
-        if not iid or iid not in self._lazy_groups:
+    def _populate_lazy_group(self, iid):
+        if iid not in self._lazy_groups:
             return
         items, render_token = self._lazy_groups.pop(iid)
         self._insert_group_children(iid, items, render_token)
         self._debounce_visible_images()
+
+    def _on_tree_group_open(self, _event=None):
+        if not self._tree:
+            return
+        for iid in list(self._lazy_groups):
+            if self._tree.exists(iid) and self._tree.item(iid, "open"):
+                self._populate_lazy_group(iid)
 
     def _render_tree(self, products):
         self._render_token += 1
@@ -1027,12 +1119,14 @@ class PanelApp:
                 summary += f"，{disc_n} 停产"
             summary += "）"
             has_attention = any(i.get("gap") or i.get("exempted") for i in items)
+            expand_now = has_attention or len(products) <= FLAT_LIST_THRESHOLD
+            label_text = f"{'▸ ' if not expand_now else ''}{family_label} {summary}"
             parent = self._tree.insert(
                 "", tk.END, text="",
-                values=("", f"{family_label} {summary}", "", "", "", "", "", ""),
-                tags=("group",), open=has_attention,
+                values=("", label_text, "", "", "", "", "", ""),
+                tags=("group",), open=expand_now,
             )
-            if has_attention:
+            if expand_now:
                 self._insert_group_children(parent, items, render_token)
             else:
                 self._lazy_groups[parent] = (items, render_token)
