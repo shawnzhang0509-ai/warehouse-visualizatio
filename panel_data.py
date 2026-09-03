@@ -253,12 +253,12 @@ def normalize_url(url):
 
 
 def _find_data_file(directory, stems):
-    """在目录里按候选文件名找 stock/display（优先 xlsx，其次 csv）。"""
+    """在目录里按候选文件名找 stock/display（看板优先 csv，解析更快）。"""
     base = Path(directory)
     if not base.is_dir():
         return None
     for stem in stems:
-        for ext in (".xlsx", ".csv"):
+        for ext in (".csv", ".xlsx"):
             candidate = base / f"{stem}{ext}"
             if candidate.is_file():
                 return candidate
@@ -435,6 +435,8 @@ def _load_region_bundle(region, force=False):
     display_rows = _read_table(display_path)
     by_store, display_details = _load_display(display_rows)
     blacklist = _load_blacklist(blacklist_path)
+    stock_rows = _load_stock(_read_table(stock_path), data_dir)
+    active_rows, discontinued_rows = _split_stock_rows(stock_rows)
     bundle = {
         "region": region_key,
         "stock_path": stock_path,
@@ -446,7 +448,9 @@ def _load_region_bundle(region, force=False):
         "stock_mtime": stock_mtime,
         "display_mtime": display_mtime,
         "blacklist_mtime": blacklist_mtime,
-        "stock_rows": _load_stock(_read_table(stock_path), data_dir),
+        "stock_rows": stock_rows,
+        "stock_rows_active": active_rows,
+        "stock_rows_discontinued": discontinued_rows,
         "by_store": by_store,
         "display_details": display_details,
         "display_row_count": len(display_rows),
@@ -455,7 +459,7 @@ def _load_region_bundle(region, force=False):
     return bundle
 
 
-def _resolve_image(raw, code, data_dir):
+def _resolve_image(raw, code, data_dir, scan_dir=True):
     """把图片列的值解析成可用路径/URL；也支持按产品编码自动找本地图。"""
     if raw:
         text = str(raw).strip()
@@ -467,6 +471,9 @@ def _resolve_image(raw, code, data_dir):
         if p.is_file():
             return str(p)
 
+    if not scan_dir:
+        return None
+
     images_dir = Path(data_dir) / "images"
     if images_dir.is_dir():
         for stem in (str(code).strip(), str(code).strip().upper(), str(code).strip().lower()):
@@ -475,6 +482,17 @@ def _resolve_image(raw, code, data_dir):
                 if candidate.is_file():
                     return str(candidate)
     return None
+
+
+def resolve_product_image(product, data_dir):
+    """按需解析产品图（避免启动时对上万 SKU 扫描 images 目录）。"""
+    if product.get("_image_resolved"):
+        return product.get("image")
+    raw = product.get("image_raw")
+    image = _resolve_image(raw, product.get("code"), data_dir, scan_dir=True)
+    product["image"] = image
+    product["_image_resolved"] = True
+    return image
 
 
 def _load_stock(rows, data_dir):
@@ -497,9 +515,17 @@ def _load_stock(rows, data_dir):
             "price": _to_float(_pick(row, PRICE_KEYS)),
             "discontinued": _is_discontinued(_pick(row, DISCONTINUE_KEYS)),
             "in_stock": qty > 0,
-            "image": _resolve_image(_pick(row, IMAGE_KEYS), code, data_dir),
+            "image_raw": _pick(row, IMAGE_KEYS),
+            "image": None,
+            "_image_resolved": False,
         })
     return out
+
+
+def _split_stock_rows(rows):
+    active = [r for r in rows if not r.get("discontinued")]
+    discontinued = [r for r in rows if r.get("discontinued")]
+    return active, discontinued
 
 
 def _load_display(rows):
@@ -740,10 +766,15 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         return cached
 
     stock_rows = bundle["stock_rows"]
+    if include_discontinued:
+        iter_rows = stock_rows
+    else:
+        iter_rows = bundle.get("stock_rows_active") or stock_rows
     by_store = bundle["by_store"]
     stock_path = bundle["stock_path"]
     display_path = bundle["display_path"]
     source = bundle["source"]
+    data_dir = bundle.get("data_dir")
     blacklist = bundle.get("blacklist") or set()
     blacklist_path = bundle.get("blacklist_path")
 
@@ -759,7 +790,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
     store_specific = store != ALL_STORES
 
     products = []
-    for p in stock_rows:
+    for p in iter_rows:
         if _norm_code(p["code"]) in blacklist:
             continue
         if not include_discontinued and p.get("discontinued"):
@@ -831,6 +862,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         "blacklist_path": blacklist_path,
         "blacklist_file_found": bool(blacklist_path),
         "blacklist_expected_path": str(expected_blacklist_path(region_key)),
+        "data_format": Path(stock_path).suffix.lower(),
     }
 
     products.sort(key=lambda p: (
@@ -875,6 +907,8 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         "blacklist_count": len(blacklist),
         "blacklist_file_found": bool(blacklist_path),
         "blacklist_expected_path": str(expected_blacklist_path(region_key)),
+        "data_dir": str(bundle.get("data_dir") or ""),
+        "data_format": Path(stock_path).suffix.lower(),
         "display_row_count": display_row_count,
         "stores": stores,
         "selected_store": store,

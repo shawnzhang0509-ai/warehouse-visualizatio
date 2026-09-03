@@ -30,7 +30,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.4.6"
+APP_VERSION = "1.5.0"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -96,6 +96,7 @@ class PanelApp:
         self._cached_products = []
         self._cached_summary = {}
         self._cached_blacklist_meta = {}
+        self._cached_data_dir = ""
         self._products_cache = {}
         self._prefix_rendered_for = None
         self._lazy_groups = {}
@@ -658,10 +659,17 @@ class PanelApp:
             return
         self._open_image_for_item(item)
 
+    def _image_url_for_item(self, item):
+        if item.get("image"):
+            return item["image"]
+        if self._cached_data_dir:
+            return panel_data.resolve_product_image(item, self._cached_data_dir)
+        return None
+
     def _open_image_for_item(self, item):
         if messagebox is None:
             return
-        raw = item.get("image")
+        raw = self._image_url_for_item(item)
         code = item.get("code") or "产品"
         if not raw:
             messagebox.showinfo("查看图片", f"{code} 没有图片路径/URL。")
@@ -713,7 +721,13 @@ class PanelApp:
             return
         token = self._render_token
         for iid in self._visible_iids()[:IMAGE_BATCH]:
-            raw = self._iid_to_url.get(iid)
+            ref = self._iid_to_url.get(iid)
+            if not ref:
+                continue
+            if isinstance(ref, dict):
+                raw = self._image_url_for_item(ref)
+            else:
+                raw = ref
             if raw:
                 self._schedule_row_image(iid, raw, token)
 
@@ -801,8 +815,12 @@ class PanelApp:
                 "blacklist_expected_path", str(panel_data.expected_blacklist_path(region))
             ),
         }
+        self._cached_data_dir = data.get("data_dir") or ""
+        fmt = data.get("data_format", "")
         src = self._region_labels.get(region, region)
         src_line = f"数据源：{src}  |  {Path(data['stock_path']).name}"
+        if fmt:
+            src_line += f"（{fmt}）"
         self.source_var.set(src_line)
         self._update_blacklist_label()
         self._prefix_rendered_for = None
@@ -1110,8 +1128,11 @@ class PanelApp:
                 values=self._tree_row_values(item), tags=self._row_tag(item, idx),
             )
             self._products_by_iid[iid] = item
-            if item.get("image"):
-                self._iid_to_url[iid] = item["image"]
+            url = self._image_url_for_item(item)
+            if url:
+                self._iid_to_url[iid] = url
+            elif item.get("image_raw"):
+                self._iid_to_url[iid] = item
 
     def _populate_lazy_group(self, iid):
         if iid not in self._lazy_groups:
@@ -1201,8 +1222,11 @@ class PanelApp:
                 values=self._tree_row_values(item), tags=self._row_tag(item, idx),
             )
             self._products_by_iid[iid] = item
-            if item.get("image"):
-                self._iid_to_url[iid] = item["image"]
+            url = self._image_url_for_item(item)
+            if url:
+                self._iid_to_url[iid] = url
+            elif item.get("image_raw"):
+                self._iid_to_url[iid] = item
         if len(products) > MAX_TREE_ROWS:
             self._tree.insert(
                 "", tk.END, text="",

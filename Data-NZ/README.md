@@ -12,11 +12,19 @@
 
 ## 有货未展示看板需要哪些文件？
 
-**只要 Excel 就够了**（`stock.xlsx` + `display.xlsx`）。
+**stock + display 各一份即可**（看板**优先读 .csv**，比 .xlsx 快很多；同目录两者都有时用 csv）。
 
-- 看板会**优先读 .xlsx**，没有 xlsx 才读 csv
-- SQL 导出器会同时生成 csv + xlsx，**csv 可以留着备用**（给其他工具用），看板不读也没关系
-- `weekly_sales` 是给别的分析用的，**有货未展示看板不需要**
+| 文件 | 是否需要 |
+|------|---------|
+| `stock.csv` 或 `stock.xlsx` | ✅ 必须（推荐 csv） |
+| `display.csv` 或 `display.xlsx` | ✅ 必须 |
+| `blacklist.xlsx` | 可选 |
+| `weekly_sales` | 看板不需要 |
+
+慢的主要原因不是 Excel「格式错了」，而是：
+1. **行数多**（在产 ~2500，含停产 ~1.6 万）
+2. **xlsx 解析**比 csv 慢（openpyxl 逐行读 XML）
+3. 以前启动时会对**每个 SKU 扫描 images 目录**找图（v1.5 已改为按需加载）
 
 ## 黑名单（可选）
 
