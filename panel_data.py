@@ -401,6 +401,7 @@ def _ensure_discontinued_rows(bundle):
         disc = _load_stock(raw, data_dir, discontinued=True)
     bundle["stock_rows_discontinued"] = disc
     bundle["stock_rows"] = list(bundle["stock_rows_active"]) + disc
+    _enrich_catalog_metadata(disc)
     bundle["discontinued_loaded"] = True
 
 
@@ -436,6 +437,7 @@ def _load_region_bundle(region, force=False):
     blacklist = _load_blacklist(blacklist_path)
     stock_raw_rows = _read_table(stock_path)
     active_rows = _load_stock(stock_raw_rows, data_dir, discontinued=False)
+    _enrich_catalog_metadata(active_rows)
     bundle = {
         "region": region_key,
         "stock_path": stock_path,
@@ -616,7 +618,22 @@ def _resolve_exemption_group(product, config):
     return None, None
 
 
-def _display_anchor_codes(members, displayed_details, config):
+def _anchors_by_group_from_display(displayed_details, config):
+    """按 exemption 组索引店面 display 表里的已展示 SKU（每店面只算一次）。"""
+    by_group = {}
+    for norm, meta in (displayed_details or {}).items():
+        pseudo = {
+            "code": meta.get("code") or norm,
+            "family": meta.get("family") or "",
+            "name": meta.get("name") or "",
+        }
+        gkey, _ = _resolve_exemption_group(pseudo, config)
+        if gkey:
+            by_group.setdefault(gkey, []).append(pseudo["code"])
+    return by_group
+
+
+def _display_anchor_codes(members, display_anchors_by_group=None, displayed_details=None, config=None):
     """同组内在该店面已展示的 SKU（含 display 表有、stock 表无的款）。"""
     group_key = next((m.get("exemption_group") for m in members if m.get("exemption_group")), None)
     if not group_key:
@@ -632,6 +649,14 @@ def _display_anchor_codes(members, displayed_details, config):
         if norm and norm not in seen:
             seen.add(norm)
             codes.append(code)
+
+    if display_anchors_by_group is not None:
+        for code in display_anchors_by_group.get(group_key, []):
+            norm = _norm_code(code)
+            if norm and norm not in seen:
+                seen.add(norm)
+                codes.append(code)
+        return codes
 
     for norm, meta in (displayed_details or {}).items():
         if norm in seen:
@@ -656,6 +681,18 @@ def _eligible_for_exemption(product):
     return bool(product.get("discontinued"))
 
 
+def _enrich_catalog_metadata(rows):
+    """产品系列/豁免组与店面无关，在载入 stock 时就算好，切换店面时复用。"""
+    config = _load_exemption_config()
+    for p in rows:
+        if p.get("_catalog_enriched"):
+            continue
+        gkey, glabel = _resolve_exemption_group(p, config)
+        p["exemption_group"] = gkey
+        p["exemption_group_label"] = glabel
+        p["_catalog_enriched"] = True
+
+
 def _apply_family_exemptions(products, displayed_details=None):
     """同 exemption 组内已有展示 SKU 时，豁免组内其他有货未展示 SKU。
 
@@ -663,12 +700,14 @@ def _apply_family_exemptions(products, displayed_details=None):
     不要求锚点有货。停产但有货未展示的 SKU 也可被同组已展示款豁免。
     """
     config = _load_exemption_config()
+    display_anchors = _anchors_by_group_from_display(displayed_details, config)
     for p in products:
         p["exempted"] = False
         p["exemption_reason"] = ""
-        gkey, glabel = _resolve_exemption_group(p, config)
-        p["exemption_group"] = gkey
-        p["exemption_group_label"] = glabel
+        if not p.get("_catalog_enriched"):
+            gkey, glabel = _resolve_exemption_group(p, config)
+            p["exemption_group"] = gkey
+            p["exemption_group_label"] = glabel
 
     by_group = {}
     for p in products:
@@ -678,7 +717,7 @@ def _apply_family_exemptions(products, displayed_details=None):
 
     exempted_n = 0
     for members in by_group.values():
-        anchor_codes = _display_anchor_codes(members, displayed_details, config)
+        anchor_codes = _display_anchor_codes(members, display_anchors_by_group=display_anchors)
         if not anchor_codes:
             continue
         reason = f"同组已展示：{anchor_codes[0]}"
@@ -767,6 +806,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         bundle.get("stock_mtime"),
         bundle.get("display_mtime"),
         bundle.get("blacklist_mtime"),
+        bundle.get("stock_discontinued_mtime"),
     )
     if not force_refresh and view_key in _STORE_VIEW_CACHE:
         cached = _STORE_VIEW_CACHE[view_key]
@@ -825,9 +865,10 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         for p in products:
             p["exempted"] = False
             p["exemption_reason"] = ""
-            gkey, glabel = _resolve_exemption_group(p, config)
-            p["exemption_group"] = gkey
-            p["exemption_group_label"] = glabel
+            if not p.get("_catalog_enriched"):
+                gkey, glabel = _resolve_exemption_group(p, config)
+                p["exemption_group"] = gkey
+                p["exemption_group_label"] = glabel
         exempted_count = 0
 
     total_nd = 0
@@ -944,6 +985,38 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         out["products"] = [p for p in products if p["gap"]]
         return out
     return result
+
+
+def prewarm_store_views(region, stores=None, include_discontinued=True):
+    """后台预热多个店面视图，切换店面时直接走缓存。"""
+    region_key = str(region).strip().upper()
+    bundle = _load_region_bundle(region_key)
+    if include_discontinued and not bundle.get("discontinued_loaded"):
+        _ensure_discontinued_rows(bundle)
+    if stores is None:
+        stores = sorted(bundle.get("by_store", {}).keys())
+    warmed = []
+    for store in stores:
+        if store == ALL_STORES:
+            continue
+        view_key = (
+            region_key,
+            store,
+            bool(include_discontinued or bundle.get("discontinued_loaded")),
+            bundle.get("stock_mtime"),
+            bundle.get("display_mtime"),
+            bundle.get("blacklist_mtime"),
+            bundle.get("stock_discontinued_mtime"),
+        )
+        if view_key in _STORE_VIEW_CACHE:
+            continue
+        build_products(
+            store=store,
+            include_discontinued=include_discontinued,
+            region=region_key,
+        )
+        warmed.append(store)
+    return warmed
 
 
 if __name__ == "__main__":

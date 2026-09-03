@@ -30,7 +30,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.5.6"
+APP_VERSION = "1.5.7"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -101,6 +101,7 @@ class PanelApp:
         self._prefix_rendered_for = None
         self._lazy_groups = {}
         self._loaded_full_stock = False
+        self._prewarm_token = 0
         self._sort_col = None
         self._sort_reverse = False
 
@@ -556,6 +557,48 @@ class PanelApp:
             self.root.after(0, lambda: on_done(err, result))
         threading.Thread(target=_thread, daemon=True).start()
 
+    def _schedule_store_prewarm(self, region, current_store):
+        """首店加载完成后，后台预热其余店面（切换时秒开）。"""
+        if not panel_data.EAGER_DISCONTINUED_STOCK:
+            return
+        stores = list(self.store_combo.cget("values")) if self.store_combo else []
+        others = [
+            s for s in stores
+            if s not in (panel_data.ALL_STORES, current_store)
+            and (region, s) not in self._products_cache
+        ]
+        if not others:
+            return
+        self._prewarm_token += 1
+        token = self._prewarm_token
+
+        def worker():
+            warmed = []
+            for s in others:
+                if token != self._prewarm_token:
+                    return
+                key = (region, s)
+                if key in self._products_cache:
+                    continue
+                try:
+                    data = panel_data.build_products(
+                        store=s, include_discontinued=True, region=region,
+                    )
+                    warmed.append((key, data))
+                except Exception:
+                    pass
+
+            def apply():
+                if token != self._prewarm_token:
+                    return
+                for key, data in warmed:
+                    self._products_cache[key] = data
+
+            if self.root.winfo_exists():
+                self.root.after(0, apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
     def _on_region_change(self):
         region = self._current_region()
         panel_data.clear_region_cache(region)
@@ -879,6 +922,8 @@ class PanelApp:
                 return
             self._products_cache[cache_key] = data
             self._apply_loaded_data(data, region)
+            if store != panel_data.ALL_STORES:
+                self._schedule_store_prewarm(region, store)
 
         self._run_bg(worker, done)
 
