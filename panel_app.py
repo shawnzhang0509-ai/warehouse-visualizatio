@@ -30,7 +30,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.5.4"
+APP_VERSION = "1.5.5"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -133,7 +133,7 @@ class PanelApp:
         self.search_var = tk.StringVar()
         self.stock_filter_var = tk.StringVar(value="全部")
         self.display_filter_var = tk.StringVar(value="全部")
-        self.discontinue_filter_var = tk.StringVar(value="在产")
+        self.discontinue_filter_var = tk.StringVar(value="全部")
         self.group_sort_var = tk.StringVar(value="库存总数多到少")
         self.load_images_var = tk.BooleanVar(value=False)
         self.result_count_var = tk.StringVar(value="")
@@ -434,20 +434,21 @@ class PanelApp:
 
     def _on_filter_combo_change(self):
         disc_f = self.discontinue_filter_var.get()
-        need_full = self._loads_full_stock()
-        if need_full != self._loaded_full_stock:
-            if need_full:
-                if self.only_gap_var.get():
-                    self.only_gap_var.set(False)
-                if self.only_exempted_var.get():
-                    self.only_exempted_var.set(False)
-                self._quick_filter = None
-                if disc_f == "全部":
-                    self._status_var.set("正在加载全部数据（含停产），请稍候…")
-                else:
-                    self._status_var.set("正在加载停产数据，请稍候…")
-            self.reload()
-            return
+        if not panel_data.EAGER_DISCONTINUED_STOCK:
+            need_full = self.discontinue_filter_var.get() in ("全部", "已停产")
+            if need_full != self._loaded_full_stock:
+                if need_full:
+                    if self.only_gap_var.get():
+                        self.only_gap_var.set(False)
+                    if self.only_exempted_var.get():
+                        self.only_exempted_var.set(False)
+                    self._quick_filter = None
+                    self._status_var.set(
+                        "正在加载全部数据（含停产），请稍候…"
+                        if disc_f == "全部" else "正在加载停产数据，请稍候…"
+                    )
+                self.reload()
+                return
         if disc_f == "已停产":
             if self.only_gap_var.get():
                 self.only_gap_var.set(False)
@@ -466,8 +467,9 @@ class PanelApp:
     def _on_only_gap_toggle(self):
         if self.only_gap_var.get() and self.discontinue_filter_var.get() == "已停产":
             self.discontinue_filter_var.set("在产")
-            self.reload()
-            return
+            if not panel_data.EAGER_DISCONTINUED_STOCK:
+                self.reload()
+                return
         if self.only_gap_var.get():
             self.only_exempted_var.set(False)
             self._quick_filter = "gap"
@@ -511,7 +513,11 @@ class PanelApp:
             self._quick_filter = "exempted" if self.only_exempted_var.get() else None
         elif key == "in_stock":
             self.stock_filter_var.set("无货" if self.stock_filter_var.get() == "有货" else "有货")
-        if self._loads_full_stock() != self._loaded_full_stock:
+        if (
+            not panel_data.EAGER_DISCONTINUED_STOCK
+            and (self.discontinue_filter_var.get() in ("全部", "已停产"))
+            != self._loaded_full_stock
+        ):
             self.reload()
             return
         self._refresh_view()
@@ -831,7 +837,10 @@ class PanelApp:
         self.source_var.set(src_line)
         self._update_blacklist_label()
         self._prefix_rendered_for = None
-        self._loaded_full_stock = self._loads_full_stock()
+        self._loaded_full_stock = (
+            panel_data.EAGER_DISCONTINUED_STOCK
+            or self.discontinue_filter_var.get() in ("全部", "已停产")
+        )
         self._refresh_view()
 
     def reload(self, force=False):
@@ -839,8 +848,9 @@ class PanelApp:
         token = self._reload_token
         region = self._current_region()
         store = self.store_combo.get() if self.store_combo else self.store_var.get()
-        include_disc = self._loads_full_stock()
-        cache_key = (region, store, include_disc)
+        eager = panel_data.EAGER_DISCONTINUED_STOCK
+        include_disc = True if eager else self.discontinue_filter_var.get() in ("全部", "已停产")
+        cache_key = (region, store) if eager else (region, store, include_disc)
 
         if force:
             self._products_cache = {}
@@ -851,19 +861,15 @@ class PanelApp:
             return
 
         loading_msg = "正在计算店面数据…"
-        if include_disc:
-            disc_f = self.discontinue_filter_var.get()
-            if disc_f == "已停产":
-                loading_msg += " · 正在加载停产 SKU…"
-            else:
-                loading_msg += " · 正在加载全部数据（含停产）…"
+        if eager or include_disc:
+            loading_msg += "（含停产）"
         self._show_loading_state(loading_msg)
         self._set_controls_state(False)
         self._set_busy(True)
 
         def worker():
             return panel_data.build_products(
-                store=store, only_gap=False, include_discontinued=include_disc,
+                store=store, only_gap=False, include_discontinued=True if eager else include_disc,
                 region=region, force_refresh=force,
             )
 

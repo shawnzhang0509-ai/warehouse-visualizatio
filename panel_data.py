@@ -23,6 +23,11 @@ RUNNER_CONFIG_FILE = ROOT_DIR / "region_runner_config.json"
 EXEMPTION_CONFIG_FILE = ROOT_DIR / "family_exemption.json"
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
+# 启动时预加载停产 SKU（停产为常态时避免每次切筛选都重算）
+EAGER_DISCONTINUED_STOCK = os.getenv("PANEL_EAGER_DISCONTINUED", "1").strip().lower() not in (
+    "0", "false", "no", "off",
+)
+
 CODE_KEYS = ["productcode", "product_code", "sku", "itemcode", "item_code",
              "code", "productid", "product_id", "product", "item"]
 BLACKLIST_STEMS = ["blacklist", "sku_blacklist", "black_list", "product_blacklist"]
@@ -455,6 +460,9 @@ def _load_region_bundle(region, force=False):
         "stock_row_count": len(stock_raw_rows),
     }
     _REGION_CACHE[region_key] = bundle
+    if EAGER_DISCONTINUED_STOCK:
+        _ensure_discontinued_rows(bundle)
+        bundle.pop("stock_raw_rows", None)
     return bundle
 
 
@@ -749,12 +757,13 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         raise ValueError("region_runner_config.json 中未配置任何地区。")
 
     bundle = _load_region_bundle(region_key, force=force_refresh)
-    if include_discontinued:
+    full_stock = bundle.get("discontinued_loaded") or include_discontinued
+    if full_stock and not bundle.get("discontinued_loaded"):
         _ensure_discontinued_rows(bundle)
     view_key = (
         region_key,
         store or ALL_STORES,
-        bool(include_discontinued),
+        bool(full_stock),
         bundle.get("stock_mtime"),
         bundle.get("display_mtime"),
         bundle.get("blacklist_mtime"),
@@ -768,7 +777,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         return cached
 
     stock_rows = bundle["stock_rows"]
-    if include_discontinued:
+    if full_stock:
         iter_rows = stock_rows
     else:
         iter_rows = bundle.get("stock_rows_active") or stock_rows
@@ -796,7 +805,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
     for p in iter_rows:
         if p.get("norm_code") in blacklist:
             continue
-        if not include_discontinued and p.get("discontinued"):
+        if not full_stock and p.get("discontinued"):
             continue
         item = _apply_store_stock(p, store, region_key, warehouse_keys)
         displayed = item["norm_code"] in displayed_codes

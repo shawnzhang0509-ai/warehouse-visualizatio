@@ -23,6 +23,13 @@
 | `blacklist.csv` | 可选 |
 | `weekly_sales.csv` | 看板不需要 |
 
+## 看板默认行为（v1.5.5+）
+
+- **默认停产筛选 =「全部」**（在产 + 停产）
+- **启动时预加载停产 SKU**（`PANEL_EAGER_DISCONTINUED=1`，默认开启）
+- 切换「在产 / 全部 / 已停产」**只筛界面，不重新读文件**
+- 若只需在产、要更快启动：设环境变量 `PANEL_EAGER_DISCONTINUED=0`
+
 ## 为什么不要把 Discontinued 写进 display？
 
 **不会明显变快。** 原因：
