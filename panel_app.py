@@ -30,13 +30,14 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.5.8"
+APP_VERSION = "1.6.0"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
 PLACEHOLDER_COLOR = "#d1d5db"
 SCROLL_UNITS = 8
-MAX_TREE_ROWS = 500
+AUTO_EXPAND_ALL_GROUPS = 300
+MAX_EXPAND_GROUP_ITEMS = 80
 LOAD_IMAGES = os.getenv("PANEL_LOAD_IMAGES", "").lower() in ("1", "true", "yes")
 
 C_HEADER = "#1e4f8a"
@@ -135,7 +136,7 @@ class PanelApp:
         self.display_filter_var = tk.StringVar(value="全部")
         self.discontinue_filter_var = tk.StringVar(value="全部")
         self.group_sort_var = tk.StringVar(value="库存总数多到少")
-        self.load_images_var = tk.BooleanVar(value=False)
+        self.load_images_var = tk.BooleanVar(value=True)
         self.result_count_var = tk.StringVar(value="")
         self._status_var = tk.StringVar(value="")
 
@@ -1071,8 +1072,11 @@ class PanelApp:
                 lambda: self._render_prefix_table_deferred(prefix_key, store_specific)
             )
         else:
+            hint = ""
+            if len(filtered) > AUTO_EXPAND_ALL_GROUPS:
+                hint = " · 系列分组已折叠，点击 ▸ 展开"
             self._status_var.set(
-                f"就绪 · {len(filtered)} 条"
+                f"就绪 · {len(filtered)} 条{hint}"
                 + ("" if self._images_enabled() else " · 双击行或点「查看图片」")
             )
 
@@ -1217,14 +1221,11 @@ class PanelApp:
         self._products_by_iid.clear()
         self._iid_to_url.clear()
 
-        if len(products) > MAX_TREE_ROWS:
-            self._render_tree_flat(products, render_token)
-            return
-
         grouped = self._group_products(products)
         store_specific = self._cached_summary.get(
             "store_specific", self._is_store_selected()
         )
+        expand_all = len(products) <= AUTO_EXPAND_ALL_GROUPS
 
         def insert_group(family_label, items):
             gap_n = sum(1 for i in items if i.get("gap"))
@@ -1243,17 +1244,19 @@ class PanelApp:
             summary += "）"
             has_attention = any(i.get("gap") or i.get("exempted") for i in items)
             expand_now = (
-                len(items) == 1
+                expand_all
+                or len(items) == 1
                 or has_attention
-                or len(products) <= AUTO_EXPAND_GROUPS_THRESHOLD
             )
-            label_text = f"{'▸ ' if not expand_now else ''}{family_label} {summary}"
+            eager_children = expand_now and len(items) <= MAX_EXPAND_GROUP_ITEMS
+            show_open = expand_now and eager_children
+            label_text = f"{'▸ ' if not show_open else ''}{family_label} {summary}"
             parent = self._tree.insert(
                 "", tk.END, text="",
                 values=("", label_text, "", "", "", "", "", ""),
-                tags=("group",), open=expand_now,
+                tags=("group",), open=show_open,
             )
-            if expand_now:
+            if eager_children:
                 self._insert_group_children(parent, items, render_token)
             else:
                 self._lazy_groups[parent] = (items, render_token)
@@ -1262,7 +1265,7 @@ class PanelApp:
         def fill_batch(start=0):
             if render_token != self._render_token:
                 return
-            end = min(start + 40, len(grouped))
+            end = min(start + 60, len(grouped))
             for family_label, items in grouped[start:end]:
                 insert_group(family_label, items)
             if end < len(grouped):
@@ -1274,34 +1277,6 @@ class PanelApp:
             self.root.after_idle(lambda: fill_batch(0))
         else:
             self._load_visible_images()
-
-    def _render_tree_flat(self, products, render_token):
-        """行数较多时用平铺列表，避免创建上千个分组节点卡死界面。"""
-        shown = products[:MAX_TREE_ROWS]
-        for idx, item in enumerate(shown):
-            if render_token != self._render_token:
-                return
-            iid = self._tree.insert(
-                "", tk.END, image=self._placeholder_photo, text="",
-                values=self._tree_row_values(item), tags=self._row_tag(item, idx),
-            )
-            self._products_by_iid[iid] = item
-            url = self._image_url_for_item(item)
-            if url:
-                self._iid_to_url[iid] = url
-            elif item.get("image_raw"):
-                self._iid_to_url[iid] = item
-        if len(products) > MAX_TREE_ROWS:
-            self._tree.insert(
-                "", tk.END, text="",
-                values=(
-                    "",
-                    f"… 还有 {len(products) - MAX_TREE_ROWS} 条未显示，请缩小筛选范围",
-                    "", "", "", "", "", "",
-                ),
-                tags=("group",),
-            )
-        self._load_visible_images()
 
     def run(self):
         self.root.mainloop()
