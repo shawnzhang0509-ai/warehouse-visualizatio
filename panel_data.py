@@ -172,21 +172,22 @@ def _stock_breakdown(warehouse_stock, warehouse_keys):
     return " + ".join(parts) if parts else ""
 
 
-def _apply_store_stock(product, store, region_key):
+def _apply_store_stock(product, store, region_key, warehouse_keys=None):
     warehouse_stock = product.get("warehouse_stock") or {}
-    warehouse_keys = _warehouses_for_store(store, region_key)
+    warehouse_keys = warehouse_keys or _warehouses_for_store(store, region_key)
     if warehouse_stock:
         qty = _qty_from_warehouses(warehouse_stock, warehouse_keys)
         breakdown = _stock_breakdown(warehouse_stock, warehouse_keys)
     else:
         qty = float(product.get("stock_qty") or 0)
         breakdown = ""
-    item = dict(product)
-    item["stock_qty"] = qty
-    item["in_stock"] = qty > 0
-    item["stock_warehouses"] = warehouse_keys
-    item["stock_breakdown"] = breakdown
-    return item
+    return {
+        **product,
+        "stock_qty": qty,
+        "in_stock": qty > 0,
+        "stock_warehouses": warehouse_keys,
+        "stock_breakdown": breakdown,
+    }
 
 
 def _read_csv(path):
@@ -256,6 +257,11 @@ def _find_region_data_file(output_dir, stems):
         if found:
             return found
     return None
+
+
+def _region_discontinued_stems(region_key):
+    rk = region_key.upper()
+    return ["stock_discontinued", f"{rk}_stock_discontinued"]
 
 
 def _region_stock_stems(region_key):
@@ -373,14 +379,21 @@ def expected_blacklist_path(region=None):
 
 
 def _ensure_discontinued_rows(bundle):
-    """按需解析停产 SKU（首次切「已停产」时才处理，避免日常在产模式白跑 1.3 万行）。"""
+    """按需解析停产 SKU；优先读独立的 stock_discontinued.csv（比从大 stock 里筛快）。"""
     if bundle.get("discontinued_loaded"):
         return
-    raw = bundle.get("stock_raw_rows")
-    if not raw:
-        bundle["discontinued_loaded"] = True
-        return
-    disc = _load_stock(raw, bundle.get("data_dir"), discontinued=True)
+    data_dir = bundle.get("data_dir")
+    disc_path = bundle.get("stock_discontinued_path")
+    if disc_path and Path(disc_path).is_file():
+        disc = _load_stock(_read_table(disc_path), data_dir, discontinued=None)
+        for p in disc:
+            p["discontinued"] = True
+    else:
+        raw = bundle.get("stock_raw_rows")
+        if not raw:
+            bundle["discontinued_loaded"] = True
+            return
+        disc = _load_stock(raw, data_dir, discontinued=True)
     bundle["stock_rows_discontinued"] = disc
     bundle["stock_rows"] = list(bundle["stock_rows_active"]) + disc
     bundle["discontinued_loaded"] = True
@@ -394,6 +407,8 @@ def _load_region_bundle(region, force=False):
     display_mtime = _file_mtime(display_path)
     blacklist_path = _resolve_blacklist_path(data_dir)
     blacklist_mtime = _file_mtime(blacklist_path) if blacklist_path else None
+    disc_path = _find_region_data_file(data_dir, _region_discontinued_stems(region_key))
+    disc_mtime = _file_mtime(disc_path) if disc_path else None
 
     cached = _REGION_CACHE.get(region_key)
     if (
@@ -402,6 +417,7 @@ def _load_region_bundle(region, force=False):
         and cached["stock_mtime"] == stock_mtime
         and cached["display_mtime"] == display_mtime
         and cached.get("blacklist_mtime") == blacklist_mtime
+        and cached.get("stock_discontinued_mtime") == disc_mtime
     ):
         return cached
 
@@ -426,6 +442,8 @@ def _load_region_bundle(region, force=False):
         "stock_mtime": stock_mtime,
         "display_mtime": display_mtime,
         "blacklist_mtime": blacklist_mtime,
+        "stock_discontinued_path": str(disc_path) if disc_path else None,
+        "stock_discontinued_mtime": disc_mtime,
         "stock_raw_rows": stock_raw_rows,
         "stock_rows": active_rows,
         "stock_rows_active": active_rows,
@@ -495,6 +513,7 @@ def _load_stock(rows, data_dir, discontinued=None):
             qty = _to_float(_pick(row, STOCK_KEYS)) or 0.0
         out.append({
             "code": str(code).strip(),
+            "norm_code": _norm_code(code),
             "name": str(_pick(row, NAME_KEYS) or "").strip(),
             "family": str(_pick(row, FAMILY_KEYS) or "未分类").strip(),
             "stock_qty": qty,
@@ -771,15 +790,16 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         displayed_codes = by_store.get(store, set())
 
     store_specific = store != ALL_STORES
+    warehouse_keys = _warehouses_for_store(store, region_key)
 
     products = []
     for p in iter_rows:
-        if _norm_code(p["code"]) in blacklist:
+        if p.get("norm_code") in blacklist:
             continue
         if not include_discontinued and p.get("discontinued"):
             continue
-        item = _apply_store_stock(p, store, region_key)
-        displayed = _norm_code(item["code"]) in displayed_codes
+        item = _apply_store_stock(p, store, region_key, warehouse_keys)
+        displayed = item["norm_code"] in displayed_codes
         if store_specific:
             gap = item["in_stock"] and (not item["discontinued"]) and (not displayed)
         else:
@@ -801,29 +821,35 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
             p["exemption_group_label"] = glabel
         exempted_count = 0
 
-    non_discontinue = [p for p in products if not p["discontinued"]]
-    in_stock = [p for p in non_discontinue if p["in_stock"]]
-    displayed_in_stock = [p for p in in_stock if p["displayed"]]
-    not_displayed = [p for p in in_stock if p["gap"]]
-    if store_specific:
-        raw_gap_active = [
-            p for p in products
-            if p["in_stock"] and not p["discontinued"] and not p["displayed"]
-        ]
-        in_stock_not_displayed_all = [
-            p for p in products
-            if p["in_stock"] and not p["displayed"] and not p.get("exempted")
-        ]
-        in_stock_not_displayed_discontinued = [
-            p for p in in_stock_not_displayed_all if p["discontinued"]
-        ]
-    else:
-        raw_gap_active = []
-        in_stock_not_displayed_all = []
-        in_stock_not_displayed_discontinued = []
+    total_nd = 0
+    in_stock_n = 0
+    displayed_in_stock_n = 0
+    not_displayed_n = 0
+    raw_gap_active_n = 0
+    in_stock_not_displayed_all_n = 0
+    in_stock_not_displayed_discontinued_n = 0
+    for p in products:
+        disc = bool(p.get("discontinued"))
+        in_stock = bool(p.get("in_stock"))
+        displayed = bool(p.get("displayed"))
+        exempted = bool(p.get("exempted"))
+        gap = bool(p.get("gap"))
+        if not disc:
+            total_nd += 1
+            if in_stock:
+                in_stock_n += 1
+                if displayed:
+                    displayed_in_stock_n += 1
+                if gap:
+                    not_displayed_n += 1
+        if store_specific:
+            if in_stock and not disc and not displayed:
+                raw_gap_active_n += 1
+            if in_stock and not displayed and not exempted:
+                in_stock_not_displayed_all_n += 1
+                if disc:
+                    in_stock_not_displayed_discontinued_n += 1
 
-    total_nd = len(non_discontinue)
-    in_stock_n = len(in_stock)
     summary = {
         "store": store,
         "region": region_key,
@@ -831,21 +857,24 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         "total_non_discontinue": total_nd,
         "in_stock_count": in_stock_n,
         "in_stock_rate": round(in_stock_n / total_nd * 100, 2) if total_nd else None,
-        "displayed_in_stock_count": len(displayed_in_stock),
-        "display_coverage_rate": round(len(displayed_in_stock) / in_stock_n * 100, 2) if in_stock_n else None,
-        "raw_gap_active_count": len(raw_gap_active) if store_specific else None,
-        "not_displayed_count": len(not_displayed) if store_specific else None,
-        "exempted_count": exempted_count if store_specific else None,
-        "in_stock_not_displayed_all": len(in_stock_not_displayed_all) if store_specific else None,
-        "in_stock_not_displayed_discontinued": len(in_stock_not_displayed_discontinued) if store_specific else None,
-        "stock_sources": " + ".join(
-            WAREHOUSE_LABELS.get(k, k) for k in _warehouses_for_store(store, region_key)
+        "displayed_in_stock_count": displayed_in_stock_n,
+        "display_coverage_rate": (
+            round(displayed_in_stock_n / in_stock_n * 100, 2) if in_stock_n else None
         ),
+        "raw_gap_active_count": raw_gap_active_n if store_specific else None,
+        "not_displayed_count": not_displayed_n if store_specific else None,
+        "exempted_count": exempted_count if store_specific else None,
+        "in_stock_not_displayed_all": in_stock_not_displayed_all_n if store_specific else None,
+        "in_stock_not_displayed_discontinued": (
+            in_stock_not_displayed_discontinued_n if store_specific else None
+        ),
+        "stock_sources": " + ".join(WAREHOUSE_LABELS.get(k, k) for k in warehouse_keys),
         "blacklist_count": len(blacklist),
         "blacklist_path": blacklist_path,
         "blacklist_file_found": bool(blacklist_path),
         "blacklist_expected_path": str(expected_blacklist_path(region_key)),
         "data_format": Path(stock_path).suffix.lower(),
+        "uses_split_stock": bool(bundle.get("stock_discontinued_path")),
     }
 
     products.sort(key=lambda p: (

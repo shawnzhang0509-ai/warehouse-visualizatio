@@ -30,7 +30,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.5.3"
+APP_VERSION = "1.5.4"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -466,6 +466,8 @@ class PanelApp:
     def _on_only_gap_toggle(self):
         if self.only_gap_var.get() and self.discontinue_filter_var.get() == "已停产":
             self.discontinue_filter_var.set("在产")
+            self.reload()
+            return
         if self.only_gap_var.get():
             self.only_exempted_var.set(False)
             self._quick_filter = "gap"
