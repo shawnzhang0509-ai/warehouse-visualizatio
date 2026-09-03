@@ -6,32 +6,26 @@
 
 | 模板文件名 | 输出到 Output-NZ/ |
 |-----------|-------------------|
-| product_stock_price.sql | stock.xlsx / stock.csv |
-| **display_with_families.sql** | **display.xlsx / display.csv**（店面下拉靠这个） |
-| weekly_sales.sql | weekly_sales.xlsx |
+| product_stock_price.sql | **stock.csv** |
+| **display_with_families.sql** | **display.csv**（店面下拉靠这个） |
+| weekly_sales.sql | weekly_sales.csv |
+
+**仅导出 CSV，不再生成 .xlsx。** 重新执行 SQL 时会自动删除同名的旧版 Excel 文件。
 
 ## 有货未展示看板需要哪些文件？
 
-**stock + display 各一份即可**（看板**优先读 .csv**，比 .xlsx 快很多；同目录两者都有时用 csv）。
+**stock + display 各一份 CSV 即可。**
 
 | 文件 | 是否需要 |
 |------|---------|
-| `stock.csv` 或 `stock.xlsx` | ✅ 必须（推荐 csv） |
-| `display.csv` 或 `display.xlsx` | ✅ 必须 |
-| `blacklist.xlsx` | 可选 |
-| `weekly_sales` | 看板不需要 |
-
-慢的主要原因不是 Excel「格式错了」，而是：
-1. **行数多**（在产 ~2500，含停产 ~1.6 万）
-2. **xlsx 解析**比 csv 慢（openpyxl 逐行读 XML）；看板会**整表读入**后再筛在产/停产
-3. 以前启动时会对**每个 SKU 扫描 images 目录**找图（v1.5 已改为按需加载）
-4. 切到「已停产」会额外处理 ~1.3 万停产 SKU（v1.5.1 起改为按需加载，但 xlsx 仍须整表解析一次）
-
-**加速建议**：执行 SQL 导出后保留 `stock.csv` + `display.csv`（与 xlsx 同目录即可，看板自动优先 csv）。
+| `stock.csv` | ✅ 必须 |
+| `display.csv` | ✅ 必须 |
+| `blacklist.csv` | 可选 |
+| `weekly_sales.csv` | 看板不需要 |
 
 ## 黑名单（可选）
 
-在 `Output-NZ/` 下放 `blacklist.xlsx`（或 `blacklist.csv`），一列 SKU 即可：
+在 `Output-NZ/` 下放 `blacklist.csv`，一列 SKU 即可：
 
 | sku |
 |-----|
@@ -45,5 +39,6 @@
 
 ## 注意
 
-- 不要放 `stock.txt` 这类占位文件，会和 `product_stock_price.sql` 抢同一个 stock.xlsx 导致数据被覆盖。
+- 不要放 `stock.txt` 这类占位文件，会和 `product_stock_price.sql` 抢同一个 stock.csv 导致数据被覆盖。
 - 以 `example_` 开头的文件会自动跳过，不执行。
+- 若 Output 目录里还有旧的 `stock.xlsx` / `display.xlsx`，请重新跑一次 SQL 导出（会自动删掉 xlsx），或手动删除。

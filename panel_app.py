@@ -30,7 +30,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.5.1"
+APP_VERSION = "1.5.2"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -800,7 +800,7 @@ class PanelApp:
             fg = C_CARD_GAP if count else C_MUTED
         else:
             text = (
-                f"黑名单：当前 0 个  |  未找到文件，可在以下路径新建 blacklist.xlsx：{expected}"
+                f"黑名单：当前 0 个  |  未找到文件，可在以下路径新建 blacklist.csv：{expected}"
             )
             fg = C_MUTED
         self._blacklist_lbl.configure(text=text, fg=fg)
@@ -822,8 +822,6 @@ class PanelApp:
         src_line = f"数据源：{src}  |  {Path(data['stock_path']).name}"
         if fmt:
             src_line += f"（{fmt}）"
-            if fmt == ".xlsx":
-                src_line += " · 建议同时保留 .csv 以加速"
         self.source_var.set(src_line)
         self._update_blacklist_label()
         self._prefix_rendered_for = None
@@ -847,15 +845,8 @@ class PanelApp:
             return
 
         loading_msg = "正在计算店面数据…"
-        try:
-            stock_path, _, _, _ = panel_data.resolve_sources(region)
-            fmt = Path(stock_path).suffix.lower()
-            if fmt == ".xlsx":
-                loading_msg += "（xlsx 解析较慢，建议 Output 目录保留 stock.csv）"
-            if include_disc:
-                loading_msg += " · 正在加载全部停产 SKU…"
-        except Exception:
-            pass
+        if include_disc:
+            loading_msg += " · 正在加载全部停产 SKU…"
         self._show_loading_state(loading_msg)
         self._set_controls_state(False)
         self._set_busy(True)

@@ -8,7 +8,7 @@
 2. INSTOCK_DATA_DIR 目录下的 stock.csv / display.csv
 3. INSTOCK_REGION（如 NZ/CA）→ Output-{region}/ 下的 stock/display 文件
 
-支持 CSV 和 Excel（.xlsx）；列名不需要完全一致，_pick 会做模糊匹配。
+支持 CSV；列名不需要完全一致，_pick 会做模糊匹配。
 """
 
 import csv
@@ -17,11 +17,6 @@ import os
 import re
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
-
-try:
-    from openpyxl import load_workbook
-except ImportError:
-    load_workbook = None
 
 ROOT_DIR = Path(__file__).parent
 RUNNER_CONFIG_FILE = ROOT_DIR / "region_runner_config.json"
@@ -199,40 +194,10 @@ def _read_csv(path):
         return list(csv.DictReader(f))
 
 
-def _read_xlsx(path):
-    if load_workbook is None:
-        raise RuntimeError("读取 Excel 需要 openpyxl，请运行：pip install openpyxl")
-    wb = load_workbook(path, read_only=True, data_only=True)
-    ws = wb.active
-    rows_iter = ws.iter_rows(values_only=True)
-    headers = next(rows_iter, None)
-    if not headers:
-        wb.close()
-        return []
-    columns = [str(h).strip() if h is not None else "" for h in headers]
-    out = []
-    for row in rows_iter:
-        if row is None:
-            continue
-        item = {}
-        empty = True
-        for idx, col in enumerate(columns):
-            if not col:
-                continue
-            value = row[idx] if idx < len(row) else None
-            if value is not None and str(value).strip() != "":
-                empty = False
-            item[col] = value
-        if not empty:
-            out.append(item)
-    wb.close()
-    return out
-
-
 def _read_table(path):
     path = Path(path)
-    if path.suffix.lower() == ".xlsx":
-        return _read_xlsx(path)
+    if path.suffix.lower() != ".csv":
+        raise ValueError(f"看板仅支持 CSV 数据文件，请重新执行 SQL 导出：{path}")
     return _read_csv(path)
 
 
@@ -253,15 +218,14 @@ def normalize_url(url):
 
 
 def _find_data_file(directory, stems):
-    """在目录里按候选文件名找 stock/display（看板优先 csv，解析更快）。"""
+    """在目录里按候选文件名找 stock/display（仅 .csv）。"""
     base = Path(directory)
     if not base.is_dir():
         return None
     for stem in stems:
-        for ext in (".csv", ".xlsx"):
-            candidate = base / f"{stem}{ext}"
-            if candidate.is_file():
-                return candidate
+        candidate = base / f"{stem}.csv"
+        if candidate.is_file():
+            return candidate
     return None
 
 
@@ -343,9 +307,9 @@ def resolve_sources(region=None):
         stock_path = _find_region_data_file(d, _region_stock_stems(region_key))
         display_path = _find_region_data_file(d, _region_display_stems(region_key))
         if stock_path is None:
-            stock_path = d / "stock.xlsx"
+            stock_path = d / "stock.csv"
         if display_path is None:
-            display_path = d / "display.xlsx"
+            display_path = d / "display.csv"
         return stock_path, display_path, f"region-{region_key}", d
     raise ValueError(
         "未指定地区。请在界面选择 NZ/AU/CA，或设置环境变量 INSTOCK_REGION。"
@@ -403,9 +367,9 @@ def _resolve_blacklist_path(data_dir):
 
 
 def expected_blacklist_path(region=None):
-    """黑名单 Excel 默认放置路径（Output-{region}/blacklist.xlsx）。"""
+    """黑名单默认放置路径（Output-{region}/blacklist.csv）。"""
     region_key = str(region or default_region() or "NZ").strip().upper()
-    return _region_output_dir(region_key) / "blacklist.xlsx"
+    return _region_output_dir(region_key) / "blacklist.csv"
 
 
 def _ensure_discontinued_rows(bundle):
@@ -423,7 +387,7 @@ def _ensure_discontinued_rows(bundle):
 
 
 def _load_region_bundle(region, force=False):
-    """读取并缓存某地区的 stock/display 原始表（切换店面时复用，避免重复读 Excel）。"""
+    """读取并缓存某地区的 stock/display 原始表（切换店面时复用，避免重复读 CSV）。"""
     region_key = str(region).strip().upper()
     stock_path, display_path, source, data_dir = resolve_sources(region_key)
     stock_mtime = _file_mtime(stock_path)
