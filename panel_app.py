@@ -30,14 +30,14 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.5.5"
+APP_VERSION = "1.5.6"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
 PLACEHOLDER_COLOR = "#d1d5db"
 SCROLL_UNITS = 8
 MAX_TREE_ROWS = 500
-FLAT_LIST_THRESHOLD = 80
+AUTO_EXPAND_GROUPS_THRESHOLD = 80
 LOAD_IMAGES = os.getenv("PANEL_LOAD_IMAGES", "").lower() in ("1", "true", "yes")
 
 C_HEADER = "#1e4f8a"
@@ -1173,7 +1173,7 @@ class PanelApp:
         self._products_by_iid.clear()
         self._iid_to_url.clear()
 
-        if len(products) > FLAT_LIST_THRESHOLD:
+        if len(products) > MAX_TREE_ROWS:
             self._render_tree_flat(products, render_token)
             return
 
@@ -1198,7 +1198,7 @@ class PanelApp:
                 summary += f"，{disc_n} 停产"
             summary += "）"
             has_attention = any(i.get("gap") or i.get("exempted") for i in items)
-            expand_now = has_attention or len(products) <= FLAT_LIST_THRESHOLD
+            expand_now = has_attention or len(products) <= AUTO_EXPAND_GROUPS_THRESHOLD
             label_text = f"{'▸ ' if not expand_now else ''}{family_label} {summary}"
             parent = self._tree.insert(
                 "", tk.END, text="",
