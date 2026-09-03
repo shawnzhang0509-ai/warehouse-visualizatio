@@ -408,6 +408,20 @@ def expected_blacklist_path(region=None):
     return _region_output_dir(region_key) / "blacklist.xlsx"
 
 
+def _ensure_discontinued_rows(bundle):
+    """按需解析停产 SKU（首次切「已停产」时才处理，避免日常在产模式白跑 1.3 万行）。"""
+    if bundle.get("discontinued_loaded"):
+        return
+    raw = bundle.get("stock_raw_rows")
+    if not raw:
+        bundle["discontinued_loaded"] = True
+        return
+    disc = _load_stock(raw, bundle.get("data_dir"), discontinued=True)
+    bundle["stock_rows_discontinued"] = disc
+    bundle["stock_rows"] = list(bundle["stock_rows_active"]) + disc
+    bundle["discontinued_loaded"] = True
+
+
 def _load_region_bundle(region, force=False):
     """读取并缓存某地区的 stock/display 原始表（切换店面时复用，避免重复读 Excel）。"""
     region_key = str(region).strip().upper()
@@ -435,8 +449,8 @@ def _load_region_bundle(region, force=False):
     display_rows = _read_table(display_path)
     by_store, display_details = _load_display(display_rows)
     blacklist = _load_blacklist(blacklist_path)
-    stock_rows = _load_stock(_read_table(stock_path), data_dir)
-    active_rows, discontinued_rows = _split_stock_rows(stock_rows)
+    stock_raw_rows = _read_table(stock_path)
+    active_rows = _load_stock(stock_raw_rows, data_dir, discontinued=False)
     bundle = {
         "region": region_key,
         "stock_path": stock_path,
@@ -448,12 +462,15 @@ def _load_region_bundle(region, force=False):
         "stock_mtime": stock_mtime,
         "display_mtime": display_mtime,
         "blacklist_mtime": blacklist_mtime,
-        "stock_rows": stock_rows,
+        "stock_raw_rows": stock_raw_rows,
+        "stock_rows": active_rows,
         "stock_rows_active": active_rows,
-        "stock_rows_discontinued": discontinued_rows,
+        "stock_rows_discontinued": [],
+        "discontinued_loaded": False,
         "by_store": by_store,
         "display_details": display_details,
         "display_row_count": len(display_rows),
+        "stock_row_count": len(stock_raw_rows),
     }
     _REGION_CACHE[region_key] = bundle
     return bundle
@@ -495,11 +512,17 @@ def resolve_product_image(product, data_dir):
     return image
 
 
-def _load_stock(rows, data_dir):
+def _load_stock(rows, data_dir, discontinued=None):
+    """discontinued: None=全部，False=仅在产，True=仅停产。"""
     out = []
     for row in rows:
         code = _pick(row, CODE_KEYS)
         if not code:
+            continue
+        is_disc = _is_discontinued(_pick(row, DISCONTINUE_KEYS))
+        if discontinued is False and is_disc:
+            continue
+        if discontinued is True and not is_disc:
             continue
         warehouse_stock = _extract_warehouse_stock(row)
         if warehouse_stock:
@@ -513,19 +536,13 @@ def _load_stock(rows, data_dir):
             "stock_qty": qty,
             "warehouse_stock": warehouse_stock,
             "price": _to_float(_pick(row, PRICE_KEYS)),
-            "discontinued": _is_discontinued(_pick(row, DISCONTINUE_KEYS)),
+            "discontinued": is_disc,
             "in_stock": qty > 0,
             "image_raw": _pick(row, IMAGE_KEYS),
             "image": None,
             "_image_resolved": False,
         })
     return out
-
-
-def _split_stock_rows(rows):
-    active = [r for r in rows if not r.get("discontinued")]
-    discontinued = [r for r in rows if r.get("discontinued")]
-    return active, discontinued
 
 
 def _load_display(rows):
@@ -749,6 +766,8 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         raise ValueError("region_runner_config.json 中未配置任何地区。")
 
     bundle = _load_region_bundle(region_key, force=force_refresh)
+    if include_discontinued:
+        _ensure_discontinued_rows(bundle)
     view_key = (
         region_key,
         store or ALL_STORES,

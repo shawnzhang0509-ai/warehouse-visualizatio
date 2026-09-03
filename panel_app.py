@@ -30,7 +30,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.5.1"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -774,6 +774,7 @@ class PanelApp:
 
     def _show_loading_state(self, message="正在计算店面数据…"):
         self._status_var.set(message)
+        self.result_count_var.set("")
         for key in ("gap", "exempted", "in_stock"):
             if key in self._stat_labels:
                 self._stat_labels[key].configure(text="…", font=("Segoe UI", 14))
@@ -821,6 +822,8 @@ class PanelApp:
         src_line = f"数据源：{src}  |  {Path(data['stock_path']).name}"
         if fmt:
             src_line += f"（{fmt}）"
+            if fmt == ".xlsx":
+                src_line += " · 建议同时保留 .csv 以加速"
         self.source_var.set(src_line)
         self._update_blacklist_label()
         self._prefix_rendered_for = None
@@ -843,7 +846,17 @@ class PanelApp:
             self._apply_loaded_data(self._products_cache[cache_key], region)
             return
 
-        self._show_loading_state()
+        loading_msg = "正在计算店面数据…"
+        try:
+            stock_path, _, _, _ = panel_data.resolve_sources(region)
+            fmt = Path(stock_path).suffix.lower()
+            if fmt == ".xlsx":
+                loading_msg += "（xlsx 解析较慢，建议 Output 目录保留 stock.csv）"
+            if include_disc:
+                loading_msg += " · 正在加载全部停产 SKU…"
+        except Exception:
+            pass
+        self._show_loading_state(loading_msg)
         self._set_controls_state(False)
         self._set_busy(True)
 
