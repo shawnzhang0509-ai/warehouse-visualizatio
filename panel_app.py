@@ -30,7 +30,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.5.2"
+APP_VERSION = "1.5.3"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -100,7 +100,7 @@ class PanelApp:
         self._products_cache = {}
         self._prefix_rendered_for = None
         self._lazy_groups = {}
-        self._loaded_include_discontinued = False
+        self._loaded_full_stock = False
         self._sort_col = None
         self._sort_reverse = False
 
@@ -428,21 +428,24 @@ class PanelApp:
         store = self.store_combo.get() if self.store_combo else self.store_var.get()
         return store != panel_data.ALL_STORES
 
-    def _include_discontinued(self):
-        """仅在「已停产」筛选时加载 1.3 万+ 停产 SKU；「全部」仍只用快路径在产数据。"""
-        return self.discontinue_filter_var.get() == "已停产"
+    def _loads_full_stock(self):
+        """「全部」与「已停产」需加载含停产的完整 stock 数据。"""
+        return self.discontinue_filter_var.get() in ("全部", "已停产")
 
     def _on_filter_combo_change(self):
         disc_f = self.discontinue_filter_var.get()
-        need_disc = disc_f == "已停产"
-        if need_disc != self._loaded_include_discontinued:
-            if disc_f == "已停产":
+        need_full = self._loads_full_stock()
+        if need_full != self._loaded_full_stock:
+            if need_full:
                 if self.only_gap_var.get():
                     self.only_gap_var.set(False)
                 if self.only_exempted_var.get():
                     self.only_exempted_var.set(False)
                 self._quick_filter = None
-                self._status_var.set("正在加载停产数据，请稍候…")
+                if disc_f == "全部":
+                    self._status_var.set("正在加载全部数据（含停产），请稍候…")
+                else:
+                    self._status_var.set("正在加载停产数据，请稍候…")
             self.reload()
             return
         if disc_f == "已停产":
@@ -506,6 +509,9 @@ class PanelApp:
             self._quick_filter = "exempted" if self.only_exempted_var.get() else None
         elif key == "in_stock":
             self.stock_filter_var.set("无货" if self.stock_filter_var.get() == "有货" else "有货")
+        if self._loads_full_stock() != self._loaded_full_stock:
+            self.reload()
+            return
         self._refresh_view()
 
     def _update_stat_card_highlight(self):
@@ -763,8 +769,6 @@ class PanelApp:
                 f"在产 {len(active_nd)}（待处理 {pending_active}）"
                 f" · 停产 {len(disc_nd)} · 点击筛选"
             )
-            if not self._loaded_include_discontinued and disc_f == "全部":
-                hint += " · 列表仅在产，停产请切「已停产」"
         return {
             "main_count": len(not_displayed),
             "hint": hint,
@@ -825,7 +829,7 @@ class PanelApp:
         self.source_var.set(src_line)
         self._update_blacklist_label()
         self._prefix_rendered_for = None
-        self._loaded_include_discontinued = self._include_discontinued()
+        self._loaded_full_stock = self._loads_full_stock()
         self._refresh_view()
 
     def reload(self, force=False):
@@ -833,7 +837,7 @@ class PanelApp:
         token = self._reload_token
         region = self._current_region()
         store = self.store_combo.get() if self.store_combo else self.store_var.get()
-        include_disc = self._include_discontinued()
+        include_disc = self._loads_full_stock()
         cache_key = (region, store, include_disc)
 
         if force:
@@ -846,7 +850,11 @@ class PanelApp:
 
         loading_msg = "正在计算店面数据…"
         if include_disc:
-            loading_msg += " · 正在加载全部停产 SKU…"
+            disc_f = self.discontinue_filter_var.get()
+            if disc_f == "已停产":
+                loading_msg += " · 正在加载停产 SKU…"
+            else:
+                loading_msg += " · 正在加载全部数据（含停产）…"
         self._show_loading_state(loading_msg)
         self._set_controls_state(False)
         self._set_busy(True)
@@ -995,9 +1003,9 @@ class PanelApp:
         elif disc_f == "在产":
             self.result_count_var.set(f"显示 {len(filtered)} / 在产 {active_total} 条")
         elif disc_f == "全部":
+            total = active_total + disc_total
             self.result_count_var.set(
-                f"显示 {len(filtered)} / 在产 {active_total} 条"
-                + ("" if self._loaded_include_discontinued else "（停产请切「已停产」）")
+                f"显示 {len(filtered)} / 全部 {total} 条（在产 {active_total} + 停产 {disc_total}）"
             )
         else:
             self.result_count_var.set(f"显示 {len(filtered)} 条")
