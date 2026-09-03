@@ -1243,7 +1243,11 @@ class PanelApp:
                 summary += f"，{disc_n} 停产"
             summary += "）"
             has_attention = any(i.get("gap") or i.get("exempted") for i in items)
-            expand_now = has_attention or len(products) <= AUTO_EXPAND_GROUPS_THRESHOLD
+            expand_now = (
+                len(items) == 1
+                or has_attention
+                or len(products) <= AUTO_EXPAND_GROUPS_THRESHOLD
+            )
             label_text = f"{'▸ ' if not expand_now else ''}{family_label} {summary}"
             parent = self._tree.insert(
                 "", tk.END, text="",
