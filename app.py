@@ -12,11 +12,6 @@ try:
 except ImportError:
     pyodbc = None
 
-try:
-    from openpyxl import Workbook
-except ImportError:
-    Workbook = None
-
 # SQL 模板文件名（不含后缀）到看板标准文件名的映射
 STANDARD_OUTPUT_NAMES = {
     "stock": "stock",
@@ -28,6 +23,8 @@ STANDARD_OUTPUT_NAMES = {
     "display_list": "display",
     "display_with_families": "display",
     "display.with_families": "display",
+    "stock_discontinued": "stock_discontinued",
+    "product_stock_discontinued": "stock_discontinued",
 }
 
 try:
@@ -275,7 +272,6 @@ def _output_paths(output_dir, region_key, sql_file_name):
     return {
         "output_dir": output_root,
         "csv": output_root / f"{standard_stem}.csv",
-        "xlsx": output_root / f"{standard_stem}.xlsx",
         "standard_name": standard_stem,
     }
 
@@ -289,18 +285,17 @@ def _write_csv(path, columns, rows):
             writer.writerow(list(row))
 
 
-def _write_xlsx(path, columns, rows):
-    if Workbook is None:
-        return False
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "data"
-    if columns:
-        ws.append(list(columns))
-    for row in rows:
-        ws.append(["" if value is None else value for value in row])
-    wb.save(path)
-    return True
+def _remove_legacy_xlsx(csv_path, log=None):
+    """删除同名的旧版 .xlsx，避免看板误读慢文件。"""
+    legacy = Path(csv_path).with_suffix(".xlsx")
+    if not legacy.is_file():
+        return
+    try:
+        legacy.unlink()
+        if callable(log):
+            log(f"已删除旧版 Excel：{legacy.name}")
+    except OSError:
+        pass
 
 
 def _run_single_template(cursor, sql):
@@ -409,18 +404,16 @@ def execute_region(region_key, region_cfg, log=None, on_template_start=None, on_
                 if result["has_result_set"]:
                     paths = _output_paths(region_cfg.get("output_dir"), region_key, tpl_name)
                     _write_csv(paths["csv"], result["columns"], result["rows"])
-                    xlsx_ok = _write_xlsx(paths["xlsx"], result["columns"], result["rows"])
+                    _remove_legacy_xlsx(paths["csv"], log=lambda m: _log(f"[{region_key}] {m}"))
                     outputs.append(
                         {
                             "template": tpl_name,
                             "rows": result["row_count"],
                             "file": str(paths["csv"]),
-                            "xlsx": str(paths["xlsx"]) if xlsx_ok else None,
                             "status": "success",
                         }
                     )
-                    extra = f"，Excel: {paths['xlsx']}" if xlsx_ok else "（未安装 openpyxl，仅导出 CSV）"
-                    _log(f"[{region_key}] 成功：{tpl_name} -> {paths['csv']}{extra} ({result['row_count']} 行)")
+                    _log(f"[{region_key}] 成功：{tpl_name} -> {paths['csv']} ({result['row_count']} 行)")
                     if paths["standard_name"] == "display" and result["row_count"] < 10:
                         _log(
                             f"[{region_key}] ⚠ 警告：display 只有 {result['row_count']} 行，"
