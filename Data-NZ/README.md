@@ -6,10 +6,12 @@
 
 | 模板文件名 | 输出到 Output-NZ/ |
 |-----------|-------------------|
-| product_stock_price.sql | **stock.csv**（建议在产 SKU） |
-| stock_discontinued.sql | **stock_discontinued.csv**（停产 SKU，可选但强烈推荐） |
-| **display_with_families.sql** | **display.csv**（店面下拉靠这个） |
+| **product_stock_price.sql** | **stock.csv**（仅在产，`IsDiscontinued = 0`） |
+| **stock_discontinued.sql** | **stock_discontinued.csv**（仅停产，`IsDiscontinued = 1`） |
+| display_with_families.sql | display.csv（店面下拉靠这个） |
 | weekly_sales.sql | weekly_sales.csv |
+
+**两个 stock 模板请一起执行。** 看板启动时会读 `stock.csv` + `stock_discontinued.csv`，比从一个 1.6 万行大文件里筛停产快得多。
 
 **仅导出 CSV，不再生成 .xlsx。** 重新执行 SQL 时会自动删除同名的旧版 Excel 文件。
 
@@ -17,9 +19,9 @@
 
 | 文件 | 是否需要 |
 |------|---------|
-| `stock.csv` | ✅ 必须 |
+| `stock.csv` | ✅ 必须（在产，由 product_stock_price.sql 导出） |
+| `stock_discontinued.csv` | ✅ 必须（停产，由 stock_discontinued.sql 导出） |
 | `display.csv` | ✅ 必须 |
-| `stock_discontinued.csv` | 强烈推荐（加速「全部/已停产」） |
 | `blacklist.csv` | 可选 |
 | `weekly_sales.csv` | 看板不需要 |
 
