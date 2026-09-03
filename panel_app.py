@@ -428,10 +428,6 @@ class PanelApp:
         store = self.store_combo.get() if self.store_combo else self.store_var.get()
         return store != panel_data.ALL_STORES
 
-    def _loads_full_stock(self):
-        """「全部」与「已停产」需加载含停产的完整 stock 数据。"""
-        return self.discontinue_filter_var.get() in ("全部", "已停产")
-
     def _on_filter_combo_change(self):
         disc_f = self.discontinue_filter_var.get()
         if not panel_data.EAGER_DISCONTINUED_STOCK:
