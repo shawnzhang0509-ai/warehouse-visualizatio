@@ -30,14 +30,13 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.5.7"
+APP_VERSION = "1.5.8"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
 PLACEHOLDER_COLOR = "#d1d5db"
 SCROLL_UNITS = 8
 MAX_TREE_ROWS = 500
-AUTO_EXPAND_GROUPS_THRESHOLD = 80
 LOAD_IMAGES = os.getenv("PANEL_LOAD_IMAGES", "").lower() in ("1", "true", "yes")
 
 C_HEADER = "#1e4f8a"
