@@ -1242,7 +1242,6 @@ class PanelApp:
             if disc_n:
                 summary += f"，{disc_n} 停产"
             summary += "）"
-            has_attention = any(i.get("gap") or i.get("exempted") for i in items)
             # 大结果集（如三个「全部」=16077 条）：全部折叠，避免单 SKU 系列自动展开刷屏
             expand_now = expand_all
             eager_children = expand_now and len(items) <= MAX_EXPAND_GROUP_ITEMS
