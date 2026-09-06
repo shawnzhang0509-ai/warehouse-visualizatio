@@ -30,7 +30,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.1"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -1243,11 +1243,8 @@ class PanelApp:
                 summary += f"，{disc_n} 停产"
             summary += "）"
             has_attention = any(i.get("gap") or i.get("exempted") for i in items)
-            expand_now = (
-                expand_all
-                or len(items) == 1
-                or has_attention
-            )
+            # 大结果集（如三个「全部」=16077 条）：全部折叠，避免单 SKU 系列自动展开刷屏
+            expand_now = expand_all
             eager_children = expand_now and len(items) <= MAX_EXPAND_GROUP_ITEMS
             show_open = expand_now and eager_children
             label_text = f"{'▸ ' if not show_open else ''}{family_label} {summary}"
