@@ -75,7 +75,15 @@
 
 ## 黑名单（可选）
 
-在 `Output-NZ/` 下放 `blacklist.csv`，一列 SKU 即可。
+在 `Output-NZ/` 下放 `blacklist.csv` 或 `blacklist.xlsx`（Excel 直接保存也行），第一列 SKU：
+
+| sku | note（可选） |
+|-----|-------------|
+| 999-989 | Dummy Product |
+
+- 看板状态栏应显示「黑名单：已排除 N 个 SKU」；若显示 **0 个 / 未找到文件**，说明路径不对或尚未点「刷新数据」
+- 黑名单对**所有店面**生效（Onehunga、Westgate、CHCH 等都会排除）
+- 修改后必须点「刷新数据」
 
 ## 注意
 

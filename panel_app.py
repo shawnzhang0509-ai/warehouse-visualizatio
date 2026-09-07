@@ -30,7 +30,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.6.2"
+APP_VERSION = "1.6.3"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -872,9 +872,17 @@ class PanelApp:
             text = f"黑名单：已排除 {count} 个 SKU  |  文件：{fname}（{Path(path).parent.name}/）"
             fg = C_CARD_GAP if count else C_MUTED
         else:
-            text = (
-                f"黑名单：当前 0 个  |  未找到文件，可在以下路径新建 blacklist.csv：{expected}"
-            )
+            xlsx_path = expected.with_suffix(".xlsx")
+            if xlsx_path.is_file():
+                text = (
+                    f"黑名单：当前 0 个  |  已发现 {xlsx_path.name} 但未加载"
+                    f"（请点「刷新数据」，或另存为 blacklist.csv：{expected}）"
+                )
+            else:
+                text = (
+                    f"黑名单：当前 0 个  |  未找到文件。"
+                    f"请将 Excel 另存为 CSV 到：{expected}"
+                )
             fg = C_MUTED
         self._blacklist_lbl.configure(text=text, fg=fg)
 

@@ -18,6 +18,11 @@ import re
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
 
+try:
+    from openpyxl import load_workbook as _load_workbook
+except ImportError:
+    _load_workbook = None
+
 ROOT_DIR = Path(__file__).parent
 RUNNER_CONFIG_FILE = ROOT_DIR / "region_runner_config.json"
 EXEMPTION_CONFIG_FILE = ROOT_DIR / "family_exemption.json"
@@ -366,15 +371,67 @@ def _load_blacklist(path):
     codes = set()
     if not path or not Path(path).is_file():
         return codes
-    for row in _read_table(path):
+    for row in _read_blacklist_table(path):
         code = _pick(row, BLACKLIST_KEYS)
         if code:
             codes.add(_norm_code(code))
     return codes
 
 
-def _resolve_blacklist_path(data_dir):
+def _read_xlsx_rows(path):
+    if _load_workbook is None:
+        raise RuntimeError(
+            f"黑名单为 Excel（{path.name}），请另存为 blacklist.csv，或运行：pip install openpyxl"
+        )
+    wb = _load_workbook(path, read_only=True, data_only=True)
+    ws = wb.active
+    rows_iter = ws.iter_rows(values_only=True)
+    headers = next(rows_iter, None)
+    if not headers:
+        wb.close()
+        return []
+    columns = [str(h).strip() if h is not None else "" for h in headers]
+    out = []
+    for row in rows_iter:
+        if row is None:
+            continue
+        item = {}
+        empty = True
+        for idx, col in enumerate(columns):
+            if not col:
+                continue
+            value = row[idx] if idx < len(row) else None
+            if value is not None and str(value).strip() != "":
+                empty = False
+            item[col] = value
+        if not empty:
+            out.append(item)
+    wb.close()
+    return out
+
+
+def _read_blacklist_table(path):
+    path = Path(path)
+    if path.suffix.lower() == ".xlsx":
+        return _read_xlsx_rows(path)
+    return _read_csv(path)
+
+
+def _find_blacklist_file(data_dir):
+    """黑名单支持 blacklist.csv / blacklist.xlsx（Excel 直接保存也可用）。"""
+    base = Path(data_dir)
+    if not base.is_dir():
+        return None
+    for stem in BLACKLIST_STEMS:
+        for ext in (".csv", ".xlsx"):
+            candidate = base / f"{stem}{ext}"
+            if candidate.is_file():
+                return candidate
     return _find_region_data_file(data_dir, BLACKLIST_STEMS)
+
+
+def _resolve_blacklist_path(data_dir):
+    return _find_blacklist_file(data_dir)
 
 
 def expected_blacklist_path(region=None):
