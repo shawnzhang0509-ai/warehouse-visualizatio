@@ -22,7 +22,7 @@
 | `stock.csv` | ✅ 必须（在产，由 product_stock_price.sql 导出） |
 | `stock_discontinued.csv` | ✅ 必须（停产，由 stock_discontinued.sql 导出） |
 | `display.csv` | ✅ 必须 |
-| `blacklist.csv` | 可选 |
+| `blacklist.csv` | 可选（见 `blacklist.example.csv` 模板） |
 | `weekly_sales.csv` | 看板不需要 |
 
 ## 看板默认行为（v1.5.5+）
@@ -75,7 +75,7 @@
 
 ## 黑名单（可选）
 
-在 `Output-NZ/` 下放 `blacklist.csv` 或 `blacklist.xlsx`（Excel 直接保存也行），第一列 SKU：
+复制 `Data-NZ/blacklist.example.csv` 到 `Output-NZ/blacklist.csv`，或直接在 `Output-NZ/` 新建 `blacklist.csv` / `blacklist.xlsx`，第一列 SKU：
 
 | sku | note（可选） |
 |-----|-------------|

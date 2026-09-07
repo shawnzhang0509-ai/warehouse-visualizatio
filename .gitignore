@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 data/daily_snapshots.json
 Output-NZ/latest/
+Output-NZ/*.csv
+Output-NZ/*.xlsx
