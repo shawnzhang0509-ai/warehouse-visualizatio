@@ -30,7 +30,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.6.3"
+APP_VERSION = "1.6.4"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -202,7 +202,17 @@ class PanelApp:
         self.reload_btn.grid(row=1, column=2, sticky="w", padx=(0, 8), pady=(2, 0))
         self.view_img_btn = ttk.Button(toolbar, text="查看图片", style="Tool.TButton",
                                        command=self._open_selected_image)
-        self.view_img_btn.grid(row=1, column=3, sticky="w", pady=(2, 0))
+        self.view_img_btn.grid(row=1, column=3, sticky="w", padx=(0, 8), pady=(2, 0))
+        self._expand_all_btn = ttk.Button(
+            toolbar, text="展开全部系列", style="Tool.TButton",
+            command=self._expand_all_groups, state=tk.DISABLED,
+        )
+        self._expand_all_btn.grid(row=1, column=4, sticky="w", padx=(0, 6), pady=(2, 0))
+        self._collapse_all_btn = ttk.Button(
+            toolbar, text="折叠全部系列", style="Tool.TButton",
+            command=self._collapse_all_groups, state=tk.DISABLED,
+        )
+        self._collapse_all_btn.grid(row=1, column=5, sticky="w", pady=(2, 0))
 
         filter_bar = tk.Frame(self.root, bg="white", padx=14, pady=8)
         filter_bar.pack(fill=tk.X, padx=12, pady=(6, 0))
@@ -293,24 +303,6 @@ class PanelApp:
 
         inner = tk.Frame(self._tab_products, bg="white")
         inner.pack(fill=tk.BOTH, expand=True)
-
-        tree_tools = tk.Frame(inner, bg="white", padx=4, pady=(4, 0))
-        tree_tools.pack(fill=tk.X)
-        self._expand_all_btn = ttk.Button(
-            tree_tools, text="展开全部系列", style="Tool.TButton",
-            command=self._expand_all_groups, state=tk.DISABLED,
-        )
-        self._expand_all_btn.pack(side=tk.LEFT)
-        self._collapse_all_btn = ttk.Button(
-            tree_tools, text="折叠全部系列", style="Tool.TButton",
-            command=self._collapse_all_groups, state=tk.DISABLED,
-        )
-        self._collapse_all_btn.pack(side=tk.LEFT, padx=(6, 0))
-        tk.Label(
-            tree_tools,
-            text="大列表默认折叠系列；可一键展开/折叠",
-            bg="white", fg=C_MUTED, font=("Segoe UI", 8),
-        ).pack(side=tk.LEFT, padx=(10, 0))
 
         tree_body = tk.Frame(inner, bg="white")
         tree_body.pack(fill=tk.BOTH, expand=True)
