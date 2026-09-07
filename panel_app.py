@@ -30,7 +30,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.6.1"
+APP_VERSION = "1.6.2"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -100,6 +100,7 @@ class PanelApp:
         self._products_cache = {}
         self._prefix_rendered_for = None
         self._lazy_groups = {}
+        self._group_labels = {}
         self._loaded_full_stock = False
         self._prewarm_token = 0
         self._sort_col = None
@@ -292,11 +293,32 @@ class PanelApp:
 
         inner = tk.Frame(self._tab_products, bg="white")
         inner.pack(fill=tk.BOTH, expand=True)
-        inner.grid_rowconfigure(0, weight=1)
-        inner.grid_columnconfigure(0, weight=1)
+
+        tree_tools = tk.Frame(inner, bg="white", padx=4, pady=(4, 0))
+        tree_tools.pack(fill=tk.X)
+        self._expand_all_btn = ttk.Button(
+            tree_tools, text="展开全部系列", style="Tool.TButton",
+            command=self._expand_all_groups, state=tk.DISABLED,
+        )
+        self._expand_all_btn.pack(side=tk.LEFT)
+        self._collapse_all_btn = ttk.Button(
+            tree_tools, text="折叠全部系列", style="Tool.TButton",
+            command=self._collapse_all_groups, state=tk.DISABLED,
+        )
+        self._collapse_all_btn.pack(side=tk.LEFT, padx=(6, 0))
+        tk.Label(
+            tree_tools,
+            text="大列表默认折叠系列；可一键展开/折叠",
+            bg="white", fg=C_MUTED, font=("Segoe UI", 8),
+        ).pack(side=tk.LEFT, padx=(10, 0))
+
+        tree_body = tk.Frame(inner, bg="white")
+        tree_body.pack(fill=tk.BOTH, expand=True)
+        tree_body.grid_rowconfigure(0, weight=1)
+        tree_body.grid_columnconfigure(0, weight=1)
 
         columns = ("code", "name", "family", "price", "stock", "display", "discontinue", "status")
-        self._tree = ttk.Treeview(inner, columns=columns, show="tree headings", selectmode="browse")
+        self._tree = ttk.Treeview(tree_body, columns=columns, show="tree headings", selectmode="browse")
         self._tree.heading("#0", text="产品图")
         self._tree.column("#0", width=72, minwidth=68, stretch=False, anchor="center")
         headings = {
@@ -316,7 +338,7 @@ class PanelApp:
             self._tree.tag_configure(tag, background=bg)
         self._tree.tag_configure("group", font=("Segoe UI", 10, "bold"))
 
-        self._tree_vscroll = ttk.Scrollbar(inner, orient="vertical", command=self._on_tree_yscroll)
+        self._tree_vscroll = ttk.Scrollbar(tree_body, orient="vertical", command=self._on_tree_yscroll)
         self._tree.configure(yscrollcommand=self._tree_vscroll.set)
         self._tree.grid(row=0, column=0, sticky="nsew")
         self._tree_vscroll.grid(row=0, column=1, sticky="ns")
@@ -1074,7 +1096,7 @@ class PanelApp:
         else:
             hint = ""
             if len(filtered) > AUTO_EXPAND_ALL_GROUPS:
-                hint = " · 系列分组已折叠，点击 ▸ 展开"
+                hint = " · 系列已折叠，可点「展开全部系列」"
             self._status_var.set(
                 f"就绪 · {len(filtered)} 条{hint}"
                 + ("" if self._images_enabled() else " · 双击行或点「查看图片」")
@@ -1183,10 +1205,12 @@ class PanelApp:
             price, stock, displayed, discontinue, status,
         )
 
-    def _insert_group_children(self, parent, items, render_token):
+    def _insert_group_children(self, parent, items, render_token, start=0):
         if render_token != self._render_token:
             return
-        for idx, item in enumerate(items):
+        end = min(start + 50, len(items))
+        for idx in range(start, end):
+            item = items[idx]
             iid = self._tree.insert(
                 parent, tk.END, image=self._placeholder_photo, text="",
                 values=self._tree_row_values(item), tags=self._row_tag(item, idx),
@@ -1197,6 +1221,79 @@ class PanelApp:
                 self._iid_to_url[iid] = url
             elif item.get("image_raw"):
                 self._iid_to_url[iid] = item
+        if end < len(items):
+            self.root.after(1, lambda: self._insert_group_children(
+                parent, items, render_token, end,
+            ))
+        else:
+            self._debounce_visible_images()
+
+    def _update_group_tool_buttons(self):
+        if not getattr(self, "_expand_all_btn", None):
+            return
+        has_lazy = bool(self._lazy_groups)
+        has_open = False
+        if self._tree:
+            for iid in self._tree.get_children():
+                if self._tree.get_children(iid):
+                    has_open = True
+                    break
+        self._expand_all_btn.configure(state=tk.NORMAL if has_lazy else tk.DISABLED)
+        self._collapse_all_btn.configure(state=tk.NORMAL if has_open else tk.DISABLED)
+
+    def _expand_all_groups(self):
+        if not self._tree:
+            return
+        pending = [iid for iid in self._tree.get_children() if iid in self._lazy_groups]
+        if not pending:
+            return
+        self._status_var.set(f"正在展开 {len(pending)} 个系列…")
+        total = len(pending)
+
+        def step(ix=0):
+            if ix >= total:
+                self._update_group_tool_buttons()
+                self._status_var.set(f"就绪 · 已展开 {total} 个系列")
+                return
+            batch = pending[ix:ix + 6]
+            for iid in batch:
+                if iid not in self._lazy_groups:
+                    continue
+                label = self._group_labels.get(iid, "")
+                vals = list(self._tree.item(iid, "values"))
+                if len(vals) > 1 and label:
+                    vals[1] = label
+                    self._tree.item(iid, values=vals)
+                self._tree.item(iid, open=True)
+                self._populate_lazy_group(iid)
+            self.root.after(8, lambda: step(ix + len(batch)))
+
+        step(0)
+
+    def _collapse_all_groups(self):
+        if not self._tree:
+            return
+        render_token = self._render_token
+        folded = 0
+        for iid in self._tree.get_children():
+            children = self._tree.get_children(iid)
+            if not children:
+                continue
+            items = [self._products_by_iid[c] for c in children if c in self._products_by_iid]
+            for c in children:
+                self._products_by_iid.pop(c, None)
+                self._iid_to_url.pop(c, None)
+            self._tree.delete(*children)
+            self._lazy_groups[iid] = (items, render_token)
+            label = self._group_labels.get(iid, "")
+            vals = list(self._tree.item(iid, "values"))
+            if len(vals) > 1:
+                vals[1] = f"▸ {label}" if label else vals[1]
+                self._tree.item(iid, values=vals, open=False)
+            folded += 1
+        self._update_group_tool_buttons()
+        if folded:
+            self._status_var.set(f"就绪 · 已折叠 {folded} 个系列")
 
     def _populate_lazy_group(self, iid):
         if iid not in self._lazy_groups:
@@ -1216,6 +1313,7 @@ class PanelApp:
         self._render_token += 1
         render_token = self._render_token
         self._lazy_groups.clear()
+        self._group_labels.clear()
         if self._tree.get_children():
             self._tree.delete(*self._tree.get_children())
         self._products_by_iid.clear()
@@ -1247,11 +1345,13 @@ class PanelApp:
             eager_children = expand_now and len(items) <= MAX_EXPAND_GROUP_ITEMS
             show_open = expand_now and eager_children
             label_text = f"{'▸ ' if not show_open else ''}{family_label} {summary}"
+            full_label = f"{family_label} {summary}"
             parent = self._tree.insert(
                 "", tk.END, text="",
                 values=("", label_text, "", "", "", "", "", ""),
                 tags=("group",), open=show_open,
             )
+            self._group_labels[parent] = full_label
             if eager_children:
                 self._insert_group_children(parent, items, render_token)
             else:
@@ -1267,11 +1367,13 @@ class PanelApp:
             if end < len(grouped):
                 self.root.after(1, lambda s=end: fill_batch(s))
             else:
+                self._update_group_tool_buttons()
                 self._load_visible_images()
 
         if grouped:
             self.root.after_idle(lambda: fill_batch(0))
         else:
+            self._update_group_tool_buttons()
             self._load_visible_images()
 
     def run(self):
