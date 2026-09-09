@@ -30,7 +30,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.6.5"
+APP_VERSION = "1.7.0"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -118,6 +118,11 @@ class PanelApp:
         self._stat_cards = {}
         self._quick_filter = None
 
+        try:
+            from app import _ensure_runner_config
+            _ensure_runner_config()
+        except Exception:
+            pass
         regions = panel_data.list_regions()
         if not regions:
             raise RuntimeError("region_runner_config.json 中未配置任何地区。")
@@ -186,7 +191,7 @@ class PanelApp:
             region_values.append(f"{r['key']} {label}")
             if r["key"] == panel_data.default_region():
                 default_index = i
-        self.region_combo = ttk.Combobox(toolbar, width=16, state="readonly", values=region_values)
+        self.region_combo = ttk.Combobox(toolbar, width=22, state="readonly", values=region_values)
         self.region_combo.current(default_index)
         self.region_combo.grid(row=1, column=0, sticky="w", padx=(0, 12), pady=(2, 0))
         self.region_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_region_change())

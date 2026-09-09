@@ -227,11 +227,19 @@ def _should_skip_template(file_path, sql_text):
         return True
     if name.endswith(".example") or ".example." in name:
         return True
-    if name in ("stock.txt", "display.txt"):
-        return True
     if _is_stub_sql(sql_text):
         return True
     return False
+
+
+def _template_priority(file_path):
+    """同输出文件时优先 .sql，其次 .txt。"""
+    ext = file_path.suffix.lower()
+    if ext == ".sql":
+        return 0
+    if ext == ".txt":
+        return 1
+    return 2
 
 
 def _read_sql_file(path):
@@ -245,7 +253,8 @@ def _read_sql_file(path):
 
 
 def _load_sql_templates(template_dir, log=None):
-    templates = []
+    """读取 Data-{region}/ 下 .sql / .txt 查询模板；同名输出只保留优先级最高的一份。"""
+    by_output = {}
     for file_path in _list_txt_templates(template_dir):
         sql_text = _read_sql_file(file_path)
         if not sql_text:
@@ -254,7 +263,28 @@ def _load_sql_templates(template_dir, log=None):
             if callable(log):
                 log(f"跳过：{file_path.name}（占位/示例模板，不执行）")
             continue
-        templates.append({"name": file_path.name, "sql": sql_text})
+        output_stem = _standard_output_stem(file_path.name)
+        tpl = {"name": file_path.name, "sql": sql_text, "path": file_path}
+        existing = by_output.get(output_stem)
+        if existing is None:
+            by_output[output_stem] = tpl
+            continue
+        new_pri = _template_priority(file_path)
+        old_pri = _template_priority(existing["path"])
+        if new_pri < old_pri:
+            if callable(log):
+                log(
+                    f"跳过：{existing['name']}（与 {file_path.name} 输出同一文件，"
+                    f"优先使用 {file_path.suffix.lower()}）"
+                )
+            by_output[output_stem] = tpl
+        elif callable(log):
+            log(
+                f"跳过：{file_path.name}（与 {existing['name']} 输出同一文件，"
+                f"优先使用 {existing['path'].suffix.lower()}）"
+            )
+    templates = [{"name": t["name"], "sql": t["sql"]} for t in by_output.values()]
+    templates.sort(key=lambda t: t["name"].lower())
     return templates
 
 
@@ -369,7 +399,7 @@ def execute_region(region_key, region_cfg, log=None, on_template_start=None, on_
     _log(f"[{region_key}] 开始执行：{label}")
     templates = _load_sql_templates(region_cfg.get("template_dir"), log=_log)
     if not templates:
-        _log(f"[{region_key}] 未找到可执行的 txt 模板。")
+        _log(f"[{region_key}] 未找到可执行的 .sql / .txt 模板。")
         return {
             "region": region_key,
             "label": label,
@@ -836,11 +866,12 @@ class DesktopRunnerApp:
             files = _list_txt_templates(cfg.get("template_dir"))
             self.template_list.delete(0, tk.END)
             if not files:
-                self.template_list.insert(tk.END, "目录下没有 .txt 模板。")
+                self.template_list.insert(tk.END, "目录下没有 .sql / .txt 模板。")
             else:
                 for f in files:
                     self.template_list.insert(tk.END, f.name)
-            self.log(f"[{region}] 找到 {len(files)} 个 txt 模板。")
+            runnable = _load_sql_templates(cfg.get("template_dir"), log=self.log)
+            self.log(f"[{region}] 目录内 {len(files)} 个文件，可执行 {len(runnable)} 个模板。")
             self._set_status("模板读取完成")
         except Exception as exc:
             self.template_list.delete(0, tk.END)

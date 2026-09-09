@@ -26,6 +26,14 @@ except ImportError:
 ROOT_DIR = Path(__file__).parent
 RUNNER_CONFIG_FILE = ROOT_DIR / "region_runner_config.json"
 EXEMPTION_CONFIG_FILE = ROOT_DIR / "family_exemption.json"
+
+# 看板地区下拉固定顺序；即使用户 region_runner_config.json 较旧也会显示三国入口
+REGION_ORDER = ("NZ", "AU", "CA")
+DEFAULT_REGION_META = {
+    "NZ": {"label": "新西兰", "template_dir": "Data-NZ", "output_dir": "Output-NZ"},
+    "AU": {"label": "澳洲", "template_dir": "Data-AU", "output_dir": "Output-AU"},
+    "CA": {"label": "加拿大", "template_dir": "Data-CA", "output_dir": "Output-CA"},
+}
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
 # 启动时预加载停产 SKU（停产为常态时避免每次切筛选都重算）
@@ -286,14 +294,27 @@ def _region_display_stems(region_key):
 
 
 def _load_runner_regions():
-    if not RUNNER_CONFIG_FILE.exists():
-        return {}
-    try:
-        with RUNNER_CONFIG_FILE.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data.get("regions", {}) if isinstance(data, dict) else {}
-    except Exception:
-        return {}
+    """合并默认三国配置与用户 region_runner_config.json（用户文件可覆盖 label/目录等）。"""
+    file_regions = {}
+    if RUNNER_CONFIG_FILE.exists():
+        try:
+            with RUNNER_CONFIG_FILE.open("r", encoding="utf-8") as f:
+                data = json.load(f)
+            raw = data.get("regions", {}) if isinstance(data, dict) else {}
+            file_regions = {str(k).strip().upper(): v for k, v in raw.items() if isinstance(v, dict)}
+        except Exception:
+            file_regions = {}
+
+    merged = {}
+    for key in REGION_ORDER:
+        base = dict(DEFAULT_REGION_META[key])
+        if key in file_regions:
+            base.update(file_regions[key])
+        merged[key] = base
+    for key, cfg in file_regions.items():
+        if key not in merged:
+            merged[key] = dict(cfg)
+    return merged
 
 
 def _region_output_dir(region_key):
@@ -333,8 +354,13 @@ def resolve_sources(region=None):
 
 
 def list_regions():
+    regions = _load_runner_regions()
+    order = list(REGION_ORDER) + [k for k in regions if k not in REGION_ORDER]
     options = []
-    for key, cfg in _load_runner_regions().items():
+    for key in order:
+        cfg = regions.get(key)
+        if not cfg:
+            continue
         out_dir = _region_output_dir(key)
         has_data = _find_region_data_file(out_dir, _region_stock_stems(key)) is not None
         options.append({
@@ -346,12 +372,12 @@ def list_regions():
 
 
 def default_region():
-    """返回第一个已有导出数据的地区，否则返回配置里的第一个地区。"""
+    """返回第一个已有导出数据的地区，否则 NZ。"""
     regions = list_regions()
     for r in regions:
         if r.get("has_latest"):
             return r["key"]
-    return regions[0]["key"] if regions else None
+    return regions[0]["key"] if regions else "NZ"
 
 
 def clear_region_cache(region=None):
