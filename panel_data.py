@@ -80,6 +80,24 @@ REGION_STORE_STOCK_RULES = {
     ],
 }
 DEFAULT_ALL_WAREHOUSES = ("carbine", "walls", "geraldconnelly")
+STORE_NAME_SKIP_TOKENS = frozenset({
+    "shop", "display", "store", "warehouse", "wh", "the", "for", "and", "repair", "outlet",
+})
+METADATA_COLUMN_KEYS = frozenset({
+    "productcode", "product_code", "sku", "itemcode", "item_code", "code", "productid",
+    "product_id", "product", "item", "productname", "product_name", "name", "description",
+    "desc", "title", "family", "productfamily", "product_family", "category", "categoryname",
+    "category_name", "group", "producttype", "type", "productfamilyname", "price", "unitprice",
+    "unit_price", "sellprice", "sell_price", "saleprice", "sale_price", "retailprice",
+    "retail_price", "discontinued", "isdiscontinued", "is_discontinued", "discontinue",
+    "discontinueflag", "discontinue_flag", "status", "imagefile", "image", "imageurl",
+    "image_url", "img", "picture", "photo", "thumbnail", "thumb", "barcode", "ean", "upc",
+    "vendor", "supplier", "brand", "currency", "tax", "weight", "width", "height", "depth",
+    "length", "color", "colour", "material", "url", "note", "notes", "remark", "remarks",
+})
+WAREHOUSE_COLUMN_SKIP_KEYS = frozenset({
+    "total", "grandtotal", "sum", "overall", "subtotal", "northislandtotal", "southislandtotal",
+})
 
 # region_key -> cached bundle (invalidated when file mtime changes)
 _REGION_CACHE = {}
@@ -133,7 +151,7 @@ def _norm_col_key(name):
 
 
 def _classify_warehouse_column(col_name):
-    """把 stock.xlsx 列名映射到标准仓名（CarbineSt / WallsStoc / GeraldConnellyStock 等）。"""
+    """把 stock 列名映射到标准仓名（CarbineSt / WallsStoc / GeraldConnellyStock 等）。"""
     key = _norm_col_key(col_name)
     if not key:
         return None
@@ -148,11 +166,50 @@ def _classify_warehouse_column(col_name):
     return None
 
 
+def _is_metadata_column(col_name):
+    key = _norm_col_key(col_name)
+    if not key:
+        return True
+    if key in METADATA_COLUMN_KEYS:
+        return True
+    return any(key.startswith(prefix) for prefix in ("product", "image", "isdiscontinued"))
+
+
+def _warehouse_key_from_column(col_name):
+    """识别各仓库存列；NZ 用标准仓名，CA/AU 等用列名归一化后的 key（如 calgarystock）。"""
+    if _is_metadata_column(col_name):
+        return None
+    key = _norm_col_key(col_name)
+    if not key or key in WAREHOUSE_COLUMN_SKIP_KEYS:
+        return None
+    if any(skip in key for skip in WAREHOUSE_COLUMN_SKIP_KEYS):
+        return None
+
+    known = _classify_warehouse_column(col_name)
+    if known:
+        return known
+
+    stock_markers = ("stock", "qty", "quantity", "onhand", "soh", "available")
+    if any(marker in key for marker in stock_markers):
+        return key
+    return None
+
+
+def _warehouse_label(warehouse_key):
+    label = WAREHOUSE_LABELS.get(warehouse_key)
+    if label:
+        return label
+    text = re.sub(r"(stock|qty|quantity|onhand|soh|available)$", "", warehouse_key, flags=re.I)
+    if not text:
+        return warehouse_key
+    return text[:1].upper() + text[1:]
+
+
 def _extract_warehouse_stock(row):
     """从一行 stock 数据提取各仓库存数量。"""
     stock = {}
     for col, value in row.items():
-        wh = _classify_warehouse_column(col)
+        wh = _warehouse_key_from_column(col)
         if not wh:
             continue
         qty = _to_float(value) or 0.0
@@ -160,20 +217,51 @@ def _extract_warehouse_stock(row):
     return stock
 
 
-def _warehouses_for_store(store_name, region_key):
+def _store_name_tokens(store_name):
+    text = re.sub(r"[^a-z0-9]+", " ", str(store_name).strip().lower())
+    return [t for t in text.split() if t and t not in STORE_NAME_SKIP_TOKENS and len(t) >= 3]
+
+
+def _collect_catalog_warehouse_keys(products):
+    keys = set()
+    for product in products:
+        keys.update((product.get("warehouse_stock") or {}).keys())
+    return keys
+
+
+def _warehouses_for_store(store_name, region_key, catalog_keys=None):
     """根据所选店面，决定用哪些仓库列计算有货数量。"""
+    catalog = tuple(catalog_keys or ())
     if store_name == ALL_STORES:
-        return DEFAULT_ALL_WAREHOUSES
+        if catalog:
+            return catalog
+        if region_key.upper() == "NZ":
+            return DEFAULT_ALL_WAREHOUSES
+        return catalog
 
     text = str(store_name).strip().lower()
     for patterns, warehouses in REGION_STORE_STOCK_RULES.get(region_key.upper(), []):
         if any(p in text for p in patterns):
             return warehouses
 
-    if any(x in text for x in ("auck", "onehunga", "westgate", "hamilton", "north")):
-        return ("carbine", "walls")
-    if any(x in text for x in ("chch", "christ", "gerald", "treffers", "south")):
-        return ("geraldconnelly",)
+    if catalog:
+        matched = []
+        for token in _store_name_tokens(store_name):
+            for wh in catalog:
+                if token in wh.lower() and wh not in matched:
+                    matched.append(wh)
+        if matched:
+            return tuple(matched)
+
+    if region_key.upper() == "NZ":
+        if any(x in text for x in ("auck", "onehunga", "westgate", "hamilton", "north")):
+            return ("carbine", "walls")
+        if any(x in text for x in ("chch", "christ", "gerald", "treffers", "south")):
+            return ("geraldconnelly",)
+        return DEFAULT_ALL_WAREHOUSES
+
+    if catalog:
+        return catalog
     return DEFAULT_ALL_WAREHOUSES
 
 
@@ -186,7 +274,7 @@ def _stock_breakdown(warehouse_stock, warehouse_keys):
     for key in warehouse_keys:
         qty = int(warehouse_stock.get(key, 0) or 0)
         if qty > 0:
-            parts.append(f"{WAREHOUSE_LABELS.get(key, key)} {qty}")
+            parts.append(f"{_warehouse_label(key)} {qty}")
     return " + ".join(parts) if parts else ""
 
 
@@ -922,7 +1010,8 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         displayed_codes = by_store.get(store, set())
 
     store_specific = store != ALL_STORES
-    warehouse_keys = _warehouses_for_store(store, region_key)
+    catalog_wh_keys = _collect_catalog_warehouse_keys(iter_rows)
+    warehouse_keys = _warehouses_for_store(store, region_key, catalog_wh_keys)
 
     products = []
     for p in iter_rows:
@@ -1001,7 +1090,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         "in_stock_not_displayed_discontinued": (
             in_stock_not_displayed_discontinued_n if store_specific else None
         ),
-        "stock_sources": " + ".join(WAREHOUSE_LABELS.get(k, k) for k in warehouse_keys),
+        "stock_sources": " + ".join(_warehouse_label(k) for k in warehouse_keys),
         "blacklist_count": len(blacklist),
         "blacklist_path": blacklist_path,
         "blacklist_file_found": bool(blacklist_path),

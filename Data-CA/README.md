@@ -23,6 +23,15 @@
 2. 打开 `panel_app.py`（有货未展示看板），地区下拉选 **CA 加拿大**
 3. 若显示「尚无数据」，说明 `Output-CA/stock.csv` 还未生成，先执行 SQL
 
+## stock.csv 列名
+
+看板会自动识别各仓库存列（列名含 `Stock` / `Qty` / `Quantity` 等），例如：
+
+- `CalgaryStock`、`EdmontonStock`、`VancouverStock`
+
+选 **Calgary Shop-Display** 时，会匹配列名里带 `calgary` 的库存列。  
+若所有系列「库存合计」都是 0，请检查 SQL 导出列名是否含城市/仓库名。
+
 ## 黑名单（可选）
 
 复制 `Data-NZ/blacklist.example.csv` 到 `Output-CA/blacklist.csv`，按需增删 SKU。
