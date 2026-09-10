@@ -38,34 +38,16 @@ except Exception:
     scrolledtext = None
 
 
+from runner_config import (
+    DEFAULT_APP_SETTINGS,
+    DEFAULT_REGION_CONFIG,
+    RUNNER_CONFIG_LOCAL_FILE,
+    ensure_runner_config,
+    load_runner_config,
+    save_runner_config,
+)
+
 ROOT_DIR = Path(__file__).parent
-RUNNER_CONFIG_FILE = ROOT_DIR / "region_runner_config.json"
-
-DEFAULT_REGION_CONFIG = {
-    "NZ": {
-        "label": "新西兰",
-        "connection_uri": "mssql+pymssql://nzlivepooluser:iFur3RP%405sc%5El%5Et3%21@if-akl-live.database.windows.net:1433/nz_ierp_live?charset=utf8",
-        "template_dir": "Data-NZ",
-        "output_dir": "Output-NZ",
-    },
-    "AU": {
-        "label": "澳洲",
-        "connection_uri": "mssql+pymssql://appuserau:Ifurn1tureAuA7p5sc%5El%5Et@if-au-live.database.windows.net:1433/au_ierp_live?charset=utf8",
-        "template_dir": "Data-AU",
-        "output_dir": "Output-AU",
-    },
-    "CA": {
-        "label": "加拿大",
-        "connection_uri": "mssql+pymssql://capool:IfurnitureCA3sc%5El%5Et3@ca-sql-pool-server.database.windows.net:1433/ca_ierp_live?charset=utf8",
-        "template_dir": "Data-CA",
-        "output_dir": "Output-CA",
-    },
-}
-
-DEFAULT_APP_SETTINGS = {
-    "frequency_value": 30,
-    "frequency_unit": "minute",
-}
 
 
 def _utc_iso():
@@ -90,54 +72,9 @@ def _ensure_default_template_dirs(regions):
         template_dir.mkdir(parents=True, exist_ok=True)
 
 
-def _load_runner_config():
-    with RUNNER_CONFIG_FILE.open("r", encoding="utf-8") as f:
-        data = json.load(f)
-    if not isinstance(data, dict):
-        data = {}
-    data.setdefault("regions", {})
-    data.setdefault("settings", {})
-    return data
-
-
-def _save_runner_config(payload):
-    with RUNNER_CONFIG_FILE.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-
-
 def _ensure_runner_config():
-    if not RUNNER_CONFIG_FILE.exists():
-        payload = {"regions": DEFAULT_REGION_CONFIG, "settings": DEFAULT_APP_SETTINGS}
-        _save_runner_config(payload)
-        _ensure_default_template_dirs(payload["regions"])
-        return
-
-    data = _load_runner_config()
-    changed = False
-    regions = data.get("regions", {})
-    settings = data.get("settings", {})
-
-    for region_key, region_cfg in DEFAULT_REGION_CONFIG.items():
-        if region_key not in regions:
-            regions[region_key] = dict(region_cfg)
-            changed = True
-            continue
-        for field, value in region_cfg.items():
-            if field not in regions[region_key]:
-                regions[region_key][field] = value
-                changed = True
-
-    for key, value in DEFAULT_APP_SETTINGS.items():
-        if key not in settings:
-            settings[key] = value
-            changed = True
-
-    if changed:
-        data["regions"] = regions
-        data["settings"] = settings
-        _save_runner_config(data)
-
-    _ensure_default_template_dirs(regions)
+    ensure_runner_config()
+    _ensure_default_template_dirs(load_runner_config().get("regions", {}))
 
 
 def _region_label(region_key, cfg):
@@ -590,7 +527,7 @@ class DesktopRunnerApp:
         if tk is None:
             raise RuntimeError("当前 Python 环境不可用 Tkinter，无法启动桌面界面。")
         _ensure_runner_config()
-        self.config_data = _load_runner_config()
+        self.config_data = load_runner_config()
         self.region_order = ["NZ", "AU", "CA"]
 
         self.root = tk.Tk()
@@ -614,8 +551,10 @@ class DesktopRunnerApp:
         self.save_hint_var = tk.StringVar(value="已加载")
 
         self._build_ui()
-        self._load_edit_form(self.edit_region_var.get())
+        self._load_edit_form(self._current_edit_region())
         self.log("程序已启动。")
+        if RUNNER_CONFIG_LOCAL_FILE.is_file():
+            self.log(f"已加载本地配置：{RUNNER_CONFIG_LOCAL_FILE.name}")
 
     def _build_ui(self):
         top = ttk.Frame(self.root, padding=10)
@@ -653,7 +592,8 @@ class DesktopRunnerApp:
         form.pack(fill=tk.X)
         form.columnconfigure(1, weight=1)
 
-        ttk.Label(form, text="数据库连接").grid(row=0, column=0, sticky=tk.W, padx=(0, 8), pady=4)
+        self.conn_label = ttk.Label(form, text="数据库连接")
+        self.conn_label.grid(row=0, column=0, sticky=tk.W, padx=(0, 8), pady=4)
         self.conn_text = tk.Text(form, height=3, wrap=tk.WORD)
         self.conn_text.grid(row=0, column=1, sticky=tk.EW, pady=4)
         self.conn_text.bind("<KeyRelease>", lambda _e: self._mark_unsaved())
@@ -734,6 +674,11 @@ class DesktopRunnerApp:
         if self.schedule_job:
             self.root.after_cancel(self.schedule_job)
             self.schedule_job = None
+        try:
+            self._sync_edit_form_to_config()
+            save_runner_config(self.config_data)
+        except Exception:
+            pass
         self.root.destroy()
 
     def log(self, text):
@@ -795,6 +740,9 @@ class DesktopRunnerApp:
 
     def _load_edit_form(self, region):
         cfg = self.config_data["regions"][region]
+        label = cfg.get("label", region)
+        if getattr(self, "conn_label", None):
+            self.conn_label.configure(text=f"数据库连接 ({region} {label})")
         self.conn_text.delete("1.0", tk.END)
         self.conn_text.insert("1.0", cfg.get("connection_uri", ""))
         self.template_dir_entry.delete(0, tk.END)
@@ -889,9 +837,11 @@ class DesktopRunnerApp:
             self.freq_value_var.set(settings["frequency_value"])
         settings["frequency_unit"] = self.freq_unit_var.get() if self.freq_unit_var.get() in ("minute", "hour") else "minute"
         self.freq_unit_var.set(settings["frequency_unit"])
-        _save_runner_config(self.config_data)
+        save_runner_config(self.config_data)
+        region = self._current_edit_region()
         self.save_hint_var.set("已保存")
-        self.log("配置保存成功。")
+        self.log(f"配置保存成功（{region}）：{RUNNER_CONFIG_LOCAL_FILE.name}")
+        self.log(f"路径：{RUNNER_CONFIG_LOCAL_FILE}")
         self._set_status("配置已保存")
 
     def test_connection_action(self):
@@ -1001,7 +951,7 @@ class DesktopRunnerApp:
 
 def run_cli_once(region_arg):
     _ensure_runner_config()
-    config = _load_runner_config()
+    config = load_runner_config()
     if region_arg:
         selected = [r.strip().upper() for r in region_arg.split(",") if r.strip()]
     else:

@@ -30,7 +30,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.7.1"
+APP_VERSION = "1.7.2"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -119,8 +119,8 @@ class PanelApp:
         self._quick_filter = None
 
         try:
-            from app import _ensure_runner_config
-            _ensure_runner_config()
+            from runner_config import ensure_runner_config
+            ensure_runner_config()
         except Exception:
             pass
         regions = panel_data.list_regions()

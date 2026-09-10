@@ -382,16 +382,15 @@ def _region_display_stems(region_key):
 
 
 def _load_runner_regions():
-    """合并默认三国配置与用户 region_runner_config.json（用户文件可覆盖 label/目录等）。"""
-    file_regions = {}
-    if RUNNER_CONFIG_FILE.exists():
-        try:
-            with RUNNER_CONFIG_FILE.open("r", encoding="utf-8") as f:
-                data = json.load(f)
-            raw = data.get("regions", {}) if isinstance(data, dict) else {}
-            file_regions = {str(k).strip().upper(): v for k, v in raw.items() if isinstance(v, dict)}
-        except Exception:
-            file_regions = {}
+    """合并默认三国配置与 region_runner_config(.local).json。"""
+    try:
+        from runner_config import load_runner_config
+        file_regions = load_runner_config().get("regions", {})
+        file_regions = {
+            str(k).strip().upper(): v for k, v in file_regions.items() if isinstance(v, dict)
+        }
+    except Exception:
+        file_regions = {}
 
     merged = {}
     for key in REGION_ORDER:

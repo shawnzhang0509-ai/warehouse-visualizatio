@@ -1,3 +1,4 @@
+region_runner_config.local.json
 __pycache__/
 *.pyc
 data/daily_snapshots.json
