@@ -41,6 +41,7 @@ except Exception:
 from runner_config import (
     DEFAULT_APP_SETTINGS,
     DEFAULT_REGION_CONFIG,
+    RUNNER_CONFIG_FILE,
     RUNNER_CONFIG_LOCAL_FILE,
     ensure_runner_config,
     load_runner_config,
@@ -549,12 +550,13 @@ class DesktopRunnerApp:
         self.progress_var = tk.DoubleVar(value=0)
         self.progress_text_var = tk.StringVar(value="")
         self.save_hint_var = tk.StringVar(value="已加载")
+        self._active_edit_region = None
 
         self._build_ui()
-        self._load_edit_form(self._current_edit_region())
+        self._active_edit_region = self._current_edit_region()
+        self._load_edit_form(self._active_edit_region)
         self.log("程序已启动。")
-        if RUNNER_CONFIG_LOCAL_FILE.is_file():
-            self.log(f"已加载本地配置：{RUNNER_CONFIG_LOCAL_FILE.name}")
+        self._log_config_sources()
 
     def _build_ui(self):
         top = ttk.Frame(self.root, padding=10)
@@ -643,6 +645,8 @@ class DesktopRunnerApp:
         self.schedule_stop_btn.pack(side=tk.LEFT, padx=(0, 8))
         self.save_btn = ttk.Button(action_frame, text="保存配置", command=self.save_config_action)
         self.save_btn.pack(side=tk.LEFT)
+        self.reload_cfg_btn = ttk.Button(action_frame, text="重新加载配置", command=self.reload_config_action)
+        self.reload_cfg_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         status_frame = ttk.Frame(top)
         status_frame.pack(fill=tk.X, pady=6)
@@ -705,7 +709,10 @@ class DesktopRunnerApp:
     def _set_busy(self, busy, *, indeterminate=False):
         self.busy = busy
         state = tk.DISABLED if busy else tk.NORMAL
-        for widget in (self.test_btn, self.scan_btn, self.save_btn, self.run_btn, self.schedule_start_btn, self.freq_spin, self.freq_combo):
+        for widget in (
+            self.test_btn, self.scan_btn, self.save_btn, self.reload_cfg_btn,
+            self.run_btn, self.schedule_start_btn, self.freq_spin, self.freq_combo,
+        ):
             widget.configure(state=state)
         self.schedule_stop_btn.configure(state=tk.NORMAL)
         if busy:
@@ -732,11 +739,39 @@ class DesktopRunnerApp:
         return text.split(" ")[0] if text else self.region_order[0]
 
     def _sync_edit_form_to_config(self):
-        region = self._current_edit_region()
+        region = self._active_edit_region or self._current_edit_region()
+        self._sync_edit_form_to_region(region)
+
+    def _sync_edit_form_to_region(self, region):
+        if not region:
+            return
         cfg = self.config_data["regions"][region]
         cfg["connection_uri"] = self.conn_text.get("1.0", tk.END).strip()
         cfg["template_dir"] = self.template_dir_entry.get().strip()
         cfg["output_dir"] = self.output_dir_entry.get().strip()
+
+    def _log_config_sources(self):
+        from runner_config import RUNNER_CONFIG_FILE
+        self.log(f"配置：{RUNNER_CONFIG_FILE.name}")
+        if RUNNER_CONFIG_LOCAL_FILE.is_file():
+            self.log(f"备份：{RUNNER_CONFIG_LOCAL_FILE.name}")
+        for key in self.region_order:
+            cfg = self.config_data["regions"].get(key, {})
+            uri = str(cfg.get("connection_uri", ""))
+            host = uri.split("@")[-1].split("/")[0] if "@" in uri else "-"
+            self.log(
+                f"  [{key}] 模板={cfg.get('template_dir', '-')}  "
+                f"输出={cfg.get('output_dir', '-')}  库={host}"
+            )
+
+    def reload_config_action(self):
+        self._sync_edit_form_to_config()
+        self.config_data = load_runner_config()
+        self._active_edit_region = self._current_edit_region()
+        self._load_edit_form(self._active_edit_region)
+        self._log_config_sources()
+        self.log("已从磁盘重新加载 region_runner_config.json。")
+        self._set_status("配置已重新加载")
 
     def _load_edit_form(self, region):
         cfg = self.config_data["regions"][region]
@@ -754,8 +789,11 @@ class DesktopRunnerApp:
         self.save_hint_var.set("已加载")
 
     def _on_edit_region_change(self, _event=None):
-        self._sync_edit_form_to_config()
-        self._load_edit_form(self._current_edit_region())
+        new_region = self._current_edit_region()
+        if self._active_edit_region and self._active_edit_region != new_region:
+            self._sync_edit_form_to_region(self._active_edit_region)
+        self._active_edit_region = new_region
+        self._load_edit_form(new_region)
 
     def pick_template_dir(self):
         if filedialog is None:
@@ -838,10 +876,9 @@ class DesktopRunnerApp:
         settings["frequency_unit"] = self.freq_unit_var.get() if self.freq_unit_var.get() in ("minute", "hour") else "minute"
         self.freq_unit_var.set(settings["frequency_unit"])
         save_runner_config(self.config_data)
-        region = self._current_edit_region()
+        region = self._active_edit_region or self._current_edit_region()
         self.save_hint_var.set("已保存")
-        self.log(f"配置保存成功（{region}）：{RUNNER_CONFIG_LOCAL_FILE.name}")
-        self.log(f"路径：{RUNNER_CONFIG_LOCAL_FILE}")
+        self.log(f"配置保存成功（{region}）→ region_runner_config.json")
         self._set_status("配置已保存")
 
     def test_connection_action(self):

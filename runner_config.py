@@ -75,25 +75,26 @@ def _merge_regions(base_regions, overlay_regions):
 
 
 def load_runner_config():
-    """默认配置 + region_runner_config.json + region_runner_config.local.json（后者优先）。"""
+    """默认配置 + local + region_runner_config.json（json 最终优先，手改 json 一定生效）。"""
     regions = deepcopy(DEFAULT_REGION_CONFIG)
     settings = dict(DEFAULT_APP_SETTINGS)
-
-    if RUNNER_CONFIG_FILE.exists():
-        file_data = _read_json(RUNNER_CONFIG_FILE)
-        regions = _merge_regions(regions, file_data.get("regions"))
-        settings = _merge_dict(settings, file_data.get("settings", {}))
 
     if RUNNER_CONFIG_LOCAL_FILE.exists():
         local_data = _read_json(RUNNER_CONFIG_LOCAL_FILE)
         regions = _merge_regions(regions, local_data.get("regions"))
         settings = _merge_dict(settings, local_data.get("settings", {}))
 
+    if RUNNER_CONFIG_FILE.exists():
+        file_data = _read_json(RUNNER_CONFIG_FILE)
+        regions = _merge_regions(regions, file_data.get("regions"))
+        settings = _merge_dict(settings, file_data.get("settings", {}))
+
     return {"regions": regions, "settings": settings}
 
 
 def save_runner_config(payload):
-    """保存到本地覆盖文件，不被 git 跟踪。"""
+    """保存到 json（用户可见）+ local 备份（git pull 后可恢复）。"""
+    _write_json(RUNNER_CONFIG_FILE, payload)
     _write_json(RUNNER_CONFIG_LOCAL_FILE, payload)
 
 
