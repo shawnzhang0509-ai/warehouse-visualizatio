@@ -12,11 +12,6 @@ try:
 except ImportError:
     pyodbc = None
 
-try:
-    from openpyxl import Workbook
-except ImportError:
-    Workbook = None
-
 # SQL 模板文件名（不含后缀）到看板标准文件名的映射
 STANDARD_OUTPUT_NAMES = {
     "stock": "stock",
@@ -28,6 +23,8 @@ STANDARD_OUTPUT_NAMES = {
     "display_list": "display",
     "display_with_families": "display",
     "display.with_families": "display",
+    "stock_discontinued": "stock_discontinued",
+    "product_stock_discontinued": "stock_discontinued",
 }
 
 try:
@@ -41,34 +38,17 @@ except Exception:
     scrolledtext = None
 
 
+from runner_config import (
+    DEFAULT_APP_SETTINGS,
+    DEFAULT_REGION_CONFIG,
+    RUNNER_CONFIG_FILE,
+    RUNNER_CONFIG_LOCAL_FILE,
+    ensure_runner_config,
+    load_runner_config,
+    save_runner_config,
+)
+
 ROOT_DIR = Path(__file__).parent
-RUNNER_CONFIG_FILE = ROOT_DIR / "region_runner_config.json"
-
-DEFAULT_REGION_CONFIG = {
-    "NZ": {
-        "label": "新西兰",
-        "connection_uri": "mssql+pymssql://nzlivepooluser:iFur3RP%405sc%5El%5Et3%21@if-akl-live.database.windows.net:1433/nz_ierp_live?charset=utf8",
-        "template_dir": "Data-NZ",
-        "output_dir": "Output-NZ",
-    },
-    "AU": {
-        "label": "澳洲",
-        "connection_uri": "mssql+pymssql://appuserau:Ifurn1tureAuA7p5sc%5El%5Et@if-au-live.database.windows.net:1433/au_ierp_live?charset=utf8",
-        "template_dir": "Data-AU",
-        "output_dir": "Output-AU",
-    },
-    "CA": {
-        "label": "加拿大",
-        "connection_uri": "mssql+pymssql://capool:IfurnitureCA3sc%5El%5Et3@ca-sql-pool-server.database.windows.net:1433/ca_ierp_live?charset=utf8",
-        "template_dir": "Data-CA",
-        "output_dir": "Output-CA",
-    },
-}
-
-DEFAULT_APP_SETTINGS = {
-    "frequency_value": 30,
-    "frequency_unit": "minute",
-}
 
 
 def _utc_iso():
@@ -93,54 +73,9 @@ def _ensure_default_template_dirs(regions):
         template_dir.mkdir(parents=True, exist_ok=True)
 
 
-def _load_runner_config():
-    with RUNNER_CONFIG_FILE.open("r", encoding="utf-8") as f:
-        data = json.load(f)
-    if not isinstance(data, dict):
-        data = {}
-    data.setdefault("regions", {})
-    data.setdefault("settings", {})
-    return data
-
-
-def _save_runner_config(payload):
-    with RUNNER_CONFIG_FILE.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
-
-
 def _ensure_runner_config():
-    if not RUNNER_CONFIG_FILE.exists():
-        payload = {"regions": DEFAULT_REGION_CONFIG, "settings": DEFAULT_APP_SETTINGS}
-        _save_runner_config(payload)
-        _ensure_default_template_dirs(payload["regions"])
-        return
-
-    data = _load_runner_config()
-    changed = False
-    regions = data.get("regions", {})
-    settings = data.get("settings", {})
-
-    for region_key, region_cfg in DEFAULT_REGION_CONFIG.items():
-        if region_key not in regions:
-            regions[region_key] = dict(region_cfg)
-            changed = True
-            continue
-        for field, value in region_cfg.items():
-            if field not in regions[region_key]:
-                regions[region_key][field] = value
-                changed = True
-
-    for key, value in DEFAULT_APP_SETTINGS.items():
-        if key not in settings:
-            settings[key] = value
-            changed = True
-
-    if changed:
-        data["regions"] = regions
-        data["settings"] = settings
-        _save_runner_config(data)
-
-    _ensure_default_template_dirs(regions)
+    ensure_runner_config()
+    _ensure_default_template_dirs(load_runner_config().get("regions", {}))
 
 
 def _region_label(region_key, cfg):
@@ -230,11 +165,19 @@ def _should_skip_template(file_path, sql_text):
         return True
     if name.endswith(".example") or ".example." in name:
         return True
-    if name in ("stock.txt", "display.txt"):
-        return True
     if _is_stub_sql(sql_text):
         return True
     return False
+
+
+def _template_priority(file_path):
+    """同输出文件时优先 .sql，其次 .txt。"""
+    ext = file_path.suffix.lower()
+    if ext == ".sql":
+        return 0
+    if ext == ".txt":
+        return 1
+    return 2
 
 
 def _read_sql_file(path):
@@ -248,7 +191,8 @@ def _read_sql_file(path):
 
 
 def _load_sql_templates(template_dir, log=None):
-    templates = []
+    """读取 Data-{region}/ 下 .sql / .txt 查询模板；同名输出只保留优先级最高的一份。"""
+    by_output = {}
     for file_path in _list_txt_templates(template_dir):
         sql_text = _read_sql_file(file_path)
         if not sql_text:
@@ -257,7 +201,28 @@ def _load_sql_templates(template_dir, log=None):
             if callable(log):
                 log(f"跳过：{file_path.name}（占位/示例模板，不执行）")
             continue
-        templates.append({"name": file_path.name, "sql": sql_text})
+        output_stem = _standard_output_stem(file_path.name)
+        tpl = {"name": file_path.name, "sql": sql_text, "path": file_path}
+        existing = by_output.get(output_stem)
+        if existing is None:
+            by_output[output_stem] = tpl
+            continue
+        new_pri = _template_priority(file_path)
+        old_pri = _template_priority(existing["path"])
+        if new_pri < old_pri:
+            if callable(log):
+                log(
+                    f"跳过：{existing['name']}（与 {file_path.name} 输出同一文件，"
+                    f"优先使用 {file_path.suffix.lower()}）"
+                )
+            by_output[output_stem] = tpl
+        elif callable(log):
+            log(
+                f"跳过：{file_path.name}（与 {existing['name']} 输出同一文件，"
+                f"优先使用 {existing['path'].suffix.lower()}）"
+            )
+    templates = [{"name": t["name"], "sql": t["sql"]} for t in by_output.values()]
+    templates.sort(key=lambda t: t["name"].lower())
     return templates
 
 
@@ -275,7 +240,6 @@ def _output_paths(output_dir, region_key, sql_file_name):
     return {
         "output_dir": output_root,
         "csv": output_root / f"{standard_stem}.csv",
-        "xlsx": output_root / f"{standard_stem}.xlsx",
         "standard_name": standard_stem,
     }
 
@@ -289,18 +253,17 @@ def _write_csv(path, columns, rows):
             writer.writerow(list(row))
 
 
-def _write_xlsx(path, columns, rows):
-    if Workbook is None:
-        return False
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "data"
-    if columns:
-        ws.append(list(columns))
-    for row in rows:
-        ws.append(["" if value is None else value for value in row])
-    wb.save(path)
-    return True
+def _remove_legacy_xlsx(csv_path, log=None):
+    """删除同名的旧版 .xlsx，避免看板误读慢文件。"""
+    legacy = Path(csv_path).with_suffix(".xlsx")
+    if not legacy.is_file():
+        return
+    try:
+        legacy.unlink()
+        if callable(log):
+            log(f"已删除旧版 Excel：{legacy.name}")
+    except OSError:
+        pass
 
 
 def _run_single_template(cursor, sql):
@@ -374,7 +337,7 @@ def execute_region(region_key, region_cfg, log=None, on_template_start=None, on_
     _log(f"[{region_key}] 开始执行：{label}")
     templates = _load_sql_templates(region_cfg.get("template_dir"), log=_log)
     if not templates:
-        _log(f"[{region_key}] 未找到可执行的 txt 模板。")
+        _log(f"[{region_key}] 未找到可执行的 .sql / .txt 模板。")
         return {
             "region": region_key,
             "label": label,
@@ -409,18 +372,16 @@ def execute_region(region_key, region_cfg, log=None, on_template_start=None, on_
                 if result["has_result_set"]:
                     paths = _output_paths(region_cfg.get("output_dir"), region_key, tpl_name)
                     _write_csv(paths["csv"], result["columns"], result["rows"])
-                    xlsx_ok = _write_xlsx(paths["xlsx"], result["columns"], result["rows"])
+                    _remove_legacy_xlsx(paths["csv"], log=lambda m: _log(f"[{region_key}] {m}"))
                     outputs.append(
                         {
                             "template": tpl_name,
                             "rows": result["row_count"],
                             "file": str(paths["csv"]),
-                            "xlsx": str(paths["xlsx"]) if xlsx_ok else None,
                             "status": "success",
                         }
                     )
-                    extra = f"，Excel: {paths['xlsx']}" if xlsx_ok else "（未安装 openpyxl，仅导出 CSV）"
-                    _log(f"[{region_key}] 成功：{tpl_name} -> {paths['csv']}{extra} ({result['row_count']} 行)")
+                    _log(f"[{region_key}] 成功：{tpl_name} -> {paths['csv']} ({result['row_count']} 行)")
                     if paths["standard_name"] == "display" and result["row_count"] < 10:
                         _log(
                             f"[{region_key}] ⚠ 警告：display 只有 {result['row_count']} 行，"
@@ -567,7 +528,7 @@ class DesktopRunnerApp:
         if tk is None:
             raise RuntimeError("当前 Python 环境不可用 Tkinter，无法启动桌面界面。")
         _ensure_runner_config()
-        self.config_data = _load_runner_config()
+        self.config_data = load_runner_config()
         self.region_order = ["NZ", "AU", "CA"]
 
         self.root = tk.Tk()
@@ -589,10 +550,13 @@ class DesktopRunnerApp:
         self.progress_var = tk.DoubleVar(value=0)
         self.progress_text_var = tk.StringVar(value="")
         self.save_hint_var = tk.StringVar(value="已加载")
+        self._active_edit_region = None
 
         self._build_ui()
-        self._load_edit_form(self.edit_region_var.get())
+        self._active_edit_region = self._current_edit_region()
+        self._load_edit_form(self._active_edit_region)
         self.log("程序已启动。")
+        self._log_config_sources()
 
     def _build_ui(self):
         top = ttk.Frame(self.root, padding=10)
@@ -630,7 +594,8 @@ class DesktopRunnerApp:
         form.pack(fill=tk.X)
         form.columnconfigure(1, weight=1)
 
-        ttk.Label(form, text="数据库连接").grid(row=0, column=0, sticky=tk.W, padx=(0, 8), pady=4)
+        self.conn_label = ttk.Label(form, text="数据库连接")
+        self.conn_label.grid(row=0, column=0, sticky=tk.W, padx=(0, 8), pady=4)
         self.conn_text = tk.Text(form, height=3, wrap=tk.WORD)
         self.conn_text.grid(row=0, column=1, sticky=tk.EW, pady=4)
         self.conn_text.bind("<KeyRelease>", lambda _e: self._mark_unsaved())
@@ -680,6 +645,8 @@ class DesktopRunnerApp:
         self.schedule_stop_btn.pack(side=tk.LEFT, padx=(0, 8))
         self.save_btn = ttk.Button(action_frame, text="保存配置", command=self.save_config_action)
         self.save_btn.pack(side=tk.LEFT)
+        self.reload_cfg_btn = ttk.Button(action_frame, text="重新加载配置", command=self.reload_config_action)
+        self.reload_cfg_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         status_frame = ttk.Frame(top)
         status_frame.pack(fill=tk.X, pady=6)
@@ -711,6 +678,11 @@ class DesktopRunnerApp:
         if self.schedule_job:
             self.root.after_cancel(self.schedule_job)
             self.schedule_job = None
+        try:
+            self._sync_edit_form_to_config()
+            save_runner_config(self.config_data)
+        except Exception:
+            pass
         self.root.destroy()
 
     def log(self, text):
@@ -737,7 +709,10 @@ class DesktopRunnerApp:
     def _set_busy(self, busy, *, indeterminate=False):
         self.busy = busy
         state = tk.DISABLED if busy else tk.NORMAL
-        for widget in (self.test_btn, self.scan_btn, self.save_btn, self.run_btn, self.schedule_start_btn, self.freq_spin, self.freq_combo):
+        for widget in (
+            self.test_btn, self.scan_btn, self.save_btn, self.reload_cfg_btn,
+            self.run_btn, self.schedule_start_btn, self.freq_spin, self.freq_combo,
+        ):
             widget.configure(state=state)
         self.schedule_stop_btn.configure(state=tk.NORMAL)
         if busy:
@@ -764,14 +739,45 @@ class DesktopRunnerApp:
         return text.split(" ")[0] if text else self.region_order[0]
 
     def _sync_edit_form_to_config(self):
-        region = self._current_edit_region()
+        region = self._active_edit_region or self._current_edit_region()
+        self._sync_edit_form_to_region(region)
+
+    def _sync_edit_form_to_region(self, region):
+        if not region:
+            return
         cfg = self.config_data["regions"][region]
         cfg["connection_uri"] = self.conn_text.get("1.0", tk.END).strip()
         cfg["template_dir"] = self.template_dir_entry.get().strip()
         cfg["output_dir"] = self.output_dir_entry.get().strip()
 
+    def _log_config_sources(self):
+        from runner_config import RUNNER_CONFIG_FILE
+        self.log(f"配置：{RUNNER_CONFIG_FILE.name}")
+        if RUNNER_CONFIG_LOCAL_FILE.is_file():
+            self.log(f"备份：{RUNNER_CONFIG_LOCAL_FILE.name}")
+        for key in self.region_order:
+            cfg = self.config_data["regions"].get(key, {})
+            uri = str(cfg.get("connection_uri", ""))
+            host = uri.split("@")[-1].split("/")[0] if "@" in uri else "-"
+            self.log(
+                f"  [{key}] 模板={cfg.get('template_dir', '-')}  "
+                f"输出={cfg.get('output_dir', '-')}  库={host}"
+            )
+
+    def reload_config_action(self):
+        self._sync_edit_form_to_config()
+        self.config_data = load_runner_config()
+        self._active_edit_region = self._current_edit_region()
+        self._load_edit_form(self._active_edit_region)
+        self._log_config_sources()
+        self.log("已从磁盘重新加载 region_runner_config.json。")
+        self._set_status("配置已重新加载")
+
     def _load_edit_form(self, region):
         cfg = self.config_data["regions"][region]
+        label = cfg.get("label", region)
+        if getattr(self, "conn_label", None):
+            self.conn_label.configure(text=f"数据库连接 ({region} {label})")
         self.conn_text.delete("1.0", tk.END)
         self.conn_text.insert("1.0", cfg.get("connection_uri", ""))
         self.template_dir_entry.delete(0, tk.END)
@@ -783,8 +789,11 @@ class DesktopRunnerApp:
         self.save_hint_var.set("已加载")
 
     def _on_edit_region_change(self, _event=None):
-        self._sync_edit_form_to_config()
-        self._load_edit_form(self._current_edit_region())
+        new_region = self._current_edit_region()
+        if self._active_edit_region and self._active_edit_region != new_region:
+            self._sync_edit_form_to_region(self._active_edit_region)
+        self._active_edit_region = new_region
+        self._load_edit_form(new_region)
 
     def pick_template_dir(self):
         if filedialog is None:
@@ -843,11 +852,12 @@ class DesktopRunnerApp:
             files = _list_txt_templates(cfg.get("template_dir"))
             self.template_list.delete(0, tk.END)
             if not files:
-                self.template_list.insert(tk.END, "目录下没有 .txt 模板。")
+                self.template_list.insert(tk.END, "目录下没有 .sql / .txt 模板。")
             else:
                 for f in files:
                     self.template_list.insert(tk.END, f.name)
-            self.log(f"[{region}] 找到 {len(files)} 个 txt 模板。")
+            runnable = _load_sql_templates(cfg.get("template_dir"), log=self.log)
+            self.log(f"[{region}] 目录内 {len(files)} 个文件，可执行 {len(runnable)} 个模板。")
             self._set_status("模板读取完成")
         except Exception as exc:
             self.template_list.delete(0, tk.END)
@@ -865,9 +875,10 @@ class DesktopRunnerApp:
             self.freq_value_var.set(settings["frequency_value"])
         settings["frequency_unit"] = self.freq_unit_var.get() if self.freq_unit_var.get() in ("minute", "hour") else "minute"
         self.freq_unit_var.set(settings["frequency_unit"])
-        _save_runner_config(self.config_data)
+        save_runner_config(self.config_data)
+        region = self._active_edit_region or self._current_edit_region()
         self.save_hint_var.set("已保存")
-        self.log("配置保存成功。")
+        self.log(f"配置保存成功（{region}）→ region_runner_config.json")
         self._set_status("配置已保存")
 
     def test_connection_action(self):
@@ -977,7 +988,7 @@ class DesktopRunnerApp:
 
 def run_cli_once(region_arg):
     _ensure_runner_config()
-    config = _load_runner_config()
+    config = load_runner_config()
     if region_arg:
         selected = [r.strip().upper() for r in region_arg.split(",") if r.strip()]
     else:

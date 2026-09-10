@@ -8,7 +8,7 @@
 2. INSTOCK_DATA_DIR 目录下的 stock.csv / display.csv
 3. INSTOCK_REGION（如 NZ/CA）→ Output-{region}/ 下的 stock/display 文件
 
-支持 CSV 和 Excel（.xlsx）；列名不需要完全一致，_pick 会做模糊匹配。
+支持 CSV；列名不需要完全一致，_pick 会做模糊匹配。
 """
 
 import csv
@@ -19,17 +19,32 @@ from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
 
 try:
-    from openpyxl import load_workbook
+    from openpyxl import load_workbook as _load_workbook
 except ImportError:
-    load_workbook = None
+    _load_workbook = None
 
 ROOT_DIR = Path(__file__).parent
 RUNNER_CONFIG_FILE = ROOT_DIR / "region_runner_config.json"
 EXEMPTION_CONFIG_FILE = ROOT_DIR / "family_exemption.json"
+
+# 看板地区下拉固定顺序；即使用户 region_runner_config.json 较旧也会显示三国入口
+REGION_ORDER = ("NZ", "AU", "CA")
+DEFAULT_REGION_META = {
+    "NZ": {"label": "新西兰", "template_dir": "Data-NZ", "output_dir": "Output-NZ"},
+    "AU": {"label": "澳洲", "template_dir": "Data-AU", "output_dir": "Output-AU"},
+    "CA": {"label": "加拿大", "template_dir": "Data-CA", "output_dir": "Output-CA"},
+}
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+
+# 启动时预加载停产 SKU（停产为常态时避免每次切筛选都重算）
+EAGER_DISCONTINUED_STOCK = os.getenv("PANEL_EAGER_DISCONTINUED", "1").strip().lower() not in (
+    "0", "false", "no", "off",
+)
 
 CODE_KEYS = ["productcode", "product_code", "sku", "itemcode", "item_code",
              "code", "productid", "product_id", "product", "item"]
+BLACKLIST_STEMS = ["blacklist", "sku_blacklist", "black_list", "product_blacklist"]
+BLACKLIST_KEYS = ["sku", "blacklist", "blacklistsku"] + CODE_KEYS
 NAME_KEYS = ["productname", "product_name", "name", "description", "desc", "title"]
 FAMILY_KEYS = ["family", "productfamily", "product_family", "category",
                "categoryname", "category_name", "group", "producttype", "type",
@@ -65,9 +80,29 @@ REGION_STORE_STOCK_RULES = {
     ],
 }
 DEFAULT_ALL_WAREHOUSES = ("carbine", "walls", "geraldconnelly")
+STORE_NAME_SKIP_TOKENS = frozenset({
+    "shop", "display", "store", "warehouse", "wh", "the", "for", "and", "repair", "outlet",
+})
+METADATA_COLUMN_KEYS = frozenset({
+    "productcode", "product_code", "sku", "itemcode", "item_code", "code", "productid",
+    "product_id", "product", "item", "productname", "product_name", "name", "description",
+    "desc", "title", "family", "productfamily", "product_family", "category", "categoryname",
+    "category_name", "group", "producttype", "type", "productfamilyname", "price", "unitprice",
+    "unit_price", "sellprice", "sell_price", "saleprice", "sale_price", "retailprice",
+    "retail_price", "discontinued", "isdiscontinued", "is_discontinued", "discontinue",
+    "discontinueflag", "discontinue_flag", "status", "imagefile", "image", "imageurl",
+    "image_url", "img", "picture", "photo", "thumbnail", "thumb", "barcode", "ean", "upc",
+    "vendor", "supplier", "brand", "currency", "tax", "weight", "width", "height", "depth",
+    "length", "color", "colour", "material", "url", "note", "notes", "remark", "remarks",
+})
+WAREHOUSE_COLUMN_SKIP_KEYS = frozenset({
+    "total", "grandtotal", "sum", "overall", "subtotal", "northislandtotal", "southislandtotal",
+})
 
 # region_key -> cached bundle (invalidated when file mtime changes)
 _REGION_CACHE = {}
+_STORE_VIEW_CACHE = {}
+_EXEMPTION_CONFIG_CACHE = None
 
 
 def _pick(row, keys):
@@ -116,7 +151,7 @@ def _norm_col_key(name):
 
 
 def _classify_warehouse_column(col_name):
-    """把 stock.xlsx 列名映射到标准仓名（CarbineSt / WallsStoc / GeraldConnellyStock 等）。"""
+    """把 stock 列名映射到标准仓名（CarbineSt / WallsStoc / GeraldConnellyStock 等）。"""
     key = _norm_col_key(col_name)
     if not key:
         return None
@@ -131,11 +166,50 @@ def _classify_warehouse_column(col_name):
     return None
 
 
+def _is_metadata_column(col_name):
+    key = _norm_col_key(col_name)
+    if not key:
+        return True
+    if key in METADATA_COLUMN_KEYS:
+        return True
+    return any(key.startswith(prefix) for prefix in ("product", "image", "isdiscontinued"))
+
+
+def _warehouse_key_from_column(col_name):
+    """识别各仓库存列；NZ 用标准仓名，CA/AU 等用列名归一化后的 key（如 calgarystock）。"""
+    if _is_metadata_column(col_name):
+        return None
+    key = _norm_col_key(col_name)
+    if not key or key in WAREHOUSE_COLUMN_SKIP_KEYS:
+        return None
+    if any(skip in key for skip in WAREHOUSE_COLUMN_SKIP_KEYS):
+        return None
+
+    known = _classify_warehouse_column(col_name)
+    if known:
+        return known
+
+    stock_markers = ("stock", "qty", "quantity", "onhand", "soh", "available")
+    if any(marker in key for marker in stock_markers):
+        return key
+    return None
+
+
+def _warehouse_label(warehouse_key):
+    label = WAREHOUSE_LABELS.get(warehouse_key)
+    if label:
+        return label
+    text = re.sub(r"(stock|qty|quantity|onhand|soh|available)$", "", warehouse_key, flags=re.I)
+    if not text:
+        return warehouse_key
+    return text[:1].upper() + text[1:]
+
+
 def _extract_warehouse_stock(row):
     """从一行 stock 数据提取各仓库存数量。"""
     stock = {}
     for col, value in row.items():
-        wh = _classify_warehouse_column(col)
+        wh = _warehouse_key_from_column(col)
         if not wh:
             continue
         qty = _to_float(value) or 0.0
@@ -143,20 +217,51 @@ def _extract_warehouse_stock(row):
     return stock
 
 
-def _warehouses_for_store(store_name, region_key):
+def _store_name_tokens(store_name):
+    text = re.sub(r"[^a-z0-9]+", " ", str(store_name).strip().lower())
+    return [t for t in text.split() if t and t not in STORE_NAME_SKIP_TOKENS and len(t) >= 3]
+
+
+def _collect_catalog_warehouse_keys(products):
+    keys = set()
+    for product in products:
+        keys.update((product.get("warehouse_stock") or {}).keys())
+    return keys
+
+
+def _warehouses_for_store(store_name, region_key, catalog_keys=None):
     """根据所选店面，决定用哪些仓库列计算有货数量。"""
+    catalog = tuple(catalog_keys or ())
     if store_name == ALL_STORES:
-        return DEFAULT_ALL_WAREHOUSES
+        if catalog:
+            return catalog
+        if region_key.upper() == "NZ":
+            return DEFAULT_ALL_WAREHOUSES
+        return catalog
 
     text = str(store_name).strip().lower()
     for patterns, warehouses in REGION_STORE_STOCK_RULES.get(region_key.upper(), []):
         if any(p in text for p in patterns):
             return warehouses
 
-    if any(x in text for x in ("auck", "onehunga", "westgate", "hamilton", "north")):
-        return ("carbine", "walls")
-    if any(x in text for x in ("chch", "christ", "gerald", "treffers", "south")):
-        return ("geraldconnelly",)
+    if catalog:
+        matched = []
+        for token in _store_name_tokens(store_name):
+            for wh in catalog:
+                if token in wh.lower() and wh not in matched:
+                    matched.append(wh)
+        if matched:
+            return tuple(matched)
+
+    if region_key.upper() == "NZ":
+        if any(x in text for x in ("auck", "onehunga", "westgate", "hamilton", "north")):
+            return ("carbine", "walls")
+        if any(x in text for x in ("chch", "christ", "gerald", "treffers", "south")):
+            return ("geraldconnelly",)
+        return DEFAULT_ALL_WAREHOUSES
+
+    if catalog:
+        return catalog
     return DEFAULT_ALL_WAREHOUSES
 
 
@@ -169,25 +274,26 @@ def _stock_breakdown(warehouse_stock, warehouse_keys):
     for key in warehouse_keys:
         qty = int(warehouse_stock.get(key, 0) or 0)
         if qty > 0:
-            parts.append(f"{WAREHOUSE_LABELS.get(key, key)} {qty}")
+            parts.append(f"{_warehouse_label(key)} {qty}")
     return " + ".join(parts) if parts else ""
 
 
-def _apply_store_stock(product, store, region_key):
+def _apply_store_stock(product, store, region_key, warehouse_keys=None):
     warehouse_stock = product.get("warehouse_stock") or {}
-    warehouse_keys = _warehouses_for_store(store, region_key)
+    warehouse_keys = warehouse_keys or _warehouses_for_store(store, region_key)
     if warehouse_stock:
         qty = _qty_from_warehouses(warehouse_stock, warehouse_keys)
         breakdown = _stock_breakdown(warehouse_stock, warehouse_keys)
     else:
         qty = float(product.get("stock_qty") or 0)
         breakdown = ""
-    item = dict(product)
-    item["stock_qty"] = qty
-    item["in_stock"] = qty > 0
-    item["stock_warehouses"] = warehouse_keys
-    item["stock_breakdown"] = breakdown
-    return item
+    return {
+        **product,
+        "stock_qty": qty,
+        "in_stock": qty > 0,
+        "stock_warehouses": warehouse_keys,
+        "stock_breakdown": breakdown,
+    }
 
 
 def _read_csv(path):
@@ -195,40 +301,10 @@ def _read_csv(path):
         return list(csv.DictReader(f))
 
 
-def _read_xlsx(path):
-    if load_workbook is None:
-        raise RuntimeError("读取 Excel 需要 openpyxl，请运行：pip install openpyxl")
-    wb = load_workbook(path, read_only=True, data_only=True)
-    ws = wb.active
-    rows_iter = ws.iter_rows(values_only=True)
-    headers = next(rows_iter, None)
-    if not headers:
-        wb.close()
-        return []
-    columns = [str(h).strip() if h is not None else "" for h in headers]
-    out = []
-    for row in rows_iter:
-        if row is None:
-            continue
-        item = {}
-        empty = True
-        for idx, col in enumerate(columns):
-            if not col:
-                continue
-            value = row[idx] if idx < len(row) else None
-            if value is not None and str(value).strip() != "":
-                empty = False
-            item[col] = value
-        if not empty:
-            out.append(item)
-    wb.close()
-    return out
-
-
 def _read_table(path):
     path = Path(path)
-    if path.suffix.lower() == ".xlsx":
-        return _read_xlsx(path)
+    if path.suffix.lower() != ".csv":
+        raise ValueError(f"看板仅支持 CSV 数据文件，请重新执行 SQL 导出：{path}")
     return _read_csv(path)
 
 
@@ -249,15 +325,14 @@ def normalize_url(url):
 
 
 def _find_data_file(directory, stems):
-    """在目录里按候选文件名找 stock/display（优先 xlsx，其次 csv）。"""
+    """在目录里按候选文件名找 stock/display（仅 .csv）。"""
     base = Path(directory)
     if not base.is_dir():
         return None
     for stem in stems:
-        for ext in (".xlsx", ".csv"):
-            candidate = base / f"{stem}{ext}"
-            if candidate.is_file():
-                return candidate
+        candidate = base / f"{stem}.csv"
+        if candidate.is_file():
+            return candidate
     return None
 
 
@@ -290,6 +365,11 @@ def _find_region_data_file(output_dir, stems):
     return None
 
 
+def _region_discontinued_stems(region_key):
+    rk = region_key.upper()
+    return ["stock_discontinued", f"{rk}_stock_discontinued"]
+
+
 def _region_stock_stems(region_key):
     rk = region_key.upper()
     return ["stock", f"{rk}_stock", "product_stock_price", f"{rk}_product_stock_price"]
@@ -302,14 +382,26 @@ def _region_display_stems(region_key):
 
 
 def _load_runner_regions():
-    if not RUNNER_CONFIG_FILE.exists():
-        return {}
+    """合并默认三国配置与 region_runner_config(.local).json。"""
     try:
-        with RUNNER_CONFIG_FILE.open("r", encoding="utf-8") as f:
-            data = json.load(f)
-        return data.get("regions", {}) if isinstance(data, dict) else {}
+        from runner_config import load_runner_config
+        file_regions = load_runner_config().get("regions", {})
+        file_regions = {
+            str(k).strip().upper(): v for k, v in file_regions.items() if isinstance(v, dict)
+        }
     except Exception:
-        return {}
+        file_regions = {}
+
+    merged = {}
+    for key in REGION_ORDER:
+        base = dict(DEFAULT_REGION_META[key])
+        if key in file_regions:
+            base.update(file_regions[key])
+        merged[key] = base
+    for key, cfg in file_regions.items():
+        if key not in merged:
+            merged[key] = dict(cfg)
+    return merged
 
 
 def _region_output_dir(region_key):
@@ -339,9 +431,9 @@ def resolve_sources(region=None):
         stock_path = _find_region_data_file(d, _region_stock_stems(region_key))
         display_path = _find_region_data_file(d, _region_display_stems(region_key))
         if stock_path is None:
-            stock_path = d / "stock.xlsx"
+            stock_path = d / "stock.csv"
         if display_path is None:
-            display_path = d / "display.xlsx"
+            display_path = d / "display.csv"
         return stock_path, display_path, f"region-{region_key}", d
     raise ValueError(
         "未指定地区。请在界面选择 NZ/AU/CA，或设置环境变量 INSTOCK_REGION。"
@@ -349,8 +441,13 @@ def resolve_sources(region=None):
 
 
 def list_regions():
+    regions = _load_runner_regions()
+    order = list(REGION_ORDER) + [k for k in regions if k not in REGION_ORDER]
     options = []
-    for key, cfg in _load_runner_regions().items():
+    for key in order:
+        cfg = regions.get(key)
+        if not cfg:
+            continue
         out_dir = _region_output_dir(key)
         has_data = _find_region_data_file(out_dir, _region_stock_stems(key)) is not None
         options.append({
@@ -362,27 +459,132 @@ def list_regions():
 
 
 def default_region():
-    """返回第一个已有导出数据的地区，否则返回配置里的第一个地区。"""
+    """返回第一个已有导出数据的地区，否则 NZ。"""
     regions = list_regions()
     for r in regions:
         if r.get("has_latest"):
             return r["key"]
-    return regions[0]["key"] if regions else None
+    return regions[0]["key"] if regions else "NZ"
 
 
 def clear_region_cache(region=None):
     if region is None:
         _REGION_CACHE.clear()
+        _STORE_VIEW_CACHE.clear()
         return
-    _REGION_CACHE.pop(str(region).strip().upper(), None)
+    region_key = str(region).strip().upper()
+    _REGION_CACHE.pop(region_key, None)
+    for key in list(_STORE_VIEW_CACHE):
+        if key[0] == region_key:
+            _STORE_VIEW_CACHE.pop(key, None)
+
+
+def _load_blacklist(path):
+    """读取黑名单 SKU 集合（列名 sku / 编码 / ProductCode 等均可）。"""
+    codes = set()
+    if not path or not Path(path).is_file():
+        return codes
+    for row in _read_blacklist_table(path):
+        code = _pick(row, BLACKLIST_KEYS)
+        if code:
+            codes.add(_norm_code(code))
+    return codes
+
+
+def _read_xlsx_rows(path):
+    if _load_workbook is None:
+        raise RuntimeError(
+            f"黑名单为 Excel（{path.name}），请另存为 blacklist.csv，或运行：pip install openpyxl"
+        )
+    wb = _load_workbook(path, read_only=True, data_only=True)
+    ws = wb.active
+    rows_iter = ws.iter_rows(values_only=True)
+    headers = next(rows_iter, None)
+    if not headers:
+        wb.close()
+        return []
+    columns = [str(h).strip() if h is not None else "" for h in headers]
+    out = []
+    for row in rows_iter:
+        if row is None:
+            continue
+        item = {}
+        empty = True
+        for idx, col in enumerate(columns):
+            if not col:
+                continue
+            value = row[idx] if idx < len(row) else None
+            if value is not None and str(value).strip() != "":
+                empty = False
+            item[col] = value
+        if not empty:
+            out.append(item)
+    wb.close()
+    return out
+
+
+def _read_blacklist_table(path):
+    path = Path(path)
+    if path.suffix.lower() == ".xlsx":
+        return _read_xlsx_rows(path)
+    return _read_csv(path)
+
+
+def _find_blacklist_file(data_dir):
+    """黑名单支持 blacklist.csv / blacklist.xlsx（Excel 直接保存也可用）。"""
+    base = Path(data_dir)
+    if not base.is_dir():
+        return None
+    for stem in BLACKLIST_STEMS:
+        for ext in (".csv", ".xlsx"):
+            candidate = base / f"{stem}{ext}"
+            if candidate.is_file():
+                return candidate
+    return _find_region_data_file(data_dir, BLACKLIST_STEMS)
+
+
+def _resolve_blacklist_path(data_dir):
+    return _find_blacklist_file(data_dir)
+
+
+def expected_blacklist_path(region=None):
+    """黑名单默认放置路径（Output-{region}/blacklist.csv）。"""
+    region_key = str(region or default_region() or "NZ").strip().upper()
+    return _region_output_dir(region_key) / "blacklist.csv"
+
+
+def _ensure_discontinued_rows(bundle):
+    """按需解析停产 SKU；优先读独立的 stock_discontinued.csv（比从大 stock 里筛快）。"""
+    if bundle.get("discontinued_loaded"):
+        return
+    data_dir = bundle.get("data_dir")
+    disc_path = bundle.get("stock_discontinued_path")
+    if disc_path and Path(disc_path).is_file():
+        disc = _load_stock(_read_table(disc_path), data_dir, discontinued=None)
+        for p in disc:
+            p["discontinued"] = True
+    else:
+        raw = bundle.get("stock_raw_rows")
+        if not raw:
+            bundle["discontinued_loaded"] = True
+            return
+        disc = _load_stock(raw, data_dir, discontinued=True)
+    bundle["stock_rows_discontinued"] = disc
+    bundle["stock_rows"] = list(bundle["stock_rows_active"]) + disc
+    _enrich_catalog_metadata(disc)
+    bundle["discontinued_loaded"] = True
 
 
 def _load_region_bundle(region, force=False):
-    """读取并缓存某地区的 stock/display 原始表（切换店面时复用，避免重复读 Excel）。"""
+    """读取并缓存某地区的 stock/display 原始表（切换店面时复用，避免重复读 CSV）。"""
     region_key = str(region).strip().upper()
     stock_path, display_path, source, data_dir = resolve_sources(region_key)
     stock_mtime = _file_mtime(stock_path)
     display_mtime = _file_mtime(display_path)
+    blacklist_path = _resolve_blacklist_path(data_dir)
+    blacklist_mtime = _file_mtime(blacklist_path) if blacklist_path else None
+    disc_path = _find_region_data_file(data_dir, _region_discontinued_stems(region_key))
+    disc_mtime = _file_mtime(disc_path) if disc_path else None
 
     cached = _REGION_CACHE.get(region_key)
     if (
@@ -390,6 +592,8 @@ def _load_region_bundle(region, force=False):
         and cached
         and cached["stock_mtime"] == stock_mtime
         and cached["display_mtime"] == display_mtime
+        and cached.get("blacklist_mtime") == blacklist_mtime
+        and cached.get("stock_discontinued_mtime") == disc_mtime
     ):
         return cached
 
@@ -399,23 +603,42 @@ def _load_region_bundle(region, force=False):
         raise FileNotFoundError(display_path)
 
     display_rows = _read_table(display_path)
+    by_store, display_details = _load_display(display_rows)
+    blacklist = _load_blacklist(blacklist_path)
+    stock_raw_rows = _read_table(stock_path)
+    active_rows = _load_stock(stock_raw_rows, data_dir, discontinued=False)
+    _enrich_catalog_metadata(active_rows)
     bundle = {
         "region": region_key,
         "stock_path": stock_path,
         "display_path": display_path,
+        "blacklist_path": str(blacklist_path) if blacklist_path else None,
+        "blacklist": blacklist,
         "source": source,
         "data_dir": data_dir,
         "stock_mtime": stock_mtime,
         "display_mtime": display_mtime,
-        "stock_rows": _load_stock(_read_table(stock_path), data_dir),
-        "by_store": _load_display(display_rows),
+        "blacklist_mtime": blacklist_mtime,
+        "stock_discontinued_path": str(disc_path) if disc_path else None,
+        "stock_discontinued_mtime": disc_mtime,
+        "stock_raw_rows": stock_raw_rows,
+        "stock_rows": active_rows,
+        "stock_rows_active": active_rows,
+        "stock_rows_discontinued": [],
+        "discontinued_loaded": False,
+        "by_store": by_store,
+        "display_details": display_details,
         "display_row_count": len(display_rows),
+        "stock_row_count": len(stock_raw_rows),
     }
     _REGION_CACHE[region_key] = bundle
+    if EAGER_DISCONTINUED_STOCK:
+        _ensure_discontinued_rows(bundle)
+        bundle.pop("stock_raw_rows", None)
     return bundle
 
 
-def _resolve_image(raw, code, data_dir):
+def _resolve_image(raw, code, data_dir, scan_dir=True):
     """把图片列的值解析成可用路径/URL；也支持按产品编码自动找本地图。"""
     if raw:
         text = str(raw).strip()
@@ -427,6 +650,9 @@ def _resolve_image(raw, code, data_dir):
         if p.is_file():
             return str(p)
 
+    if not scan_dir:
+        return None
+
     images_dir = Path(data_dir) / "images"
     if images_dir.is_dir():
         for stem in (str(code).strip(), str(code).strip().upper(), str(code).strip().lower()):
@@ -437,11 +663,28 @@ def _resolve_image(raw, code, data_dir):
     return None
 
 
-def _load_stock(rows, data_dir):
+def resolve_product_image(product, data_dir):
+    """按需解析产品图（避免启动时对上万 SKU 扫描 images 目录）。"""
+    if product.get("_image_resolved"):
+        return product.get("image")
+    raw = product.get("image_raw")
+    image = _resolve_image(raw, product.get("code"), data_dir, scan_dir=True)
+    product["image"] = image
+    product["_image_resolved"] = True
+    return image
+
+
+def _load_stock(rows, data_dir, discontinued=None):
+    """discontinued: None=全部，False=仅在产，True=仅停产。"""
     out = []
     for row in rows:
         code = _pick(row, CODE_KEYS)
         if not code:
+            continue
+        is_disc = _is_discontinued(_pick(row, DISCONTINUE_KEYS))
+        if discontinued is False and is_disc:
+            continue
+        if discontinued is True and not is_disc:
             continue
         warehouse_stock = _extract_warehouse_stock(row)
         if warehouse_stock:
@@ -450,40 +693,59 @@ def _load_stock(rows, data_dir):
             qty = _to_float(_pick(row, STOCK_KEYS)) or 0.0
         out.append({
             "code": str(code).strip(),
+            "norm_code": _norm_code(code),
             "name": str(_pick(row, NAME_KEYS) or "").strip(),
             "family": str(_pick(row, FAMILY_KEYS) or "未分类").strip(),
             "stock_qty": qty,
             "warehouse_stock": warehouse_stock,
             "price": _to_float(_pick(row, PRICE_KEYS)),
-            "discontinued": _is_discontinued(_pick(row, DISCONTINUE_KEYS)),
+            "discontinued": is_disc,
             "in_stock": qty > 0,
-            "image": _resolve_image(_pick(row, IMAGE_KEYS), code, data_dir),
+            "image_raw": _pick(row, IMAGE_KEYS),
+            "image": None,
+            "_image_resolved": False,
         })
     return out
 
 
 def _load_display(rows):
-    """返回 {store_name: set(codes)}。"""
+    """返回 (by_store, display_details)。
+
+    by_store: {store_name: set(codes)}
+    display_details: {store_name: {norm_code: {code, family, name}}}
+    """
     by_store = {}
+    display_details = {}
     for row in rows:
         code = _pick(row, CODE_KEYS)
         if not code:
             continue
         store = _pick(row, STORE_KEYS)
         store = str(store).strip() if store else "（未标注店面）"
-        by_store.setdefault(store, set()).add(_norm_code(code))
-    return by_store
+        norm = _norm_code(code)
+        by_store.setdefault(store, set()).add(norm)
+        display_details.setdefault(store, {})[norm] = {
+            "code": str(code).strip(),
+            "family": str(_pick(row, FAMILY_KEYS) or "").strip(),
+            "name": str(_pick(row, NAME_KEYS) or "").strip(),
+        }
+    return by_store, display_details
 
 
 def _load_exemption_config():
+    global _EXEMPTION_CONFIG_CACHE
+    if _EXEMPTION_CONFIG_CACHE is not None:
+        return _EXEMPTION_CONFIG_CACHE
     if not EXEMPTION_CONFIG_FILE.is_file():
-        return {"auto_by_family": True, "groups": []}
+        _EXEMPTION_CONFIG_CACHE = {"auto_by_family": True, "groups": []}
+        return _EXEMPTION_CONFIG_CACHE
     try:
         with EXEMPTION_CONFIG_FILE.open("r", encoding="utf-8") as f:
             data = json.load(f)
-        return data if isinstance(data, dict) else {"auto_by_family": True, "groups": []}
+        _EXEMPTION_CONFIG_CACHE = data if isinstance(data, dict) else {"auto_by_family": True, "groups": []}
     except Exception:
-        return {"auto_by_family": True, "groups": []}
+        _EXEMPTION_CONFIG_CACHE = {"auto_by_family": True, "groups": []}
+    return _EXEMPTION_CONFIG_CACHE
 
 
 def _norm_group_token(text):
@@ -526,19 +788,96 @@ def _resolve_exemption_group(product, config):
     return None, None
 
 
-def _apply_family_exemptions(products):
-    """同 exemption 组内已有展示 SKU 时，豁免组内其他有货未展示 SKU。
+def _anchors_by_group_from_display(displayed_details, config):
+    """按 exemption 组索引店面 display 表里的已展示 SKU（每店面只算一次）。"""
+    by_group = {}
+    for norm, meta in (displayed_details or {}).items():
+        pseudo = {
+            "code": meta.get("code") or norm,
+            "family": meta.get("family") or "",
+            "name": meta.get("name") or "",
+        }
+        gkey, _ = _resolve_exemption_group(pseudo, config)
+        if gkey:
+            by_group.setdefault(gkey, []).append(pseudo["code"])
+    return by_group
 
-    锚点条件：在所选店面「已展示」即可，不要求该展示款当前有货
-    （例如 Queen 已上样但无货，仍可豁免同系列 King 有货未展示）。
-    """
+
+def _display_anchor_codes(members, display_anchors_by_group=None, displayed_details=None, config=None):
+    """同组内在该店面已展示的 SKU（含 display 表有、stock 表无的款）。"""
+    group_key = next((m.get("exemption_group") for m in members if m.get("exemption_group")), None)
+    if not group_key:
+        return []
+
+    codes = []
+    seen = set()
+    for m in members:
+        if not m.get("displayed"):
+            continue
+        code = m.get("code")
+        norm = _norm_code(code)
+        if norm and norm not in seen:
+            seen.add(norm)
+            codes.append(code)
+
+    if display_anchors_by_group is not None:
+        for code in display_anchors_by_group.get(group_key, []):
+            norm = _norm_code(code)
+            if norm and norm not in seen:
+                seen.add(norm)
+                codes.append(code)
+        return codes
+
+    for norm, meta in (displayed_details or {}).items():
+        if norm in seen:
+            continue
+        pseudo = {
+            "code": meta.get("code") or norm,
+            "family": meta.get("family") or "",
+            "name": meta.get("name") or "",
+        }
+        gkey, _ = _resolve_exemption_group(pseudo, config)
+        if gkey == group_key:
+            seen.add(norm)
+            codes.append(pseudo["code"])
+    return codes
+
+
+def _eligible_for_exemption(product):
+    if product.get("displayed") or not product.get("in_stock"):
+        return False
+    if product.get("gap"):
+        return True
+    return bool(product.get("discontinued"))
+
+
+def _enrich_catalog_metadata(rows):
+    """产品系列/豁免组与店面无关，在载入 stock 时就算好，切换店面时复用。"""
     config = _load_exemption_config()
-    for p in products:
-        p["exempted"] = False
-        p["exemption_reason"] = ""
+    for p in rows:
+        if p.get("_catalog_enriched"):
+            continue
         gkey, glabel = _resolve_exemption_group(p, config)
         p["exemption_group"] = gkey
         p["exemption_group_label"] = glabel
+        p["_catalog_enriched"] = True
+
+
+def _apply_family_exemptions(products, displayed_details=None):
+    """同 exemption 组内已有展示 SKU 时，豁免组内其他有货未展示 SKU。
+
+    锚点条件：在所选店面「已展示」即可（含 display 表有展示、stock 表无库存的款），
+    不要求锚点有货。停产但有货未展示的 SKU 也可被同组已展示款豁免。
+    """
+    config = _load_exemption_config()
+    display_anchors = _anchors_by_group_from_display(displayed_details, config)
+    for p in products:
+        p["exempted"] = False
+        p["exemption_reason"] = ""
+        if not p.get("_catalog_enriched"):
+            gkey, glabel = _resolve_exemption_group(p, config)
+            p["exemption_group"] = gkey
+            p["exemption_group_label"] = glabel
 
     by_group = {}
     for p in products:
@@ -548,23 +887,20 @@ def _apply_family_exemptions(products):
 
     exempted_n = 0
     for members in by_group.values():
-        anchors = [
-            m for m in members
-            if m.get("displayed") and not m.get("discontinued")
-        ]
-        if not anchors:
+        anchor_codes = _display_anchor_codes(members, display_anchors_by_group=display_anchors)
+        if not anchor_codes:
             continue
-        codes = [m["code"] for m in anchors]
-        reason = f"同组已展示：{codes[0]}"
-        if len(codes) > 1:
-            extra = ", ".join(codes[1:3])
-            suffix = "…" if len(codes) > 3 else ""
-            reason = f"同组已展示：{codes[0]}, {extra}{suffix}"
+        reason = f"同组已展示：{anchor_codes[0]}"
+        if len(anchor_codes) > 1:
+            extra = ", ".join(anchor_codes[1:3])
+            suffix = "…" if len(anchor_codes) > 3 else ""
+            reason = f"同组已展示：{anchor_codes[0]}, {extra}{suffix}"
         for m in members:
-            if not m.get("gap"):
+            if not _eligible_for_exemption(m):
                 continue
             m["exempted"] = True
-            m["gap"] = False
+            if m.get("gap"):
+                m["gap"] = False
             m["exemption_reason"] = reason
             exempted_n += 1
     return exempted_n
@@ -630,11 +966,38 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         raise ValueError("region_runner_config.json 中未配置任何地区。")
 
     bundle = _load_region_bundle(region_key, force=force_refresh)
+    full_stock = bundle.get("discontinued_loaded") or include_discontinued
+    if full_stock and not bundle.get("discontinued_loaded"):
+        _ensure_discontinued_rows(bundle)
+    view_key = (
+        region_key,
+        store or ALL_STORES,
+        bool(full_stock),
+        bundle.get("stock_mtime"),
+        bundle.get("display_mtime"),
+        bundle.get("blacklist_mtime"),
+        bundle.get("stock_discontinued_mtime"),
+    )
+    if not force_refresh and view_key in _STORE_VIEW_CACHE:
+        cached = _STORE_VIEW_CACHE[view_key]
+        if only_gap:
+            out = dict(cached)
+            out["products"] = [p for p in cached["products"] if p["gap"]]
+            return out
+        return cached
+
     stock_rows = bundle["stock_rows"]
+    if full_stock:
+        iter_rows = stock_rows
+    else:
+        iter_rows = bundle.get("stock_rows_active") or stock_rows
     by_store = bundle["by_store"]
     stock_path = bundle["stock_path"]
     display_path = bundle["display_path"]
     source = bundle["source"]
+    data_dir = bundle.get("data_dir")
+    blacklist = bundle.get("blacklist") or set()
+    blacklist_path = bundle.get("blacklist_path")
 
     stores = [ALL_STORES] + sorted(by_store.keys())
     if store is None:
@@ -646,11 +1009,17 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         displayed_codes = by_store.get(store, set())
 
     store_specific = store != ALL_STORES
+    catalog_wh_keys = _collect_catalog_warehouse_keys(iter_rows)
+    warehouse_keys = _warehouses_for_store(store, region_key, catalog_wh_keys)
 
     products = []
-    for p in stock_rows:
-        item = _apply_store_stock(p, store, region_key)
-        displayed = _norm_code(item["code"]) in displayed_codes
+    for p in iter_rows:
+        if p.get("norm_code") in blacklist:
+            continue
+        if not full_stock and p.get("discontinued"):
+            continue
+        item = _apply_store_stock(p, store, region_key, warehouse_keys)
+        displayed = item["norm_code"] in displayed_codes
         if store_specific:
             gap = item["in_stock"] and (not item["discontinued"]) and (not displayed)
         else:
@@ -660,34 +1029,48 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         products.append(item)
 
     if store_specific:
-        exempted_count = _apply_family_exemptions(products)
+        store_display_details = bundle.get("display_details", {}).get(store, {})
+        exempted_count = _apply_family_exemptions(products, store_display_details)
     else:
+        config = _load_exemption_config()
         for p in products:
             p["exempted"] = False
             p["exemption_reason"] = ""
-            gkey, glabel = _resolve_exemption_group(p, _load_exemption_config())
-            p["exemption_group"] = gkey
-            p["exemption_group_label"] = glabel
+            if not p.get("_catalog_enriched"):
+                gkey, glabel = _resolve_exemption_group(p, config)
+                p["exemption_group"] = gkey
+                p["exemption_group_label"] = glabel
         exempted_count = 0
 
-    non_discontinue = [p for p in products if not p["discontinued"]]
-    in_stock = [p for p in non_discontinue if p["in_stock"]]
-    displayed_in_stock = [p for p in in_stock if p["displayed"]]
-    not_displayed = [p for p in in_stock if p["gap"]]
-    if store_specific:
-        raw_gap_active = [
-            p for p in products
-            if p["in_stock"] and not p["discontinued"] and not p["displayed"]
-        ]
-        in_stock_not_displayed_all = [
-            p for p in products if p["in_stock"] and not p["displayed"]
-        ]
-    else:
-        raw_gap_active = []
-        in_stock_not_displayed_all = []
+    total_nd = 0
+    in_stock_n = 0
+    displayed_in_stock_n = 0
+    not_displayed_n = 0
+    raw_gap_active_n = 0
+    in_stock_not_displayed_all_n = 0
+    in_stock_not_displayed_discontinued_n = 0
+    for p in products:
+        disc = bool(p.get("discontinued"))
+        in_stock = bool(p.get("in_stock"))
+        displayed = bool(p.get("displayed"))
+        exempted = bool(p.get("exempted"))
+        gap = bool(p.get("gap"))
+        if not disc:
+            total_nd += 1
+            if in_stock:
+                in_stock_n += 1
+                if displayed:
+                    displayed_in_stock_n += 1
+                if gap:
+                    not_displayed_n += 1
+        if store_specific:
+            if in_stock and not disc and not displayed:
+                raw_gap_active_n += 1
+            if in_stock and not displayed and not exempted:
+                in_stock_not_displayed_all_n += 1
+                if disc:
+                    in_stock_not_displayed_discontinued_n += 1
 
-    total_nd = len(non_discontinue)
-    in_stock_n = len(in_stock)
     summary = {
         "store": store,
         "region": region_key,
@@ -695,23 +1078,27 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         "total_non_discontinue": total_nd,
         "in_stock_count": in_stock_n,
         "in_stock_rate": round(in_stock_n / total_nd * 100, 2) if total_nd else None,
-        "displayed_in_stock_count": len(displayed_in_stock),
-        "display_coverage_rate": round(len(displayed_in_stock) / in_stock_n * 100, 2) if in_stock_n else None,
-        "raw_gap_active_count": len(raw_gap_active) if store_specific else None,
-        "not_displayed_count": len(not_displayed) if store_specific else None,
-        "exempted_count": exempted_count if store_specific else None,
-        "in_stock_not_displayed_all": len(in_stock_not_displayed_all) if store_specific else None,
-        "stock_sources": " + ".join(
-            WAREHOUSE_LABELS.get(k, k) for k in _warehouses_for_store(store, region_key)
+        "displayed_in_stock_count": displayed_in_stock_n,
+        "display_coverage_rate": (
+            round(displayed_in_stock_n / in_stock_n * 100, 2) if in_stock_n else None
         ),
+        "raw_gap_active_count": raw_gap_active_n if store_specific else None,
+        "not_displayed_count": not_displayed_n if store_specific else None,
+        "exempted_count": exempted_count if store_specific else None,
+        "in_stock_not_displayed_all": in_stock_not_displayed_all_n if store_specific else None,
+        "in_stock_not_displayed_discontinued": (
+            in_stock_not_displayed_discontinued_n if store_specific else None
+        ),
+        "stock_sources": " + ".join(_warehouse_label(k) for k in warehouse_keys),
+        "blacklist_count": len(blacklist),
+        "blacklist_path": blacklist_path,
+        "blacklist_file_found": bool(blacklist_path),
+        "blacklist_expected_path": str(expected_blacklist_path(region_key)),
+        "data_format": Path(stock_path).suffix.lower(),
+        "uses_split_stock": bool(bundle.get("stock_discontinued_path")),
     }
 
-    view = products
-    if not include_discontinued:
-        view = [p for p in view if not p["discontinued"]]
-    if only_gap:
-        view = [p for p in view if p["gap"]]
-    view.sort(key=lambda p: (
+    products.sort(key=lambda p: (
         p.get("exemption_group_label") or p.get("family") or "未分类",
         not p["gap"],
         not p.get("exempted"),
@@ -744,19 +1131,63 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
             "message": "展示数据未包含有效店面，店面下拉只会显示「全部店面」。",
         })
 
-    return {
+    result = {
         "source": source,
         "region": region_key,
         "stock_path": str(stock_path),
         "display_path": str(display_path),
+        "blacklist_path": blacklist_path,
+        "blacklist_count": len(blacklist),
+        "blacklist_file_found": bool(blacklist_path),
+        "blacklist_expected_path": str(expected_blacklist_path(region_key)),
+        "data_dir": str(bundle.get("data_dir") or ""),
+        "data_format": Path(stock_path).suffix.lower(),
         "display_row_count": display_row_count,
         "stores": stores,
         "selected_store": store,
         "summary": summary,
-        "products": view,
+        "products": products,
         "regions": list_regions(),
         "diagnostics": diagnostics,
     }
+    _STORE_VIEW_CACHE[view_key] = result
+    if only_gap:
+        out = dict(result)
+        out["products"] = [p for p in products if p["gap"]]
+        return out
+    return result
+
+
+def prewarm_store_views(region, stores=None, include_discontinued=True):
+    """后台预热多个店面视图，切换店面时直接走缓存。"""
+    region_key = str(region).strip().upper()
+    bundle = _load_region_bundle(region_key)
+    if include_discontinued and not bundle.get("discontinued_loaded"):
+        _ensure_discontinued_rows(bundle)
+    if stores is None:
+        stores = sorted(bundle.get("by_store", {}).keys())
+    warmed = []
+    for store in stores:
+        if store == ALL_STORES:
+            continue
+        view_key = (
+            region_key,
+            store,
+            bool(include_discontinued or bundle.get("discontinued_loaded")),
+            bundle.get("stock_mtime"),
+            bundle.get("display_mtime"),
+            bundle.get("blacklist_mtime"),
+            bundle.get("stock_discontinued_mtime"),
+        )
+        if view_key in _STORE_VIEW_CACHE:
+            continue
+        build_products(
+            store=store,
+            include_discontinued=include_discontinued,
+            region=region_key,
+        )
+        warmed.append(store)
+    return warmed
 
 
 if __name__ == "__main__":
