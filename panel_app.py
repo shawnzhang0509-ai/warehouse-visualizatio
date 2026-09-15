@@ -8,6 +8,7 @@
 
 import io
 import os
+import ssl
 import sys
 import threading
 import urllib.request
@@ -30,7 +31,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.7.2"
+APP_VERSION = "1.7.3"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -85,7 +86,8 @@ class PanelApp:
         self.root.configure(bg=C_BG)
 
         self._img_cache = {}
-        self._pending_images = set()
+        self._pending_urls = {}
+        self._loading_urls = set()
         self._reload_token = 0
         self._render_token = 0
         self._image_semaphore = threading.Semaphore(6)
@@ -433,15 +435,25 @@ class PanelApp:
     def _visible_iids(self):
         if not self._tree:
             return []
-        height = max(self._tree.winfo_height(), ROW_HEIGHT)
-        seen, y = [], 0
-        while y < height + ROW_HEIGHT * 4:
-            iid = self._tree.identify_row(y)
-            if not iid or iid in seen or iid not in self._iid_to_url:
-                y += ROW_HEIGHT
-                continue
-            seen.append(iid)
-            y += ROW_HEIGHT
+        try:
+            top = int(self._tree.canvasy(0))
+        except tk.TclError:
+            top = 0
+        bottom = top + max(self._tree.winfo_height(), ROW_HEIGHT) + ROW_HEIGHT * 2
+        seen = []
+
+        def walk(parent=""):
+            for iid in self._tree.get_children(parent):
+                try:
+                    bbox = self._tree.bbox(iid)
+                except tk.TclError:
+                    bbox = None
+                if bbox and top <= bbox[1] <= bottom and iid in self._iid_to_url:
+                    seen.append(iid)
+                if self._tree.item(iid, "open"):
+                    walk(iid)
+
+        walk("")
         return seen
 
     def _is_store_selected(self):
@@ -660,20 +672,40 @@ class PanelApp:
     def _fetch_image_bytes(self, url):
         req = urllib.request.Request(
             panel_data.normalize_url(url),
-            headers={"User-Agent": "Mozilla/5.0 WarehousePanel/1.2"},
+            headers={
+                "User-Agent": "Mozilla/5.0 WarehousePanel/1.3",
+                "Accept": "image/*,*/*;q=0.8",
+            },
         )
-        with urllib.request.urlopen(req, timeout=15) as resp:
-            return resp.read()
+        ctx = ssl.create_default_context()
+        try:
+            with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
+                return resp.read()
+        except ssl.SSLError:
+            with urllib.request.urlopen(
+                req, timeout=20, context=ssl._create_unverified_context(),
+            ) as resp:
+                return resp.read()
+
+    def _apply_row_image(self, iid, photo, cache_key):
+        if photo:
+            self._img_cache[cache_key] = photo
+        if self._tree.exists(iid):
+            self._tree.item(iid, image=photo or self._placeholder_photo)
 
     def _schedule_row_image(self, iid, raw, render_token):
-        if not raw or raw in self._pending_images:
+        if not raw:
             return
         cache_key = f"{raw}@{THUMB[0]}x{THUMB[1]}"
         if cache_key in self._img_cache:
-            if self._tree.exists(iid):
-                self._tree.item(iid, image=self._img_cache[cache_key])
+            self._apply_row_image(iid, self._img_cache[cache_key], cache_key)
             return
-        self._pending_images.add(raw)
+
+        waiters = self._pending_urls.setdefault(raw, set())
+        waiters.add((iid, render_token))
+        if raw in self._loading_urls:
+            return
+        self._loading_urls.add(raw)
 
         def worker():
             photo = None
@@ -686,16 +718,17 @@ class PanelApp:
                     elif Path(raw).exists() and Image is not None:
                         photo = self._pil_to_photo(Image.open(raw))
             except Exception:
-                pass
+                photo = None
 
             def apply():
-                self._pending_images.discard(raw)
-                if render_token != self._render_token:
-                    return
+                self._loading_urls.discard(raw)
+                targets = list(self._pending_urls.pop(raw, set()))
                 if photo:
                     self._img_cache[cache_key] = photo
-                if self._tree.exists(iid):
-                    self._tree.item(iid, image=photo or self._placeholder_photo)
+                for target_iid, token in targets:
+                    if token != self._render_token:
+                        continue
+                    self._apply_row_image(target_iid, photo, cache_key)
 
             if self.root.winfo_exists():
                 self.root.after(0, apply)
@@ -735,7 +768,8 @@ class PanelApp:
         if item.get("image"):
             return item["image"]
         if self._cached_data_dir:
-            return panel_data.resolve_product_image(item, self._cached_data_dir)
+            region = (self._cached_summary or {}).get("region")
+            return panel_data.resolve_product_image(item, self._cached_data_dir, region=region)
         return None
 
     def _open_image_for_item(self, item):
@@ -1323,6 +1357,8 @@ class PanelApp:
             self._tree.delete(*self._tree.get_children())
         self._products_by_iid.clear()
         self._iid_to_url.clear()
+        self._pending_urls.clear()
+        self._loading_urls.clear()
 
         grouped = self._group_products(products)
         store_specific = self._cached_summary.get(

@@ -34,6 +34,11 @@ DEFAULT_REGION_META = {
     "AU": {"label": "澳洲", "template_dir": "Data-AU", "output_dir": "Output-AU"},
     "CA": {"label": "加拿大", "template_dir": "Data-CA", "output_dir": "Output-CA"},
 }
+REGION_IMAGE_BASE = {
+    "NZ": "https://ierpapi.ifurniture.co.nz/",
+    "AU": "https://ierpapi.ifurniture.com.au/",
+    "CA": "https://ierpapi.ifurniture.ca/",
+}
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
 # 启动时预加载停产 SKU（停产为常态时避免每次切筛选都重算）
@@ -638,23 +643,71 @@ def _load_region_bundle(region, force=False):
     return bundle
 
 
-def _resolve_image(raw, code, data_dir, scan_dir=True):
+def _region_from_data_dir(data_dir, region=None):
+    if region:
+        return str(region).strip().upper()
+    env = os.getenv("INSTOCK_REGION", "").strip().upper()
+    if env:
+        return env
+    text = str(data_dir or "").replace("\\", "/").upper()
+    for rk in REGION_ORDER:
+        if f"OUTPUT-{rk}" in text:
+            return rk
+    return "NZ"
+
+
+def _image_base_url(region_key):
+    env = os.getenv("INSTOCK_IMAGE_BASE", "").strip()
+    if env:
+        return env if env.endswith("/") else env + "/"
+    base = REGION_IMAGE_BASE.get(str(region_key or "").upper(), "")
+    return base if base.endswith("/") else (base + "/" if base else "")
+
+
+def _clean_image_ref(value):
+    text = str(value).strip().replace("\\", "/")
+    if not text:
+        return ""
+    if "://" in text:
+        parts = urlsplit(text)
+        path = re.sub(r"/+", "/", parts.path or "/")
+        return urlunsplit((parts.scheme, parts.netloc, path, parts.query, parts.fragment))
+    return text
+
+
+def _resolve_image(raw, code, data_dir, scan_dir=True, region=None):
     """把图片列的值解析成可用路径/URL；也支持按产品编码自动找本地图。"""
+    region_key = _region_from_data_dir(data_dir, region)
+    base_url = _image_base_url(region_key)
+
     if raw:
-        text = str(raw).strip()
+        text = _clean_image_ref(raw)
         if text.lower().startswith(("http://", "https://")):
             return normalize_url(text)
         p = Path(text)
-        if not p.is_absolute():
-            p = ROOT_DIR / p
-        if p.is_file():
-            return str(p)
+        candidates = []
+        if p.is_absolute():
+            candidates.append(p)
+        else:
+            if data_dir:
+                candidates.append(Path(data_dir) / text.lstrip("/"))
+            candidates.append(ROOT_DIR / text.lstrip("/"))
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+        if base_url and text:
+            return normalize_url(base_url.rstrip("/") + "/" + text.lstrip("/"))
 
     if not scan_dir:
         return None
 
-    images_dir = Path(data_dir) / "images"
-    if images_dir.is_dir():
+    search_dirs = []
+    if data_dir:
+        search_dirs.append(Path(data_dir) / "images")
+    search_dirs.append(ROOT_DIR / "sample_images")
+    for images_dir in search_dirs:
+        if not images_dir.is_dir():
+            continue
         for stem in (str(code).strip(), str(code).strip().upper(), str(code).strip().lower()):
             for ext in IMAGE_EXTS:
                 candidate = images_dir / f"{stem}{ext}"
@@ -663,12 +716,15 @@ def _resolve_image(raw, code, data_dir, scan_dir=True):
     return None
 
 
-def resolve_product_image(product, data_dir):
+def resolve_product_image(product, data_dir, region=None):
     """按需解析产品图（避免启动时对上万 SKU 扫描 images 目录）。"""
     if product.get("_image_resolved"):
         return product.get("image")
     raw = product.get("image_raw")
-    image = _resolve_image(raw, product.get("code"), data_dir, scan_dir=True)
+    image = _resolve_image(
+        raw, product.get("code"), data_dir, scan_dir=True,
+        region=region or product.get("region"),
+    )
     product["image"] = image
     product["_image_resolved"] = True
     return image
