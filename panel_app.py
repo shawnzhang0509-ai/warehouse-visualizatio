@@ -31,7 +31,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.7.3"
+APP_VERSION = "1.7.4"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -435,26 +435,29 @@ class PanelApp:
     def _visible_iids(self):
         if not self._tree:
             return []
-        try:
-            top = int(self._tree.canvasy(0))
-        except tk.TclError:
-            top = 0
-        bottom = top + max(self._tree.winfo_height(), ROW_HEIGHT) + ROW_HEIGHT * 2
         seen = []
+        height = max(self._tree.winfo_height(), ROW_HEIGHT)
+        y, step = 0, max(ROW_HEIGHT // 2, 18)
+        while y < height + ROW_HEIGHT * 2:
+            iid = self._tree.identify_row(y)
+            if iid and iid not in seen and iid in self._iid_to_url:
+                seen.append(iid)
+            y += step
+        if seen:
+            return seen[: IMAGE_BATCH * 2]
+        out = []
 
         def walk(parent=""):
             for iid in self._tree.get_children(parent):
-                try:
-                    bbox = self._tree.bbox(iid)
-                except tk.TclError:
-                    bbox = None
-                if bbox and top <= bbox[1] <= bottom and iid in self._iid_to_url:
-                    seen.append(iid)
-                if self._tree.item(iid, "open"):
+                if iid in self._iid_to_url:
+                    out.append(iid)
+                if self._tree.get_children(iid):
                     walk(iid)
 
-        walk("")
-        return seen
+        for iid in self._tree.get_children():
+            if self._tree.item(iid, "open"):
+                walk(iid)
+        return out[: IMAGE_BATCH * 2]
 
     def _is_store_selected(self):
         store = self.store_combo.get() if self.store_combo else self.store_var.get()
@@ -670,22 +673,23 @@ class PanelApp:
         return ImageTk.PhotoImage(im)
 
     def _fetch_image_bytes(self, url):
-        req = urllib.request.Request(
-            panel_data.normalize_url(url),
-            headers={
-                "User-Agent": "Mozilla/5.0 WarehousePanel/1.3",
-                "Accept": "image/*,*/*;q=0.8",
-            },
-        )
+        headers = {
+            "User-Agent": "Mozilla/5.0 WarehousePanel/1.4",
+            "Accept": "image/*,*/*;q=0.8",
+        }
         ctx = ssl.create_default_context()
-        try:
-            with urllib.request.urlopen(req, timeout=20, context=ctx) as resp:
-                return resp.read()
-        except ssl.SSLError:
-            with urllib.request.urlopen(
-                req, timeout=20, context=ssl._create_unverified_context(),
-            ) as resp:
-                return resp.read()
+        unverified = ssl._create_unverified_context()
+        for candidate in panel_data.image_url_candidates(url):
+            req = urllib.request.Request(panel_data.normalize_url(candidate), headers=headers)
+            for context in (ctx, unverified):
+                try:
+                    with urllib.request.urlopen(req, timeout=20, context=context) as resp:
+                        data = resp.read()
+                        if data:
+                            return data
+                except Exception:
+                    continue
+        raise RuntimeError(f"image fetch failed: {url}")
 
     def _apply_row_image(self, iid, photo, cache_key):
         if photo:
@@ -931,9 +935,15 @@ class PanelApp:
         self._cached_data_dir = data.get("data_dir") or ""
         fmt = data.get("data_format", "")
         src = self._region_labels.get(region, region)
-        src_line = f"数据源：{src}  |  {Path(data['stock_path']).name}"
+        stock_files = data.get("summary", {}).get("stock_files") or Path(data["stock_path"]).name
+        src_line = f"数据源：{src}  |  {stock_files}"
         if fmt:
             src_line += f"（{fmt}）"
+        img_n = data.get("summary", {}).get("image_url_count", 0)
+        if img_n:
+            src_line += f"  |  图片 {img_n}"
+        else:
+            src_line += "  |  ⚠ 无 ImageUrl"
         self.source_var.set(src_line)
         self._update_blacklist_label()
         self._prefix_rendered_for = None
@@ -1099,9 +1109,17 @@ class PanelApp:
         self._stat_labels["in_stock"].configure(text=str(s.get("in_stock_count", 0)))
         self._stat_labels["rate"].configure(text=pct(s.get("in_stock_rate")))
         self._stat_labels["total"].configure(text=str(s.get("total_non_discontinue", 0)))
-        self._stock_source_lbl.configure(
-            text=f"店面：{s.get('store', '-')}  |  库存来源：{s.get('stock_sources', '-')}"
+        stock_line = (
+            f"店面：{s.get('store', '-')}  |  "
+            f"库存文件：{s.get('stock_files', 'stock.csv')}  |  "
+            f"仓：{s.get('stock_sources', '-')}"
         )
+        img_n = s.get("image_url_count", 0)
+        if img_n:
+            stock_line += f"  |  图片URL：{img_n}"
+        else:
+            stock_line += "  |  ⚠ stock.csv 无 ImageUrl，请重新导出 SQL"
+        self._stock_source_lbl.configure(text=stock_line)
         self._update_blacklist_label()
         self._update_stat_card_highlight()
 
@@ -1260,6 +1278,8 @@ class PanelApp:
                 self._iid_to_url[iid] = url
             elif item.get("image_raw"):
                 self._iid_to_url[iid] = item
+            if self._images_enabled() and url:
+                self._schedule_row_image(iid, url, render_token)
         if end < len(items):
             self.root.after(1, lambda: self._insert_group_children(
                 parent, items, render_token, end,
@@ -1292,6 +1312,7 @@ class PanelApp:
         def step(ix=0):
             if ix >= total:
                 self._update_group_tool_buttons()
+                self._debounce_visible_images()
                 self._status_var.set(f"就绪 · 已展开 {total} 个系列")
                 return
             batch = pending[ix:ix + 6]

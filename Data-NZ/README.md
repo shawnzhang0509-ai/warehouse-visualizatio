@@ -11,7 +11,9 @@
 | display_with_families.sql | display.csv（店面下拉靠这个） |
 | weekly_sales.sql | weekly_sales.csv |
 
-**两个 stock 模板请一起执行。** 看板启动时会读 `stock.csv` + `stock_discontinued.csv`，比从一个 1.6 万行大文件里筛停产快得多。
+**两个 stock 模板请一起执行（两库）。** 看板启动时会读 `stock.csv` + `stock_discontinued.csv`，状态栏会显示 `stock.csv + stock_discontinued.csv（两库）`。只导出一个文件时，停产=「全部」会缺数据。
+
+**产品图** 依赖 `ImageUrl` 列（SQL 已含）。若看板提示「无 ImageUrl」，请用本目录最新 `product_stock_price.sql` / `stock_discontinued.sql` 重新导出。
 
 **仅导出 CSV，不再生成 .xlsx。** 重新执行 SQL 时会自动删除同名的旧版 Excel 文件。
 

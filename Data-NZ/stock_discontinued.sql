@@ -31,13 +31,7 @@ SELECT
         THEN 1
         ELSE 0
     END AS OnPromotion,
-    MAX(
-        CASE
-            WHEN img.RelativeFilePath IS NOT NULL
-            THEN 'https://ierpapi.ifurniture.co.nz/' + REPLACE(img.RelativeFilePath, '\', '/')
-            ELSE ''
-        END
-    ) AS ImageUrl,
+    MAX(ISNULL(img.ImageUrl, '')) AS ImageUrl,
     SUM(CASE WHEN TRIM(w.Name) = 'Carbine Rd Warehouse' THEN ISNULL(s.Quantity, 0) ELSE 0 END) AS CarbineStock,
     SUM(CASE WHEN TRIM(w.Name) IN ('Walls', 'Walls Road', 'Walls in Transit') THEN ISNULL(s.Quantity, 0) ELSE 0 END) AS WallsStock,
     SUM(CASE WHEN TRIM(w.Name) = 'Carbine Rd Warehouse' THEN ISNULL(s.Quantity, 0) ELSE 0 END)
@@ -70,7 +64,9 @@ LEFT JOIN (
     ON promo.ProductId = p.Id
 
 LEFT JOIN (
-    SELECT ProductId, RelativeFilePath
+    SELECT
+        ProductId,
+        'https://ierpapi.ifurniture.co.nz/' + REPLACE(RelativeFilePath, '\', '/') AS ImageUrl
     FROM (
         SELECT
             PD.ProductId,

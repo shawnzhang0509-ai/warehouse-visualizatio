@@ -39,6 +39,11 @@ REGION_IMAGE_BASE = {
     "AU": "https://ierpapi.ifurniture.com.au/",
     "CA": "https://ierpapi.ifurniture.ca/",
 }
+IMAGE_HOST_ALTERNATES = {
+    "ierpapi.ifurniture.co.nz": ("www.ifurniture.co.nz", "cdn.ifurniture.co.nz"),
+    "ierpapi.ifurniture.com.au": ("www.ifurniture.com.au",),
+    "ierpapi.ifurniture.ca": ("www.ifurniture.ca",),
+}
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
 # 启动时预加载停产 SKU（停产为常态时避免每次切筛选都重算）
@@ -643,6 +648,25 @@ def _load_region_bundle(region, force=False):
     return bundle
 
 
+def _count_image_urls(products):
+    count = 0
+    for product in products:
+        raw = product.get("image_raw")
+        if raw and str(raw).strip():
+            count += 1
+        elif product.get("image"):
+            count += 1
+    return count
+
+
+def _stock_files_label(bundle):
+    active = Path(bundle.get("stock_path") or "stock.csv").name
+    disc_path = bundle.get("stock_discontinued_path")
+    if disc_path and Path(disc_path).is_file():
+        return f"{active} + {Path(disc_path).name}（两库）"
+    return active
+
+
 def _region_from_data_dir(data_dir, region=None):
     if region:
         return str(region).strip().upper()
@@ -662,6 +686,23 @@ def _image_base_url(region_key):
         return env if env.endswith("/") else env + "/"
     base = REGION_IMAGE_BASE.get(str(region_key or "").upper(), "")
     return base if base.endswith("/") else (base + "/" if base else "")
+
+
+def image_url_candidates(url):
+    """同一图片路径尝试多个域名（ierpapi 失效时回退官网 CDN）。"""
+    text = _clean_image_ref(url)
+    if not text or not text.lower().startswith(("http://", "https://")):
+        return [text] if text else []
+    seen = {text}
+    out = [text]
+    for host, alternates in IMAGE_HOST_ALTERNATES.items():
+        if host in text.lower():
+            for alt in alternates:
+                candidate = re.sub(host, alt, text, flags=re.I)
+                if candidate not in seen:
+                    seen.add(candidate)
+                    out.append(candidate)
+    return out
 
 
 def _clean_image_ref(value):
@@ -747,6 +788,10 @@ def _load_stock(rows, data_dir, discontinued=None):
             qty = sum(warehouse_stock.values())
         else:
             qty = _to_float(_pick(row, STOCK_KEYS)) or 0.0
+        image_raw = _pick(row, IMAGE_KEYS)
+        pre_image = None
+        if image_raw and str(image_raw).strip().lower().startswith(("http://", "https://")):
+            pre_image = _resolve_image(image_raw, code, data_dir, scan_dir=False)
         out.append({
             "code": str(code).strip(),
             "norm_code": _norm_code(code),
@@ -757,9 +802,9 @@ def _load_stock(rows, data_dir, discontinued=None):
             "price": _to_float(_pick(row, PRICE_KEYS)),
             "discontinued": is_disc,
             "in_stock": qty > 0,
-            "image_raw": _pick(row, IMAGE_KEYS),
-            "image": None,
-            "_image_resolved": False,
+            "image_raw": image_raw,
+            "image": pre_image,
+            "_image_resolved": bool(pre_image),
         })
     return out
 
@@ -1146,6 +1191,8 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
             in_stock_not_displayed_discontinued_n if store_specific else None
         ),
         "stock_sources": " + ".join(_warehouse_label(k) for k in warehouse_keys),
+        "stock_files": _stock_files_label(bundle),
+        "image_url_count": _count_image_urls(iter_rows),
         "blacklist_count": len(blacklist),
         "blacklist_path": blacklist_path,
         "blacklist_file_found": bool(blacklist_path),
