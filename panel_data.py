@@ -391,6 +391,14 @@ def _region_display_stems(region_key):
             "store_display", f"{rk}_store_display"]
 
 
+def _region_storage_stems(region_key):
+    rk = region_key.upper()
+    return ["storage", "shop_storage", f"{rk}_storage", "store_storage"]
+
+
+STORAGE_QTY_KEYS = ["storageqty", "storage_qty", "qty", "quantity", "displayqty"]
+
+
 def _load_runner_regions():
     """合并默认三国配置与 region_runner_config(.local).json。"""
     try:
@@ -595,6 +603,8 @@ def _load_region_bundle(region, force=False):
     blacklist_mtime = _file_mtime(blacklist_path) if blacklist_path else None
     disc_path = _find_region_data_file(data_dir, _region_discontinued_stems(region_key))
     disc_mtime = _file_mtime(disc_path) if disc_path else None
+    storage_path = _find_region_data_file(data_dir, _region_storage_stems(region_key))
+    storage_mtime = _file_mtime(storage_path) if storage_path else None
 
     cached = _REGION_CACHE.get(region_key)
     if (
@@ -604,6 +614,7 @@ def _load_region_bundle(region, force=False):
         and cached["display_mtime"] == display_mtime
         and cached.get("blacklist_mtime") == blacklist_mtime
         and cached.get("stock_discontinued_mtime") == disc_mtime
+        and cached.get("storage_mtime") == storage_mtime
     ):
         return cached
 
@@ -614,6 +625,12 @@ def _load_region_bundle(region, force=False):
 
     display_rows = _read_table(display_path)
     by_store, display_details = _load_display(display_rows)
+    by_storage, storage_details = {}, {}
+    storage_row_count = 0
+    if storage_path and Path(storage_path).is_file():
+        storage_rows = _read_table(storage_path)
+        by_storage, storage_details = _load_storage(storage_rows)
+        storage_row_count = len(storage_rows)
     blacklist = _load_blacklist(blacklist_path)
     stock_raw_rows = _read_table(stock_path)
     active_rows = _load_stock(stock_raw_rows, data_dir, discontinued=False)
@@ -622,6 +639,8 @@ def _load_region_bundle(region, force=False):
         "region": region_key,
         "stock_path": stock_path,
         "display_path": display_path,
+        "storage_path": str(storage_path) if storage_path else None,
+        "storage_mtime": storage_mtime,
         "blacklist_path": str(blacklist_path) if blacklist_path else None,
         "blacklist": blacklist,
         "source": source,
@@ -638,7 +657,10 @@ def _load_region_bundle(region, force=False):
         "discontinued_loaded": False,
         "by_store": by_store,
         "display_details": display_details,
+        "by_storage": by_storage,
+        "storage_details": storage_details,
         "display_row_count": len(display_rows),
+        "storage_row_count": storage_row_count,
         "stock_row_count": len(stock_raw_rows),
     }
     _REGION_CACHE[region_key] = bundle
@@ -807,6 +829,53 @@ def _load_stock(rows, data_dir, discontinued=None):
             "_image_resolved": bool(pre_image),
         })
     return out
+
+
+def _storage_warehouse_to_display_store(warehouse_name):
+    """Onehunga Shop-Storage → Onehunga Shop-Display（与 display.csv 店面下拉对齐）。"""
+    text = str(warehouse_name or "").strip()
+    if not text:
+        return text
+    for old, new in (
+        ("-Storage", "-Display"),
+        (" Storage", " Display"),
+        ("-storage", "-Display"),
+        (" storage", " display"),
+    ):
+        if old in text:
+            return text.replace(old, new, 1)
+    lower = text.lower()
+    if lower.endswith("storage"):
+        base = text[: -len("storage")].rstrip(" -")
+        if base.lower().endswith("shop"):
+            return f"{base}-Display"
+        return f"{base} Display" if base else text
+    return text
+
+
+def _load_storage(rows):
+    """返回 (by_store, storage_details)，店面名统一映射为 *-Display 与 display.csv 一致。"""
+    by_store = {}
+    storage_details = {}
+    for row in rows:
+        code = _pick(row, CODE_KEYS)
+        if not code:
+            continue
+        warehouse = _pick(row, STORE_KEYS + ["warehousename"])
+        store = _storage_warehouse_to_display_store(warehouse)
+        store = str(store).strip() if store else "（未标注店面）"
+        qty = _to_float(_pick(row, STORAGE_QTY_KEYS)) or 0.0
+        if qty <= 0:
+            continue
+        norm = _norm_code(code)
+        by_store.setdefault(store, set()).add(norm)
+        storage_details.setdefault(store, {})[norm] = {
+            "code": str(code).strip(),
+            "family": str(_pick(row, FAMILY_KEYS) or "").strip(),
+            "name": str(_pick(row, NAME_KEYS) or "").strip(),
+            "qty": qty,
+        }
+    return by_store, storage_details
 
 
 def _load_display(rows):
@@ -1078,6 +1147,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         bundle.get("display_mtime"),
         bundle.get("blacklist_mtime"),
         bundle.get("stock_discontinued_mtime"),
+        bundle.get("storage_mtime"),
     )
     if not force_refresh and view_key in _STORE_VIEW_CACHE:
         cached = _STORE_VIEW_CACHE[view_key]
@@ -1112,6 +1182,11 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
     store_specific = store != ALL_STORES
     catalog_wh_keys = _collect_catalog_warehouse_keys(iter_rows)
     warehouse_keys = _warehouses_for_store(store, region_key, catalog_wh_keys)
+    by_storage = bundle.get("by_storage") or {}
+    storage_details = bundle.get("storage_details") or {}
+    has_storage_data = bool(bundle.get("storage_path")) and Path(bundle["storage_path"]).is_file()
+    storage_codes = by_storage.get(store, set()) if store_specific else set()
+    store_storage_details = storage_details.get(store, {}) if store_specific else {}
 
     products = []
     for p in iter_rows:
@@ -1121,12 +1196,30 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
             continue
         item = _apply_store_stock(p, store, region_key, warehouse_keys)
         displayed = item["norm_code"] in displayed_codes
+        in_storage = item["norm_code"] in storage_codes if has_storage_data else None
+        storage_qty = store_storage_details.get(item["norm_code"], {}).get("qty", 0)
         if store_specific:
             gap = item["in_stock"] and (not item["discontinued"]) and (not displayed)
+            warehouse_only = bool(
+                has_storage_data and item["in_stock"] and not in_storage and not displayed
+            )
+            ready_not_displayed = bool(
+                has_storage_data
+                and item["in_stock"]
+                and in_storage
+                and not displayed
+                and not item["discontinued"]
+            )
         else:
             gap = False
+            warehouse_only = False
+            ready_not_displayed = False
         item["displayed"] = displayed
         item["gap"] = gap
+        item["in_storage"] = in_storage
+        item["storage_qty"] = storage_qty if in_storage else 0
+        item["warehouse_only"] = warehouse_only
+        item["ready_not_displayed"] = ready_not_displayed
         products.append(item)
 
     if store_specific:
@@ -1150,6 +1243,9 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
     raw_gap_active_n = 0
     in_stock_not_displayed_all_n = 0
     in_stock_not_displayed_discontinued_n = 0
+    warehouse_only_n = 0
+    ready_not_displayed_n = 0
+    in_storage_n = 0
     for p in products:
         disc = bool(p.get("discontinued"))
         in_stock = bool(p.get("in_stock"))
@@ -1171,6 +1267,12 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
                 in_stock_not_displayed_all_n += 1
                 if disc:
                     in_stock_not_displayed_discontinued_n += 1
+            if p.get("in_storage"):
+                in_storage_n += 1
+            if p.get("warehouse_only") and not exempted:
+                warehouse_only_n += 1
+            if p.get("ready_not_displayed") and not exempted:
+                ready_not_displayed_n += 1
 
     summary = {
         "store": store,
@@ -1199,6 +1301,11 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         "blacklist_expected_path": str(expected_blacklist_path(region_key)),
         "data_format": Path(stock_path).suffix.lower(),
         "uses_split_stock": bool(bundle.get("stock_discontinued_path")),
+        "has_storage_data": has_storage_data,
+        "storage_row_count": bundle.get("storage_row_count", 0),
+        "in_storage_count": in_storage_n if store_specific else None,
+        "warehouse_only_count": warehouse_only_n if store_specific else None,
+        "ready_not_displayed_count": ready_not_displayed_n if store_specific else None,
     }
 
     products.sort(key=lambda p: (
@@ -1281,6 +1388,7 @@ def prewarm_store_views(region, stores=None, include_discontinued=True):
             bundle.get("display_mtime"),
             bundle.get("blacklist_mtime"),
             bundle.get("stock_discontinued_mtime"),
+            bundle.get("storage_mtime"),
         )
         if view_key in _STORE_VIEW_CACHE:
             continue

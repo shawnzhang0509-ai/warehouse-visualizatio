@@ -25,6 +25,9 @@ STANDARD_OUTPUT_NAMES = {
     "display.with_families": "display",
     "stock_discontinued": "stock_discontinued",
     "product_stock_discontinued": "stock_discontinued",
+    "storage": "storage",
+    "shop_storage": "storage",
+    "store_storage": "storage",
 }
 
 try:

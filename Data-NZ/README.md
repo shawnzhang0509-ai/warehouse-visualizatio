@@ -8,7 +8,8 @@
 |-----------|-------------------|
 | **product_stock_price.sql** | **stock.csv**（仅在产，`IsDiscontinued = 0`） |
 | **stock_discontinued.sql** | **stock_discontinued.csv**（仅停产，`IsDiscontinued = 1`） |
-| display_with_families.sql | display.csv（店面下拉靠这个） |
+| display_with_families.sql / display.sql | display.csv（**陈列区** `%Display%`） |
+| **storage.sql** | **storage.csv**（**店面后仓** `%Storage%`，勿覆盖 display） |
 | weekly_sales.sql | weekly_sales.csv |
 
 **两个 stock 模板请一起执行（两库）。** 看板启动时会读 `stock.csv` + `stock_discontinued.csv`，状态栏会显示 `stock.csv + stock_discontinued.csv（两库）`。只导出一个文件时，停产=「全部」会缺数据。
@@ -23,7 +24,8 @@
 |------|---------|
 | `stock.csv` | ✅ 必须（在产，由 product_stock_price.sql 导出） |
 | `stock_discontinued.csv` | ✅ 必须（停产，由 stock_discontinued.sql 导出） |
-| `display.csv` | ✅ 必须 |
+| `display.csv` | ✅ 必须（陈列区 `%Display%`） |
+| `storage.csv` | ✅ 推荐（店面后仓 `%Storage%`，看板「仓有·店仓无 / 双有未陈列」） |
 | `blacklist.csv` | 可选（见 `blacklist.example.csv` 模板） |
 | `weekly_sales.csv` | 看板不需要 |
 
@@ -62,6 +64,20 @@
 | 停产=**全部/已停产** | stock.csv + stock_discontinued.csv | 比从一个大文件里筛停产快 |
 
 若只有一个合并的 stock.csv，看板也能用，但切「全部」时要处理全部 1.6 万行。
+
+## 三层库存逻辑（v1.7.5+）
+
+| 层级 | 文件 | SQL 条件 | 看板含义 |
+|------|------|----------|----------|
+| 中心仓 | stock.csv | Carbine / Walls / GC | 有货 |
+| 店后仓 | storage.csv | `%Storage%` | 店面 Storage 有货 |
+| 陈列区 | display.csv | `%Display%` | 已陈列 |
+
+状态示例：
+- **仓有·店仓无**：中心仓有货，店后仓没有，也未陈列 → 可能要调拨
+- **双有未陈列**：中心仓 + 店后仓都有货，但未陈列 → 比 display 更严格的待处理
+
+`display.sql` 与 `storage.sql` **各导各的**，不要把 Display 改成 Storage 覆盖。
 
 ## display.csv 列说明
 

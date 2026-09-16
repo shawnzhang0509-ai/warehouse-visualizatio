@@ -31,7 +31,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.7.4"
+APP_VERSION = "1.7.5"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -1119,6 +1119,14 @@ class PanelApp:
             stock_line += f"  |  图片URL：{img_n}"
         else:
             stock_line += "  |  ⚠ stock.csv 无 ImageUrl，请重新导出 SQL"
+        if s.get("has_storage_data"):
+            stock_line += f"  |  店仓SKU：{s.get('in_storage_count', 0)}"
+            if s.get("warehouse_only_count"):
+                stock_line += f"  |  仓有店仓无：{s['warehouse_only_count']}"
+            if s.get("ready_not_displayed_count"):
+                stock_line += f"  |  双有未陈列：{s['ready_not_displayed_count']}"
+        else:
+            stock_line += "  |  ⚠ 无 storage.csv（请执行 storage.sql）"
         self._stock_source_lbl.configure(text=stock_line)
         self._update_blacklist_label()
         self._update_stat_card_highlight()
@@ -1227,8 +1235,12 @@ class PanelApp:
     def _row_tag(self, item, index):
         if item.get("exempted"):
             return ("exempted",)
+        if item.get("ready_not_displayed"):
+            return ("gap",)
         if item.get("gap"):
             return ("gap",)
+        if item.get("warehouse_only"):
+            return ("alt",)
         if item.get("discontinued"):
             return ("discontinued",)
         if item.get("in_stock") and item.get("displayed"):
@@ -1242,10 +1254,19 @@ class PanelApp:
         stock = int(item["stock_qty"]) if item.get("in_stock") else 0
         if item.get("stock_breakdown") and item.get("in_stock"):
             stock = f"{stock} ({item['stock_breakdown']})"
-        displayed = "已展示" if item.get("displayed") else "未展示"
+        if item.get("displayed"):
+            displayed = "已展示"
+        elif item.get("in_storage"):
+            displayed = f"未展示·店仓{item.get('storage_qty', 0):.0f}"
+        else:
+            displayed = "未展示"
         discontinue = "是" if item.get("discontinued") else "否"
-        if item.get("gap"):
+        if item.get("ready_not_displayed") and not item.get("exempted"):
+            status = "★ 双有未陈列"
+        elif item.get("gap"):
             status = "★ 有货未展示"
+        elif item.get("warehouse_only") and not item.get("exempted"):
+            status = "仓有·店仓无"
         elif item.get("exempted"):
             status = "○ 同组已展示"
         elif item.get("discontinued"):
@@ -1254,7 +1275,10 @@ class PanelApp:
             else:
                 status = "已停产"
         elif item.get("in_stock"):
-            status = "有货"
+            if item.get("in_storage"):
+                status = "有货·店仓有"
+            else:
+                status = "有货"
         else:
             status = "无货"
         return (
