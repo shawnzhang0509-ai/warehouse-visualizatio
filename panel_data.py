@@ -689,6 +689,18 @@ def _stock_files_label(bundle):
     return active
 
 
+def _panel_data_files_label(bundle):
+    """看板顶部「数据源」行：库存 + 陈列 + 店后仓。"""
+    parts = [_stock_files_label(bundle)]
+    display_path = bundle.get("display_path")
+    if display_path and Path(display_path).is_file():
+        parts.append(Path(display_path).name)
+    storage_path = bundle.get("storage_path")
+    if storage_path and Path(storage_path).is_file():
+        parts.append(f"{Path(storage_path).name}（店后仓）")
+    return " + ".join(parts)
+
+
 def _region_from_data_dir(data_dir, region=None):
     if region:
         return str(region).strip().upper()
@@ -1294,6 +1306,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         ),
         "stock_sources": " + ".join(_warehouse_label(k) for k in warehouse_keys),
         "stock_files": _stock_files_label(bundle),
+        "data_files": _panel_data_files_label(bundle),
         "image_url_count": _count_image_urls(iter_rows),
         "blacklist_count": len(blacklist),
         "blacklist_path": blacklist_path,

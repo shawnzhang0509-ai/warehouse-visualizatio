@@ -31,7 +31,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.7.5"
+APP_VERSION = "1.7.6"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -935,7 +935,11 @@ class PanelApp:
         self._cached_data_dir = data.get("data_dir") or ""
         fmt = data.get("data_format", "")
         src = self._region_labels.get(region, region)
-        stock_files = data.get("summary", {}).get("stock_files") or Path(data["stock_path"]).name
+        stock_files = (
+            data.get("summary", {}).get("data_files")
+            or data.get("summary", {}).get("stock_files")
+            or Path(data["stock_path"]).name
+        )
         src_line = f"数据源：{src}  |  {stock_files}"
         if fmt:
             src_line += f"（{fmt}）"
