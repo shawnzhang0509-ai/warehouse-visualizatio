@@ -31,7 +31,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.7.6"
+APP_VERSION = "1.7.7"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -1124,11 +1124,24 @@ class PanelApp:
         else:
             stock_line += "  |  ⚠ stock.csv 无 ImageUrl，请重新导出 SQL"
         if s.get("has_storage_data"):
-            stock_line += f"  |  店仓SKU：{s.get('in_storage_count', 0)}"
-            if s.get("warehouse_only_count"):
-                stock_line += f"  |  仓有店仓无：{s['warehouse_only_count']}"
-            if s.get("ready_not_displayed_count"):
-                stock_line += f"  |  双有未陈列：{s['ready_not_displayed_count']}"
+            if store_specific:
+                wh = s.get("storage_warehouse")
+                if wh:
+                    stock_line += f"  |  店后仓：{wh}"
+                stock_line += f"  |  店仓SKU：{s.get('in_storage_count', 0)}"
+                if s.get("warehouse_only_count"):
+                    stock_line += f"  |  仓有店仓无：{s['warehouse_only_count']}"
+                if s.get("ready_not_displayed_count"):
+                    stock_line += f"  |  双有未陈列：{s['ready_not_displayed_count']}"
+            else:
+                mapped = s.get("storage_map") or {}
+                stock_line += (
+                    f"  |  店后仓已加载：{len(mapped)} 个仓 / "
+                    f"全区域店仓SKU {s.get('all_storage_sku_count', 0)}（请选店面看明细）"
+                )
+            unmapped = s.get("storage_unmapped") or []
+            if unmapped:
+                stock_line += f"  |  ⚠ 未映射店后仓：{len(unmapped)} 个"
         else:
             stock_line += "  |  ⚠ 无 storage.csv（请执行 storage.sql）"
         self._stock_source_lbl.configure(text=stock_line)

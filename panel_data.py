@@ -629,8 +629,12 @@ def _load_region_bundle(region, force=False):
     storage_row_count = 0
     if storage_path and Path(storage_path).is_file():
         storage_rows = _read_table(storage_path)
-        by_storage, storage_details = _load_storage(storage_rows)
+        by_storage, storage_details, storage_map, storage_unmapped = _load_storage(
+            storage_rows, by_store.keys(),
+        )
         storage_row_count = len(storage_rows)
+    else:
+        storage_map, storage_unmapped = {}, []
     blacklist = _load_blacklist(blacklist_path)
     stock_raw_rows = _read_table(stock_path)
     active_rows = _load_stock(stock_raw_rows, data_dir, discontinued=False)
@@ -659,6 +663,8 @@ def _load_region_bundle(region, force=False):
         "display_details": display_details,
         "by_storage": by_storage,
         "storage_details": storage_details,
+        "storage_map": storage_map,
+        "storage_unmapped": storage_unmapped,
         "display_row_count": len(display_rows),
         "storage_row_count": storage_row_count,
         "stock_row_count": len(stock_raw_rows),
@@ -865,29 +871,86 @@ def _storage_warehouse_to_display_store(warehouse_name):
     return text
 
 
-def _load_storage(rows):
-    """返回 (by_store, storage_details)，店面名统一映射为 *-Display 与 display.csv 一致。"""
+def _storage_location_tokens(warehouse_name):
+    """从 Storage 仓名提取地点 token，用于与 display 店面名模糊对齐。"""
+    text = re.sub(r"\bstorage\b", " ", str(warehouse_name or ""), flags=re.I)
+    text = re.sub(r"\bshop\b", " ", text, flags=re.I)
+    return set(_store_name_tokens(text))
+
+
+def _display_store_match_score(warehouse_name, store_name):
+    """Storage 仓名与陈列店面名的匹配分；分越高越优先。"""
+    wh_tokens = _storage_location_tokens(warehouse_name)
+    st_tokens = set(_store_name_tokens(store_name))
+    score = float(len(wh_tokens & st_tokens))
+    text = str(store_name).lower()
+    if "shop" in str(warehouse_name).lower() and "shop" in text:
+        score += 0.25
+    if any(x in text for x in ("no longer", "old display", "repair", "outlet", "(no ")):
+        score -= 1.0
+    return score
+
+
+def _resolve_storage_display_store(warehouse_name, display_store_keys):
+    """把 storage.csv 的 WarehouseName 对齐到 display.csv 里的店面下拉名。"""
+    candidate = _storage_warehouse_to_display_store(warehouse_name)
+    stores = [s for s in (display_store_keys or []) if s and s != ALL_STORES]
+    if not stores:
+        return candidate, None
+
+    for store in stores:
+        if store == candidate or store.lower() == candidate.lower():
+            return store, str(warehouse_name).strip() or None
+
+    wh_tokens = _storage_location_tokens(warehouse_name)
+    if wh_tokens:
+        best_store = None
+        best_score = 0.0
+        for store in stores:
+            score = _display_store_match_score(warehouse_name, store)
+            if score > best_score:
+                best_score = score
+                best_store = store
+        if best_score > 0:
+            return best_store, str(warehouse_name).strip() or None
+
+    return candidate, str(warehouse_name).strip() or None
+
+
+def _load_storage(rows, display_store_keys=()):
+    """返回 (by_store, storage_details, storage_map, unmapped_warehouses)。"""
     by_store = {}
     storage_details = {}
+    storage_map = {}
+    unmapped = []
     for row in rows:
         code = _pick(row, CODE_KEYS)
         if not code:
             continue
         warehouse = _pick(row, STORE_KEYS + ["warehousename"])
-        store = _storage_warehouse_to_display_store(warehouse)
+        store, raw_wh = _resolve_storage_display_store(warehouse, display_store_keys)
         store = str(store).strip() if store else "（未标注店面）"
+        if raw_wh and store not in display_store_keys:
+            if raw_wh not in unmapped:
+                unmapped.append(raw_wh)
+        elif raw_wh:
+            storage_map.setdefault(store, raw_wh)
         qty = _to_float(_pick(row, STORAGE_QTY_KEYS)) or 0.0
         if qty <= 0:
             continue
         norm = _norm_code(code)
         by_store.setdefault(store, set()).add(norm)
-        storage_details.setdefault(store, {})[norm] = {
-            "code": str(code).strip(),
-            "family": str(_pick(row, FAMILY_KEYS) or "").strip(),
-            "name": str(_pick(row, NAME_KEYS) or "").strip(),
-            "qty": qty,
-        }
-    return by_store, storage_details
+        prev = storage_details.setdefault(store, {}).get(norm)
+        if prev:
+            prev["qty"] = prev.get("qty", 0) + qty
+        else:
+            storage_details.setdefault(store, {})[norm] = {
+                "code": str(code).strip(),
+                "family": str(_pick(row, FAMILY_KEYS) or "").strip(),
+                "name": str(_pick(row, NAME_KEYS) or "").strip(),
+                "qty": qty,
+            }
+    return by_store, storage_details, storage_map, unmapped
 
 
 def _load_display(rows):
@@ -1196,7 +1259,10 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
     warehouse_keys = _warehouses_for_store(store, region_key, catalog_wh_keys)
     by_storage = bundle.get("by_storage") or {}
     storage_details = bundle.get("storage_details") or {}
+    storage_map = bundle.get("storage_map") or {}
+    storage_unmapped = bundle.get("storage_unmapped") or []
     has_storage_data = bool(bundle.get("storage_path")) and Path(bundle["storage_path"]).is_file()
+    all_storage_skus = len(set().union(*by_storage.values())) if by_storage else 0
     storage_codes = by_storage.get(store, set()) if store_specific else set()
     store_storage_details = storage_details.get(store, {}) if store_specific else {}
 
@@ -1316,6 +1382,10 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         "uses_split_stock": bool(bundle.get("stock_discontinued_path")),
         "has_storage_data": has_storage_data,
         "storage_row_count": bundle.get("storage_row_count", 0),
+        "storage_map": storage_map,
+        "storage_unmapped": storage_unmapped,
+        "storage_warehouse": storage_map.get(store) if store_specific else None,
+        "all_storage_sku_count": all_storage_skus if has_storage_data else 0,
         "in_storage_count": in_storage_n if store_specific else None,
         "warehouse_only_count": warehouse_only_n if store_specific else None,
         "ready_not_displayed_count": ready_not_displayed_n if store_specific else None,
@@ -1352,6 +1422,22 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         diagnostics.append({
             "level": "warning",
             "message": "展示数据未包含有效店面，店面下拉只会显示「全部店面」。",
+        })
+    if has_storage_data and storage_unmapped:
+        diagnostics.append({
+            "level": "warning",
+            "message": (
+                "部分店后仓未能对齐到陈列店面："
+                + "、".join(storage_unmapped[:5])
+                + ("…" if len(storage_unmapped) > 5 else "")
+                + "。请检查 storage.csv 的 WarehouseName 与 display.csv 是否一致。"
+            ),
+        })
+    elif has_storage_data and storage_map:
+        mapped = "；".join(f"{wh}→{store}" for store, wh in sorted(storage_map.items()))
+        diagnostics.append({
+            "level": "info",
+            "message": f"店后仓已映射：{mapped}",
         })
 
     result = {
