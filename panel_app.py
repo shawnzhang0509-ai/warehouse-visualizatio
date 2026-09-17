@@ -31,7 +31,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.7.7"
+APP_VERSION = "1.7.8"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -55,6 +55,7 @@ C_CARD_NEUTRAL = "#64748b"
 C_CARD_NEUTRAL_BG = "#f1f5f9"
 C_ROW_GAP = "#fff1f2"
 C_ROW_EXEMPT = "#fffbeb"
+C_ROW_WAREHOUSE = "#ffedd5"
 C_ROW_OK = "#f0fdf4"
 C_ROW_ALT = "#fafbfc"
 C_ROW_DISC = "#fee2e2"
@@ -70,7 +71,9 @@ SORTABLE_COLS = {
     "display": lambda p: 0 if p.get("displayed") else 1,
     "discontinue": lambda p: 0 if p.get("discontinued") else 1,
     "status": lambda p: (
-        0 if p.get("gap") else 1 if p.get("exempted") else 2 if p.get("in_stock") else 3
+        0 if p.get("ready_not_displayed") else
+        1 if p.get("warehouse_only") and not p.get("exempted") else
+        2 if p.get("gap") else 3 if p.get("exempted") else 4 if p.get("in_stock") else 5
     ),
 }
 
@@ -137,6 +140,7 @@ class PanelApp:
         )
         self.store_var = tk.StringVar(value=default_store)
         self.only_gap_var = tk.BooleanVar(value=False)
+        self.only_warehouse_only_var = tk.BooleanVar(value=False)
         self.only_exempted_var = tk.BooleanVar(value=False)
         self.source_var = tk.StringVar(value="")
         self.search_var = tk.StringVar()
@@ -243,16 +247,21 @@ class PanelApp:
 
         ttk.Checkbutton(filter_bar, text="只看有货未展示", variable=self.only_gap_var,
                         command=self._on_only_gap_toggle).grid(row=1, column=5, sticky="w", padx=(4, 0))
+        self._warehouse_only_cb = ttk.Checkbutton(
+            filter_bar, text="只看仓有·店仓无", variable=self.only_warehouse_only_var,
+            command=self._on_only_warehouse_only_toggle,
+        )
+        self._warehouse_only_cb.grid(row=1, column=6, sticky="w", padx=(8, 0))
         ttk.Checkbutton(filter_bar, text="只看同组豁免", variable=self.only_exempted_var,
-                        command=self._on_only_exempted_toggle).grid(row=1, column=6, sticky="w", padx=(8, 0))
+                        command=self._on_only_exempted_toggle).grid(row=1, column=7, sticky="w", padx=(8, 0))
         ttk.Checkbutton(filter_bar, text="行内缩略图", variable=self.load_images_var,
-                        command=self._on_toggle_inline_images).grid(row=1, column=7, sticky="w", padx=(8, 0))
+                        command=self._on_toggle_inline_images).grid(row=1, column=8, sticky="w", padx=(8, 0))
 
         tk.Label(filter_bar, textvariable=self.result_count_var, bg="white", fg=C_MUTED,
-                 font=("Segoe UI", 9)).grid(row=1, column=8, sticky="e", padx=(12, 0))
+                 font=("Segoe UI", 9)).grid(row=1, column=9, sticky="e", padx=(12, 0))
         tk.Label(filter_bar, textvariable=self._status_var, bg="white", fg=C_CARD_GAP,
-                 font=("Segoe UI", 9)).grid(row=0, column=8, sticky="e", padx=(12, 0))
-        filter_bar.columnconfigure(8, weight=1)
+                 font=("Segoe UI", 9)).grid(row=0, column=9, sticky="e", padx=(12, 0))
+        filter_bar.columnconfigure(9, weight=1)
 
         cards = tk.Frame(self.root, bg=C_BG, padx=12, pady=8)
         cards.pack(fill=tk.X)
@@ -332,7 +341,8 @@ class PanelApp:
             min_w = 72 if col == "name" else width
             self._tree.column(col, width=width, minwidth=min_w, anchor=anchor, stretch=stretch)
 
-        for tag, bg in (("gap", C_ROW_GAP), ("exempted", C_ROW_EXEMPT), ("ok", C_ROW_OK),
+        for tag, bg in (("gap", C_ROW_GAP), ("warehouse_only", C_ROW_WAREHOUSE),
+                        ("exempted", C_ROW_EXEMPT), ("ok", C_ROW_OK),
                         ("alt", C_ROW_ALT), ("discontinued", C_ROW_DISC), ("group", "#e2e8f0")):
             self._tree.tag_configure(tag, background=bg)
         self._tree.tag_configure("group", font=("Segoe UI", 10, "bold"))
@@ -471,6 +481,8 @@ class PanelApp:
                 if need_full:
                     if self.only_gap_var.get():
                         self.only_gap_var.set(False)
+                    if self.only_warehouse_only_var.get():
+                        self.only_warehouse_only_var.set(False)
                     if self.only_exempted_var.get():
                         self.only_exempted_var.set(False)
                     self._quick_filter = None
@@ -483,6 +495,8 @@ class PanelApp:
         if disc_f == "已停产":
             if self.only_gap_var.get():
                 self.only_gap_var.set(False)
+            if self.only_warehouse_only_var.get():
+                self.only_warehouse_only_var.set(False)
             if self.only_exempted_var.get():
                 self.only_exempted_var.set(False)
             self._quick_filter = None
@@ -502,15 +516,36 @@ class PanelApp:
                 self.reload()
                 return
         if self.only_gap_var.get():
+            self.only_warehouse_only_var.set(False)
             self.only_exempted_var.set(False)
             self._quick_filter = "gap"
         elif self._quick_filter == "gap":
             self._quick_filter = None
         self._refresh_view()
 
+    def _on_only_warehouse_only_toggle(self):
+        if self.only_warehouse_only_var.get():
+            if not self._is_store_selected():
+                self.only_warehouse_only_var.set(False)
+                return
+            if self.discontinue_filter_var.get() == "已停产":
+                self.discontinue_filter_var.set("在产")
+                if not panel_data.EAGER_DISCONTINUED_STOCK:
+                    self.reload()
+                    return
+            self.only_gap_var.set(False)
+            self.only_exempted_var.set(False)
+            self.stock_filter_var.set("有货")
+            self.display_filter_var.set("未展示")
+            self._quick_filter = "warehouse_only"
+        elif self._quick_filter == "warehouse_only":
+            self._quick_filter = None
+        self._refresh_view()
+
     def _on_only_exempted_toggle(self):
         if self.only_exempted_var.get():
             self.only_gap_var.set(False)
+            self.only_warehouse_only_var.set(False)
             self._quick_filter = "exempted"
         elif self._quick_filter == "exempted":
             self._quick_filter = None
@@ -521,6 +556,7 @@ class PanelApp:
             return
         if key == "gap":
             self.only_exempted_var.set(False)
+            self.only_warehouse_only_var.set(False)
             self.only_gap_var.set(False)
             is_raw_gap_view = (
                 self.stock_filter_var.get() == "有货"
@@ -540,6 +576,7 @@ class PanelApp:
                 self._quick_filter = "raw_gap"
         elif key == "exempted":
             self.only_gap_var.set(False)
+            self.only_warehouse_only_var.set(False)
             self.only_exempted_var.set(not self.only_exempted_var.get())
             self._quick_filter = "exempted" if self.only_exempted_var.get() else None
         elif key == "in_stock":
@@ -562,6 +599,7 @@ class PanelApp:
                 and self._quick_filter == "raw_gap"
             ),
             "exempted": self.only_exempted_var.get(),
+            "warehouse_only": self.only_warehouse_only_var.get(),
             "in_stock": self.stock_filter_var.get() == "有货",
         }
         for key, card in self._stat_cards.items():
@@ -1008,6 +1046,7 @@ class PanelApp:
         display_f = self.display_filter_var.get()
         disc_f = self.discontinue_filter_var.get()
         only_gap = self.only_gap_var.get()
+        only_warehouse_only = self.only_warehouse_only_var.get()
         only_exempted = self.only_exempted_var.get()
 
         out = []
@@ -1030,6 +1069,8 @@ class PanelApp:
                 continue
             if only_gap and not p.get("gap"):
                 continue
+            if only_warehouse_only and not (p.get("warehouse_only") and not p.get("exempted")):
+                continue
             if only_exempted and not p.get("exempted"):
                 continue
             if (
@@ -1037,6 +1078,7 @@ class PanelApp:
                 and display_f == "未展示"
                 and not only_exempted
                 and not only_gap
+                and not only_warehouse_only
                 and p.get("exempted")
             ):
                 continue
@@ -1089,6 +1131,14 @@ class PanelApp:
 
         store_specific = s.get("store_specific", self._is_store_selected())
         disc_f = self.discontinue_filter_var.get()
+        has_storage = bool(s.get("has_storage_data"))
+        if self._warehouse_only_cb:
+            wh_state = tk.NORMAL if store_specific and has_storage else tk.DISABLED
+            self._warehouse_only_cb.configure(state=wh_state)
+        if (not store_specific or not has_storage) and self.only_warehouse_only_var.get():
+            self.only_warehouse_only_var.set(False)
+            if self._quick_filter == "warehouse_only":
+                self._quick_filter = None
 
         def pct(v):
             return "-" if v is None else f"{v:.1f}%"
@@ -1256,8 +1306,8 @@ class PanelApp:
             return ("gap",)
         if item.get("gap"):
             return ("gap",)
-        if item.get("warehouse_only"):
-            return ("alt",)
+        if item.get("warehouse_only") and not item.get("exempted"):
+            return ("warehouse_only",)
         if item.get("discontinued"):
             return ("discontinued",)
         if item.get("in_stock") and item.get("displayed"):
