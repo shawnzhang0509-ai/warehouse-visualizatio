@@ -31,7 +31,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.7.9"
+APP_VERSION = "1.8.0"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -385,7 +385,7 @@ class PanelApp:
         prefix_inner.pack(fill=tk.BOTH, expand=True)
         tk.Label(
             prefix_inner,
-            text="按 SKU 编码前三位汇总（在产 SKU 数量）· 双击某行可筛选该前缀 · 有货未展示/豁免需先选店面",
+            text="按 SKU 编码前三位汇总（在产 SKU 数量）· 默认按有货率降序 · 行色=有货率（绿高/红低）· 双击筛选前缀",
             bg="white", fg=C_MUTED, font=("Segoe UI", 9),
         ).pack(anchor="w", padx=4, pady=(0, 6))
 
@@ -403,9 +403,9 @@ class PanelApp:
         for col, (text, width) in pheads.items():
             self._prefix_tree.heading(col, text=text)
             self._prefix_tree.column(col, width=width, anchor="center" if col != "prefix" else "w")
-        self._prefix_tree.tag_configure("gap", background=C_ROW_GAP)
-        self._prefix_tree.tag_configure("warn", background="#fff7ed")
         self._prefix_tree.tag_configure("ok", background=C_ROW_OK)
+        self._prefix_tree.tag_configure("warn", background="#fff7ed")
+        self._prefix_tree.tag_configure("low", background=C_ROW_GAP)
         self._prefix_tree.tag_configure("alt", background=C_ROW_ALT)
 
         self._prefix_vscroll = ttk.Scrollbar(prefix_inner, orient="vertical", command=self._on_prefix_yscroll)
@@ -1292,16 +1292,16 @@ class PanelApp:
         )
 
     def _prefix_row_tag(self, row, index):
-        if row.get("gap_count", 0) > 0:
-            return ("gap",)
-        rate = row.get("display_coverage_rate")
-        if rate is not None and rate < 50 and row.get("in_stock_count", 0) > 0:
-            return ("warn",)
-        if rate is not None and rate >= 80:
+        rate = row.get("in_stock_rate")
+        if rate is None:
+            return ("alt",) if index % 2 == 1 else ()
+        if rate >= 50:
             return ("ok",)
-        if index % 2 == 1:
-            return ("alt",)
-        return ()
+        if rate >= 20:
+            return ("warn",)
+        if row.get("in_stock_count", 0) > 0 or rate > 0:
+            return ("low",)
+        return ("alt",) if index % 2 == 1 else ()
 
     def _render_prefix_table(self, store_specific=True):
         if not self._prefix_tree:

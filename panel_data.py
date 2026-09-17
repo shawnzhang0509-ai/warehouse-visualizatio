@@ -1199,7 +1199,7 @@ def aggregate_by_sku_prefix(products, prefix_len=SKU_PREFIX_LEN, store_specific=
             "gap_count": len(gap_items),
             "exempted_count": len(exempted),
         })
-    rows.sort(key=lambda r: (-r["gap_count"], -(r["in_stock_rate"] or 0), r["prefix"]))
+    rows.sort(key=lambda r: (-(r["in_stock_rate"] or 0), -r["gap_count"], r["prefix"]))
     return rows
 
 
