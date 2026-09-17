@@ -31,7 +31,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.7.8"
+APP_VERSION = "1.7.9"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -45,14 +45,23 @@ C_HEADER = "#1e4f8a"
 C_BG = "#f0f4f8"
 C_CARD_GAP = "#dc2626"
 C_CARD_GAP_BG = "#fee2e2"
+C_CARD_GAP_BG_ACTIVE = "#fca5a5"
+C_CARD_WAREHOUSE = "#ea580c"
+C_CARD_WAREHOUSE_BG = "#ffedd5"
+C_CARD_WAREHOUSE_BG_ACTIVE = "#fdba74"
 C_CARD_EXEMPT = "#ca8a04"
 C_CARD_EXEMPT_BG = "#fef9c3"
+C_CARD_EXEMPT_BG_ACTIVE = "#fde047"
 C_CARD_OK = "#16a34a"
 C_CARD_OK_BG = "#dcfce7"
+C_CARD_OK_BG_ACTIVE = "#86efac"
 C_CARD_INFO = "#2563eb"
 C_CARD_INFO_BG = "#dbeafe"
 C_CARD_NEUTRAL = "#64748b"
 C_CARD_NEUTRAL_BG = "#f1f5f9"
+C_CARD_BORDER_IDLE = "#94a3b8"
+C_CARD_DISABLED_BG = "#e2e8f0"
+C_CARD_DISABLED_FG = "#94a3b8"
 C_ROW_GAP = "#fff1f2"
 C_ROW_EXEMPT = "#fffbeb"
 C_ROW_WAREHOUSE = "#ffedd5"
@@ -121,6 +130,7 @@ class PanelApp:
         self._stat_labels = {}
         self._stat_hints = {}
         self._stat_cards = {}
+        self._stat_card_meta = {}
         self._quick_filter = None
 
         try:
@@ -245,50 +255,66 @@ class PanelApp:
             cb.grid(row=1, column=col, sticky="w", padx=(0, 10), pady=(2, 0))
             cb.bind("<<ComboboxSelected>>", lambda _e: self._on_filter_combo_change())
 
-        ttk.Checkbutton(filter_bar, text="只看有货未展示", variable=self.only_gap_var,
-                        command=self._on_only_gap_toggle).grid(row=1, column=5, sticky="w", padx=(4, 0))
-        self._warehouse_only_cb = ttk.Checkbutton(
-            filter_bar, text="只看仓有·店仓无", variable=self.only_warehouse_only_var,
-            command=self._on_only_warehouse_only_toggle,
-        )
-        self._warehouse_only_cb.grid(row=1, column=6, sticky="w", padx=(8, 0))
-        ttk.Checkbutton(filter_bar, text="只看同组豁免", variable=self.only_exempted_var,
-                        command=self._on_only_exempted_toggle).grid(row=1, column=7, sticky="w", padx=(8, 0))
         ttk.Checkbutton(filter_bar, text="行内缩略图", variable=self.load_images_var,
-                        command=self._on_toggle_inline_images).grid(row=1, column=8, sticky="w", padx=(8, 0))
+                        command=self._on_toggle_inline_images).grid(row=1, column=5, sticky="w", padx=(4, 0))
 
         tk.Label(filter_bar, textvariable=self.result_count_var, bg="white", fg=C_MUTED,
-                 font=("Segoe UI", 9)).grid(row=1, column=9, sticky="e", padx=(12, 0))
+                 font=("Segoe UI", 9)).grid(row=1, column=6, sticky="e", padx=(12, 0))
         tk.Label(filter_bar, textvariable=self._status_var, bg="white", fg=C_CARD_GAP,
-                 font=("Segoe UI", 9)).grid(row=0, column=9, sticky="e", padx=(12, 0))
-        filter_bar.columnconfigure(9, weight=1)
+                 font=("Segoe UI", 9)).grid(row=0, column=6, sticky="e", padx=(12, 0))
+        filter_bar.columnconfigure(6, weight=1)
 
         cards = tk.Frame(self.root, bg=C_BG, padx=12, pady=8)
         cards.pack(fill=tk.X)
         card_defs = [
-            ("gap", "有货未展示", "0", C_CARD_GAP_BG, C_CARD_GAP),
-            ("exempted", "同组豁免", "0", C_CARD_EXEMPT_BG, C_CARD_EXEMPT),
-            ("in_stock", "有货产品", "0", C_CARD_OK_BG, C_CARD_OK),
-            ("rate", "有货率", "-", C_CARD_INFO_BG, C_CARD_INFO),
-            ("total", "纳入分析", "0", C_CARD_NEUTRAL_BG, C_CARD_NEUTRAL),
+            ("gap", "有货未展示", "0", C_CARD_GAP_BG, C_CARD_GAP_BG_ACTIVE, C_CARD_GAP, True,
+             "含在产与停产 · 点击筛选"),
+            ("warehouse_only", "仓有·店仓无", "0", C_CARD_WAREHOUSE_BG, C_CARD_WAREHOUSE_BG_ACTIVE,
+             C_CARD_WAREHOUSE, True, "中心仓有货、店后仓无 · 点击筛选"),
+            ("exempted", "同组豁免", "0", C_CARD_EXEMPT_BG, C_CARD_EXEMPT_BG_ACTIVE, C_CARD_EXEMPT, True,
+             "同系列已陈列 · 点击筛选"),
+            ("in_stock", "有货产品", "0", C_CARD_OK_BG, C_CARD_OK_BG_ACTIVE, C_CARD_OK, True,
+             "切换有货/无货 · 点击筛选"),
+            ("rate", "有货率", "-", C_CARD_INFO_BG, C_CARD_INFO_BG, C_CARD_INFO, False, ""),
+            ("total", "纳入分析", "0", C_CARD_NEUTRAL_BG, C_CARD_NEUTRAL_BG, C_CARD_NEUTRAL, False, ""),
         ]
-        for i, (key, title, val, bg, fg) in enumerate(card_defs):
-            card = tk.Frame(cards, bg=bg, padx=16, pady=10, cursor="hand2",
-                            highlightthickness=2, highlightbackground=bg)
+        for i, (key, title, val, bg, bg_active, fg, filterable, hint_idle) in enumerate(card_defs):
+            card = tk.Frame(cards, bg=bg, padx=16, pady=10, cursor="hand2" if filterable else "arrow",
+                            highlightthickness=2, highlightbackground=C_CARD_BORDER_IDLE)
             card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0 if i == 0 else 6, 0))
-            title_lbl = tk.Label(card, text=title, bg=bg, fg=fg, font=("Segoe UI", 9), cursor="hand2")
+            title_lbl = tk.Label(
+                card, text=title, bg=bg, fg=fg,
+                font=("Segoe UI", 9, "bold" if filterable else "normal"),
+                cursor="hand2" if filterable else "arrow",
+            )
             title_lbl.pack(anchor="w")
-            val_lbl = tk.Label(card, text=val, bg=bg, fg=fg, font=("Segoe UI", 18, "bold"), cursor="hand2")
+            val_lbl = tk.Label(
+                card, text=val, bg=bg, fg=fg, font=("Segoe UI", 18, "bold"),
+                cursor="hand2" if filterable else "arrow",
+            )
             val_lbl.pack(anchor="w", pady=(2, 0))
-            if key in ("gap", "exempted", "in_stock"):
-                hint_text = "含在产与停产 · 点击筛选" if key == "gap" else "点击筛选"
-                hint = tk.Label(card, text=hint_text, bg=bg, fg=fg, font=("Segoe UI", 8), cursor="hand2")
+            hint = None
+            if filterable:
+                hint = tk.Label(
+                    card, text=hint_idle, bg=bg, fg=fg, font=("Segoe UI", 8),
+                    cursor="hand2",
+                )
                 hint.pack(anchor="w")
                 self._stat_hints[key] = hint
                 for w in (card, title_lbl, val_lbl, hint):
                     w.bind("<Button-1>", lambda _e, k=key: self._on_stat_card_click(k))
             self._stat_labels[key] = val_lbl
             self._stat_cards[key] = card
+            self._stat_card_meta[key] = {
+                "card": card,
+                "widgets": [title_lbl, val_lbl] + ([hint] if hint else []),
+                "bg": bg,
+                "bg_active": bg_active,
+                "fg": fg,
+                "filterable": filterable,
+                "hint_idle": hint_idle,
+                "hint": hint,
+            }
 
         self._stock_source_lbl = tk.Label(cards, text="", bg=C_BG, fg=C_MUTED, font=("Segoe UI", 9))
         self._stock_source_lbl.pack(side=tk.RIGHT, padx=8)
@@ -500,86 +526,57 @@ class PanelApp:
             if self.only_exempted_var.get():
                 self.only_exempted_var.set(False)
             self._quick_filter = None
-        elif self._quick_filter == "raw_gap":
-            if not (
-                self.stock_filter_var.get() == "有货"
-                and self.display_filter_var.get() == "未展示"
-                and self.discontinue_filter_var.get() == "全部"
-            ):
-                self._quick_filter = None
         self._refresh_view()
 
-    def _on_only_gap_toggle(self):
-        if self.only_gap_var.get() and self.discontinue_filter_var.get() == "已停产":
+    def _clear_card_filters(self):
+        self.only_gap_var.set(False)
+        self.only_warehouse_only_var.set(False)
+        self.only_exempted_var.set(False)
+        self._quick_filter = None
+
+    def _ensure_active_disc_filter(self):
+        if self.discontinue_filter_var.get() == "已停产":
             self.discontinue_filter_var.set("在产")
             if not panel_data.EAGER_DISCONTINUED_STOCK:
                 self.reload()
-                return
-        if self.only_gap_var.get():
-            self.only_warehouse_only_var.set(False)
-            self.only_exempted_var.set(False)
-            self._quick_filter = "gap"
-        elif self._quick_filter == "gap":
-            self._quick_filter = None
-        self._refresh_view()
-
-    def _on_only_warehouse_only_toggle(self):
-        if self.only_warehouse_only_var.get():
-            if not self._is_store_selected():
-                self.only_warehouse_only_var.set(False)
-                return
-            if self.discontinue_filter_var.get() == "已停产":
-                self.discontinue_filter_var.set("在产")
-                if not panel_data.EAGER_DISCONTINUED_STOCK:
-                    self.reload()
-                    return
-            self.only_gap_var.set(False)
-            self.only_exempted_var.set(False)
-            self.stock_filter_var.set("有货")
-            self.display_filter_var.set("未展示")
-            self._quick_filter = "warehouse_only"
-        elif self._quick_filter == "warehouse_only":
-            self._quick_filter = None
-        self._refresh_view()
-
-    def _on_only_exempted_toggle(self):
-        if self.only_exempted_var.get():
-            self.only_gap_var.set(False)
-            self.only_warehouse_only_var.set(False)
-            self._quick_filter = "exempted"
-        elif self._quick_filter == "exempted":
-            self._quick_filter = None
-        self._refresh_view()
+                return True
+        return False
 
     def _on_stat_card_click(self, key):
-        if key in ("gap", "exempted") and not self._is_store_selected():
+        if key in ("gap", "exempted", "warehouse_only") and not self._is_store_selected():
             return
+        if key == "warehouse_only" and not self._cached_summary.get("has_storage_data"):
+            return
+
         if key == "gap":
-            self.only_exempted_var.set(False)
+            turning_on = not self.only_gap_var.get()
             self.only_warehouse_only_var.set(False)
+            self.only_exempted_var.set(False)
+            self.only_gap_var.set(turning_on)
+            self._quick_filter = "gap" if turning_on else None
+            if turning_on and self._ensure_active_disc_filter():
+                return
+        elif key == "warehouse_only":
+            turning_on = not self.only_warehouse_only_var.get()
             self.only_gap_var.set(False)
-            is_raw_gap_view = (
-                self.stock_filter_var.get() == "有货"
-                and self.display_filter_var.get() == "未展示"
-                and self.discontinue_filter_var.get() == "全部"
-                and self._quick_filter == "raw_gap"
-            )
-            if is_raw_gap_view:
-                self.stock_filter_var.set("全部")
-                self.display_filter_var.set("全部")
-                self.discontinue_filter_var.set("全部")
-                self._quick_filter = None
-            else:
+            self.only_exempted_var.set(False)
+            self.only_warehouse_only_var.set(turning_on)
+            if turning_on:
+                if self._ensure_active_disc_filter():
+                    return
                 self.stock_filter_var.set("有货")
                 self.display_filter_var.set("未展示")
-                self.discontinue_filter_var.set("全部")
-                self._quick_filter = "raw_gap"
+                self._quick_filter = "warehouse_only"
+            else:
+                self._quick_filter = None
         elif key == "exempted":
+            turning_on = not self.only_exempted_var.get()
             self.only_gap_var.set(False)
             self.only_warehouse_only_var.set(False)
-            self.only_exempted_var.set(not self.only_exempted_var.get())
-            self._quick_filter = "exempted" if self.only_exempted_var.get() else None
+            self.only_exempted_var.set(turning_on)
+            self._quick_filter = "exempted" if turning_on else None
         elif key == "in_stock":
+            self._clear_card_filters()
             self.stock_filter_var.set("无货" if self.stock_filter_var.get() == "有货" else "有货")
         if (
             not panel_data.EAGER_DISCONTINUED_STOCK
@@ -590,21 +587,68 @@ class PanelApp:
             return
         self._refresh_view()
 
-    def _update_stat_card_highlight(self):
-        highlights = {
-            "gap": (
-                self.stock_filter_var.get() == "有货"
-                and self.display_filter_var.get() == "未展示"
-                and self.discontinue_filter_var.get() == "全部"
-                and self._quick_filter == "raw_gap"
-            ),
-            "exempted": self.only_exempted_var.get(),
+    def _apply_stat_card_styles(self, hint_overrides=None):
+        s = self._cached_summary or {}
+        store_specific = s.get("store_specific", self._is_store_selected())
+        has_storage = bool(s.get("has_storage_data"))
+        hint_overrides = hint_overrides or {}
+
+        selected = {
+            "gap": self.only_gap_var.get(),
             "warehouse_only": self.only_warehouse_only_var.get(),
-            "in_stock": self.stock_filter_var.get() == "有货",
+            "exempted": self.only_exempted_var.get(),
+            "in_stock": (
+                self.stock_filter_var.get() == "有货"
+                and not self.only_gap_var.get()
+                and not self.only_warehouse_only_var.get()
+                and not self.only_exempted_var.get()
+            ),
         }
-        for key, card in self._stat_cards.items():
-            color = "#1e40af" if highlights.get(key) else card.cget("bg")
-            card.configure(highlightbackground=color)
+        disabled = {
+            "gap": not store_specific,
+            "warehouse_only": not (store_specific and has_storage),
+            "exempted": not store_specific,
+        }
+
+        for key, meta in self._stat_card_meta.items():
+            if not meta.get("filterable"):
+                card = meta["card"]
+                card.configure(
+                    bg=meta["bg"], highlightbackground=C_CARD_BORDER_IDLE, highlightthickness=1,
+                )
+                for w in meta["widgets"]:
+                    w.configure(bg=meta["bg"], fg=meta["fg"])
+                continue
+
+            is_selected = selected.get(key, False)
+            is_disabled = disabled.get(key, False)
+            if is_disabled:
+                bg, fg = C_CARD_DISABLED_BG, C_CARD_DISABLED_FG
+                border, thickness, cursor = C_CARD_BORDER_IDLE, 1, "arrow"
+                if not store_specific:
+                    hint = "请先选择店面"
+                elif key == "warehouse_only":
+                    hint = "需加载 storage.csv"
+                else:
+                    hint = "请先选择店面"
+            elif is_selected:
+                bg, fg = meta["bg_active"], meta["fg"]
+                border, thickness, cursor = meta["fg"], 4, "hand2"
+                hint = "✓ 筛选中 · 再次点击取消"
+            else:
+                bg, fg = meta["bg"], meta["fg"]
+                border, thickness, cursor = C_CARD_BORDER_IDLE, 2, "hand2"
+                hint = hint_overrides.get(key, meta.get("hint_idle", "点击筛选"))
+
+            card = meta["card"]
+            card.configure(bg=bg, highlightbackground=border, highlightthickness=thickness, cursor=cursor)
+            for w in meta["widgets"]:
+                w.configure(bg=bg, fg=fg, cursor=cursor)
+            if meta.get("hint"):
+                meta["hint"].configure(text=hint)
+
+    def _update_stat_card_highlight(self):
+        self._apply_stat_card_styles()
 
     def _current_region(self):
         text = self.region_combo.get().strip()
@@ -1132,9 +1176,6 @@ class PanelApp:
         store_specific = s.get("store_specific", self._is_store_selected())
         disc_f = self.discontinue_filter_var.get()
         has_storage = bool(s.get("has_storage_data"))
-        if self._warehouse_only_cb:
-            wh_state = tk.NORMAL if store_specific and has_storage else tk.DISABLED
-            self._warehouse_only_cb.configure(state=wh_state)
         if (not store_specific or not has_storage) and self.only_warehouse_only_var.get():
             self.only_warehouse_only_var.set(False)
             if self._quick_filter == "warehouse_only":
@@ -1143,23 +1184,28 @@ class PanelApp:
         def pct(v):
             return "-" if v is None else f"{v:.1f}%"
 
+        hint_overrides = {}
         if store_specific:
             gap_stats = self._compute_gap_stats(self._cached_products, disc_f)
             self._stat_labels["gap"].configure(
                 text=str(gap_stats["main_count"]), font=("Segoe UI", 18, "bold"),
             )
-            if "gap" in self._stat_hints:
-                self._stat_hints["gap"].configure(text=gap_stats["hint"])
+            if not self.only_gap_var.get():
+                hint_overrides["gap"] = gap_stats["hint"]
             exempted_n = sum(
                 1 for p in self._cached_products
                 if p.get("exempted") and self._disc_matches(p, disc_f)
             )
             self._stat_labels["exempted"].configure(text=str(exempted_n), font=("Segoe UI", 18, "bold"))
+            wh_n = sum(
+                1 for p in self._cached_products
+                if p.get("warehouse_only") and not p.get("exempted") and self._disc_matches(p, disc_f)
+            )
+            self._stat_labels["warehouse_only"].configure(text=str(wh_n), font=("Segoe UI", 18, "bold"))
         else:
-            self._stat_labels["gap"].configure(text="请选择店面", font=("Segoe UI", 11, "bold"))
-            if "gap" in self._stat_hints:
-                self._stat_hints["gap"].configure(text="含在产与停产 · 点击筛选")
-            self._stat_labels["exempted"].configure(text="请选择店面", font=("Segoe UI", 11, "bold"))
+            self._stat_labels["gap"].configure(text="—", font=("Segoe UI", 14, "bold"))
+            self._stat_labels["exempted"].configure(text="—", font=("Segoe UI", 14, "bold"))
+            self._stat_labels["warehouse_only"].configure(text="—", font=("Segoe UI", 14, "bold"))
         self._stat_labels["in_stock"].configure(text=str(s.get("in_stock_count", 0)))
         self._stat_labels["rate"].configure(text=pct(s.get("in_stock_rate")))
         self._stat_labels["total"].configure(text=str(s.get("total_non_discontinue", 0)))
@@ -1196,7 +1242,7 @@ class PanelApp:
             stock_line += "  |  ⚠ 无 storage.csv（请执行 storage.sql）"
         self._stock_source_lbl.configure(text=stock_line)
         self._update_blacklist_label()
-        self._update_stat_card_highlight()
+        self._apply_stat_card_styles(hint_overrides)
 
         filtered = self._apply_client_filters(self._cached_products)
         active_total = sum(1 for p in self._cached_products if not p.get("discontinued"))
