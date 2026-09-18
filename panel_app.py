@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.8.1"
+APP_VERSION = "1.8.2"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -1428,9 +1428,21 @@ class PanelApp:
             return
         expected = panel_data.expected_channel_owner_path(self._cached_summary.get("region"))
         if not self._cached_owner_config:
-            self._owner_status_lbl.configure(
-                text=f"未找到 channel_owners.csv，请复制 Data-NZ/channel_owners.example.csv 到 {expected}",
-            )
+            if self._cached_owner_path:
+                fname = Path(self._cached_owner_path).name
+                self._owner_status_lbl.configure(
+                    text=(
+                        f"已找到 {fname}，但未能读取负责人/渠道数据。"
+                        f"请确认 A列=负责人、B列=渠道（可无表头），或第一行写 owner,channel 后点「刷新数据」"
+                    ),
+                )
+            else:
+                self._owner_status_lbl.configure(
+                    text=(
+                        f"未找到 channel_owner.csv / channel_owners.csv，"
+                        f"请放到 {expected.parent}/（文件名二选一，支持仅两列：负责人+渠道）"
+                    ),
+                )
             if self._owner_tree.get_children():
                 self._owner_tree.delete(*self._owner_tree.get_children())
             return

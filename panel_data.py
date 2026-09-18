@@ -55,7 +55,13 @@ CODE_KEYS = ["productcode", "product_code", "sku", "itemcode", "item_code",
              "code", "productid", "product_id", "product", "item"]
 BLACKLIST_STEMS = ["blacklist", "sku_blacklist", "black_list", "product_blacklist"]
 BLACKLIST_KEYS = ["sku", "blacklist", "blacklistsku"] + CODE_KEYS
-CHANNEL_OWNER_STEMS = ["channel_owners", "sku_owners", "owner_channels", "channel_owner"]
+CHANNEL_OWNER_STEMS = ["channel_owner", "channel_owners", "sku_owners", "owner_channels"]
+CHANNEL_OWNER_HEADER_PAIRS = (
+    ("owner", "channel"),
+    ("负责人", "渠道"),
+    ("owner", "渠道"),
+    ("负责人", "channel"),
+)
 OWNER_KEYS = ["owner", "负责人", "person", "personincharge"]
 CHANNEL_KEYS = ["channel", "渠道", "sku_prefix", "prefix", "channelcode"]
 LEAD_TIME_KEYS = ["lead_time", "leadtime", "leadtime_days", "lead timedays"]
@@ -586,33 +592,128 @@ def expected_channel_owner_path(region=None):
 
 
 def _find_channel_owner_file(data_dir):
-    return _find_region_data_file(data_dir, CHANNEL_OWNER_STEMS)
+    found = _find_region_data_file(data_dir, CHANNEL_OWNER_STEMS)
+    if found:
+        return found
+    base = Path(data_dir)
+    if not base.is_dir():
+        return None
+    for stem in CHANNEL_OWNER_STEMS:
+        for sub in (base, base / "latest"):
+            if not sub.is_dir():
+                continue
+            for ext in (".csv", ".xlsx"):
+                candidate = sub / f"{stem}{ext}"
+                if candidate.is_file():
+                    return candidate
+    return None
+
+
+def _channel_owner_row_dict(owner, channel, extra=None):
+    data = {
+        "owner": str(owner or "").strip(),
+        "channel": str(channel or "").strip(),
+        "lead_time": None,
+        "merge_products": "所有",
+        "merge_regions": "",
+        "note": "",
+    }
+    if extra:
+        data.update(extra)
+    return data
+
+
+def _parse_channel_owner_dict_row(row):
+    owner = str(_pick(row, OWNER_KEYS) or "").strip()
+    channel = str(_pick(row, CHANNEL_KEYS) or "").strip()
+    if not owner or not channel:
+        return None
+    lead_raw = _pick(row, LEAD_TIME_KEYS)
+    lead_time = None
+    if lead_raw is not None and str(lead_raw).strip() != "":
+        try:
+            lead_time = int(float(str(lead_raw).strip()))
+        except ValueError:
+            lead_time = str(lead_raw).strip()
+    return _channel_owner_row_dict(owner, channel, {
+        "lead_time": lead_time,
+        "merge_products": str(_pick(row, MERGE_PRODUCT_KEYS) or "所有").strip() or "所有",
+        "merge_regions": str(_pick(row, MERGE_REGION_KEYS) or "").strip(),
+        "note": str(_pick(row, OWNER_NOTE_KEYS) or "").strip(),
+    })
+
+
+def _dict_row_has_channel_headers(row):
+    keys = {str(k).strip().lower() for k in row.keys()}
+    return bool(keys & {k.lower() for k in OWNER_KEYS}) and bool(keys & {k.lower() for k in CHANNEL_KEYS})
+
+
+def _read_channel_owner_raw_lines(path):
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
+        return list(csv.reader(f))
 
 
 def _load_channel_owner_config(path):
     rows = []
     if not path or not Path(path).is_file():
         return rows
-    for row in _read_table(path):
-        owner = str(_pick(row, OWNER_KEYS) or "").strip()
-        channel = str(_pick(row, CHANNEL_KEYS) or "").strip()
+
+    suffix = Path(path).suffix.lower()
+    if suffix == ".xlsx":
+        if _load_workbook is None:
+            raise ValueError(
+                f"负责人配置为 Excel（{Path(path).name}），请另存为 channel_owner.csv，或运行：pip install openpyxl"
+            )
+        wb = _load_workbook(path, read_only=True, data_only=True)
+        ws = wb.active
+        raw = []
+        for row in ws.iter_rows(values_only=True):
+            raw.append(["" if cell is None else cell for cell in row])
+        wb.close()
+    else:
+        raw = _read_channel_owner_raw_lines(path)
+
+    if not raw:
+        return rows
+
+    start = 0
+    if len(raw[0]) >= 2:
+        h0 = str(raw[0][0]).strip().lower()
+        h1 = str(raw[0][1]).strip().lower()
+        if (h0, h1) in CHANNEL_OWNER_HEADER_PAIRS or (
+            h0 in {k.lower() for k in OWNER_KEYS} and h1 in {k.lower() for k in CHANNEL_KEYS}
+        ):
+            start = 1
+
+    if start == 0:
+        dict_rows = _read_csv(path) if suffix != ".xlsx" else []
+        if dict_rows and _dict_row_has_channel_headers(dict_rows[0]):
+            for row in dict_rows:
+                parsed = _parse_channel_owner_dict_row(row)
+                if parsed:
+                    rows.append(parsed)
+            if rows:
+                return rows
+
+    for line in raw[start:]:
+        if len(line) < 2:
+            continue
+        owner = str(line[0]).strip()
+        channel = str(line[1]).strip()
         if not owner or not channel:
             continue
-        lead_raw = _pick(row, LEAD_TIME_KEYS)
         lead_time = None
-        if lead_raw is not None and str(lead_raw).strip() != "":
+        if len(line) > 2 and str(line[2]).strip():
             try:
-                lead_time = int(float(str(lead_raw).strip()))
+                lead_time = int(float(str(line[2]).strip()))
             except ValueError:
-                lead_time = str(lead_raw).strip()
-        rows.append({
-            "owner": owner,
-            "channel": channel,
+                lead_time = str(line[2]).strip()
+        rows.append(_channel_owner_row_dict(owner, channel, {
             "lead_time": lead_time,
-            "merge_products": str(_pick(row, MERGE_PRODUCT_KEYS) or "所有").strip() or "所有",
-            "merge_regions": str(_pick(row, MERGE_REGION_KEYS) or "").strip(),
-            "note": str(_pick(row, OWNER_NOTE_KEYS) or "").strip(),
-        })
+            "merge_products": str(line[3]).strip() if len(line) > 3 and str(line[3]).strip() else "所有",
+            "merge_regions": str(line[4]).strip() if len(line) > 4 else "",
+            "note": str(line[5]).strip() if len(line) > 5 else "",
+        }))
     return rows
 
 
@@ -620,7 +721,13 @@ def load_channel_owner_config(region=None, data_dir=None):
     region_key = str(region or default_region() or "NZ").strip().upper()
     base = Path(data_dir) if data_dir else _region_output_dir(region_key)
     path = _find_channel_owner_file(base)
-    rows = _load_channel_owner_config(path)
+    if not path:
+        template = ROOT_DIR / f"Data-{region_key}" / "channel_owners.example.csv"
+        if template.is_file():
+            path = template
+    rows = []
+    if path:
+        rows = _load_channel_owner_config(path)
     return rows, str(path) if path else None
 
 
