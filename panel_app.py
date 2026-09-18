@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.8.6"
+APP_VERSION = "1.8.7"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -131,8 +131,15 @@ class PanelApp:
         self._prefix_vscroll = None
         self._owner_tree = None
         self._owner_vscroll = None
+        self._owner_channel_tree = None
+        self._owner_channel_vscroll = None
+        self._owner_paned = None
+        self._owner_summary_frame = None
+        self._owner_detail_frame = None
+        self._cached_owner_report = None
+        self._owner_detail_filter = None
         self._owner_filter_var = tk.StringVar(value="全部负责人")
-        self._owner_view_var = tk.StringVar(value="负责人汇总")
+        self._owner_view_var = tk.StringVar(value="分栏视图")
         self._notebook = None
         self._tab_products = None
         self._placeholder_photo = None
@@ -444,14 +451,14 @@ class PanelApp:
             values=["全部负责人"],
         )
         self._owner_filter_combo.pack(side=tk.LEFT, padx=(6, 12))
-        self._owner_filter_combo.bind("<<ComboboxSelected>>", lambda _e: self._render_owner_table())
+        self._owner_filter_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_owner_filter_change())
         tk.Label(owner_toolbar, text="视图", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(side=tk.LEFT)
         self._owner_view_combo = ttk.Combobox(
             owner_toolbar, width=12, state="readonly", textvariable=self._owner_view_var,
-            values=["负责人汇总", "渠道明细"],
+            values=["分栏视图", "负责人汇总", "渠道明细"],
         )
         self._owner_view_combo.pack(side=tk.LEFT, padx=(6, 12))
-        self._owner_view_combo.bind("<<ComboboxSelected>>", lambda _e: self._render_owner_table())
+        self._owner_view_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_owner_view_change())
         ttk.Button(
             owner_toolbar, text="导出 CSV 报表", style="Tool.TButton",
             command=self._export_owner_report,
@@ -461,26 +468,63 @@ class PanelApp:
         )
         self._owner_status_lbl.pack(side=tk.RIGHT, padx=(8, 0))
 
-        owner_table_wrap = tk.Frame(owner_inner, bg="white")
-        owner_table_wrap.pack(fill=tk.BOTH, expand=True)
+        self._owner_paned = tk.PanedWindow(owner_inner, orient=tk.VERTICAL, sashwidth=4, bg="white")
+        self._owner_paned.pack(fill=tk.BOTH, expand=True)
+        self._owner_summary_frame = tk.Frame(self._owner_paned, bg="white")
+        self._owner_detail_frame = tk.Frame(self._owner_paned, bg="white")
+        self._owner_paned.add(self._owner_summary_frame, minsize=120)
+        self._owner_paned.add(self._owner_detail_frame, minsize=160)
+
+        tk.Label(
+            self._owner_summary_frame, text="负责人汇总", bg="white", fg=C_MUTED,
+            font=("Segoe UI", 9, "bold"),
+        ).pack(anchor="w", padx=4, pady=(0, 2))
+        owner_summary_wrap = tk.Frame(self._owner_summary_frame, bg="white")
+        owner_summary_wrap.pack(fill=tk.BOTH, expand=True)
         ocols = (
             "owner", "channel", "lead_time", "merge", "sku", "units", "in_stock",
             "in_stock_rate", "gap", "exempted", "note",
         )
         self._owner_tree = ttk.Treeview(
-            owner_table_wrap, columns=ocols, show="headings",
-            selectmode="browse", style="Prefix.Treeview",
+            owner_summary_wrap, columns=ocols, show="headings",
+            selectmode="browse", style="Prefix.Treeview", height=6,
         )
         self._owner_tree.tag_configure("ok", background=C_ROW_OK)
         self._owner_tree.tag_configure("warn", background="#fff7ed")
         self._owner_tree.tag_configure("low", background=C_ROW_GAP)
         self._owner_tree.tag_configure("alt", background=C_ROW_ALT)
-        self._owner_vscroll = ttk.Scrollbar(owner_table_wrap, orient="vertical", command=self._owner_tree.yview)
+        self._owner_vscroll = ttk.Scrollbar(owner_summary_wrap, orient="vertical", command=self._owner_tree.yview)
         self._owner_tree.configure(yscrollcommand=self._owner_vscroll.set)
         self._owner_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._owner_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
-        self._owner_tree.bind("<Double-1>", self._on_owner_double_click)
-        for widget in (owner_inner, self._tab_owner, self._owner_tree):
+        self._owner_tree.bind("<<TreeviewSelect>>", self._on_owner_select)
+        self._owner_tree.bind("<Double-1>", self._on_owner_summary_double_click)
+
+        tk.Label(
+            self._owner_detail_frame, text="渠道明细（点击上方负责人可筛选）", bg="white", fg=C_MUTED,
+            font=("Segoe UI", 9, "bold"),
+        ).pack(anchor="w", padx=4, pady=(6, 2))
+        owner_detail_wrap = tk.Frame(self._owner_detail_frame, bg="white")
+        owner_detail_wrap.pack(fill=tk.BOTH, expand=True)
+        self._owner_channel_tree = ttk.Treeview(
+            owner_detail_wrap, columns=ocols, show="headings",
+            selectmode="browse", style="Prefix.Treeview",
+        )
+        self._owner_channel_tree.tag_configure("ok", background=C_ROW_OK)
+        self._owner_channel_tree.tag_configure("warn", background="#fff7ed")
+        self._owner_channel_tree.tag_configure("low", background=C_ROW_GAP)
+        self._owner_channel_tree.tag_configure("alt", background=C_ROW_ALT)
+        self._owner_channel_vscroll = ttk.Scrollbar(
+            owner_detail_wrap, orient="vertical", command=self._owner_channel_tree.yview,
+        )
+        self._owner_channel_tree.configure(yscrollcommand=self._owner_channel_vscroll.set)
+        self._owner_channel_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._owner_channel_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._owner_channel_tree.bind("<Double-1>", self._on_owner_channel_double_click)
+        for widget in (
+            owner_inner, self._tab_owner, self._owner_tree, self._owner_channel_tree,
+            self._owner_summary_frame, self._owner_detail_frame,
+        ):
             widget.bind("<MouseWheel>", self._on_owner_wheel)
             widget.bind("<Button-4>", lambda _e: self._scroll_owner(-1))
             widget.bind("<Button-5>", lambda _e: self._scroll_owner(1))
@@ -1455,6 +1499,85 @@ class PanelApp:
         self._cached_owner_config = owner_cfg
         self._cached_owner_path = owner_path or panel_data.resolve_channel_owner_path(region, data_dir) or ""
 
+    def _on_owner_filter_change(self):
+        self._owner_detail_filter = None
+        self._render_owner_table(self._cached_summary.get("store_specific", self._is_store_selected()))
+
+    def _on_owner_view_change(self):
+        if self._owner_view_var.get() != "分栏视图":
+            self._owner_detail_filter = None
+        self._render_owner_table(self._cached_summary.get("store_specific", self._is_store_selected()))
+
+    def _owner_summary_headings(self):
+        return {
+            "owner": ("负责人", 88), "channel": ("渠道数", 64), "lead_time": ("LeadTime", 72),
+            "merge": ("合并计算", 120), "sku": ("SKU数", 64), "units": ("统计单位", 72),
+            "in_stock": ("有货单位", 72), "in_stock_rate": ("有货率", 72),
+            "gap": ("有货未展示", 88), "exempted": ("同组豁免", 72), "note": ("备注", 160),
+        }
+
+    def _owner_channel_headings(self):
+        return {
+            "owner": ("负责人", 72), "channel": ("渠道", 72), "lead_time": ("LeadTime", 72),
+            "merge": ("合并计算", 120), "sku": ("SKU数", 64), "units": ("统计单位", 72),
+            "in_stock": ("有货单位", 72), "in_stock_rate": ("有货率", 72),
+            "gap": ("有货未展示", 88), "exempted": ("同组豁免", 72), "note": ("备注", 160),
+        }
+
+    def _apply_owner_headings(self, tree, headings):
+        if not tree:
+            return
+        for col, (text, width) in headings.items():
+            tree.heading(col, text=text)
+            tree.column(
+                col, width=width, anchor="center" if col not in ("owner", "merge", "note") else "w",
+            )
+
+    def _owner_pct(self, value):
+        return "-" if value is None else f"{value:.1f}%"
+
+    def _update_owner_pane_layout(self, view):
+        if not self._owner_paned:
+            return
+        panes = self._owner_paned.panes()
+        show_summary = view in ("分栏视图", "负责人汇总")
+        show_detail = view in ("分栏视图", "渠道明细")
+        for frame in (self._owner_summary_frame, self._owner_detail_frame):
+            if frame in panes:
+                self._owner_paned.forget(frame)
+        if show_summary:
+            self._owner_paned.add(self._owner_summary_frame, minsize=120)
+        if show_detail:
+            self._owner_paned.add(self._owner_detail_frame, minsize=160)
+
+    def _render_owner_channel_table(self, rows, store_specific=True):
+        if not self._owner_channel_tree:
+            return
+        self._apply_owner_headings(self._owner_channel_tree, self._owner_channel_headings())
+        if self._owner_channel_tree.get_children():
+            self._owner_channel_tree.delete(*self._owner_channel_tree.get_children())
+        for idx, row in enumerate(rows):
+            gap_val = row.get("gap_count") if store_specific else "-"
+            exempt_val = row.get("exempted_count") if store_specific else "-"
+            values = (
+                row["owner"], row["channel"], row.get("lead_time") or "-",
+                row.get("merge_products") or "所有", row["sku_count"],
+                row["total_units"], row["in_stock_units"], self._owner_pct(row["in_stock_rate"]),
+                gap_val, exempt_val, row.get("note") or "",
+            )
+            self._owner_channel_tree.insert(
+                "", tk.END, values=values,
+                tags=self._owner_rate_tag(row, idx),
+            )
+
+    def _filtered_owner_channels(self, report, owner_filter=None, selected_owner=None):
+        rows = report["channels"]
+        if owner_filter and owner_filter != "全部负责人":
+            rows = [r for r in rows if r["owner"] == owner_filter]
+        if selected_owner:
+            rows = [r for r in rows if r["owner"] == selected_owner]
+        return rows
+
     def _render_owner_table(self, store_specific=True):
         if not self._owner_tree:
             return
@@ -1479,6 +1602,9 @@ class PanelApp:
                 )
             if self._owner_tree.get_children():
                 self._owner_tree.delete(*self._owner_tree.get_children())
+            if self._owner_channel_tree and self._owner_channel_tree.get_children():
+                self._owner_channel_tree.delete(*self._owner_channel_tree.get_children())
+            self._cached_owner_report = None
             return
 
         report = panel_data.aggregate_by_channel_owner(
@@ -1487,70 +1613,57 @@ class PanelApp:
             store_specific=store_specific,
             config_rows=self._cached_owner_config,
         )
+        self._cached_owner_report = report
         owners = ["全部负责人"] + sorted({r["owner"] for r in report["owners"]})
         self._owner_filter_combo.configure(values=owners)
         if self._owner_filter_var.get() not in owners:
             self._owner_filter_var.set("全部负责人")
 
         view = self._owner_view_var.get()
+        if view not in ("分栏视图", "负责人汇总", "渠道明细"):
+            view = "分栏视图"
+            self._owner_view_var.set(view)
         owner_filter = self._owner_filter_var.get()
-        if view == "负责人汇总":
+        self._update_owner_pane_layout(view)
+
+        if view in ("分栏视图", "负责人汇总"):
             rows = report["owners"]
             if owner_filter != "全部负责人":
                 rows = [r for r in rows if r["owner"] == owner_filter]
-            headings = {
-                "owner": ("负责人", 88), "channel": ("渠道数", 64), "lead_time": ("LeadTime", 72),
-                "merge": ("合并计算", 120), "sku": ("SKU数", 64), "units": ("统计单位", 72),
-                "in_stock": ("有货单位", 72), "in_stock_rate": ("有货率", 72),
-                "gap": ("有货未展示", 88), "exempted": ("同组豁免", 72), "note": ("备注", 160),
-            }
-        else:
-            rows = report["channels"]
-            if owner_filter != "全部负责人":
-                rows = [r for r in rows if r["owner"] == owner_filter]
-            headings = {
-                "owner": ("负责人", 72), "channel": ("渠道", 72), "lead_time": ("LeadTime", 72),
-                "merge": ("合并计算", 120), "sku": ("SKU数", 64), "units": ("统计单位", 72),
-                "in_stock": ("有货单位", 72), "in_stock_rate": ("有货率", 72),
-                "gap": ("有货未展示", 88), "exempted": ("同组豁免", 72), "note": ("备注", 160),
-            }
-
-        for col, (text, width) in headings.items():
-            self._owner_tree.heading(col, text=text)
-            self._owner_tree.column(
-                col, width=width, anchor="center" if col not in ("owner", "merge", "note") else "w",
-            )
-
-        if self._owner_tree.get_children():
-            self._owner_tree.delete(*self._owner_tree.get_children())
-
-        def pct(v):
-            return "-" if v is None else f"{v:.1f}%"
-
-        for idx, row in enumerate(rows):
-            gap_val = row.get("gap_count") if store_specific else "-"
-            exempt_val = row.get("exempted_count") if store_specific else "-"
-            if view == "负责人汇总":
+            self._apply_owner_headings(self._owner_tree, self._owner_summary_headings())
+            if self._owner_tree.get_children():
+                self._owner_tree.delete(*self._owner_tree.get_children())
+            for idx, row in enumerate(rows):
+                gap_val = row.get("gap_count") if store_specific else "-"
+                exempt_val = row.get("exempted_count") if store_specific else "-"
                 values = (
                     row["owner"], row["channel_count"], "-", "-",
                     row["sku_count"], row["total_units"], row["in_stock_units"],
-                    pct(row["in_stock_rate"]), gap_val, exempt_val, "",
+                    self._owner_pct(row["in_stock_rate"]), gap_val, exempt_val, "",
                 )
-            else:
-                values = (
-                    row["owner"], row["channel"], row.get("lead_time") or "-",
-                    row.get("merge_products") or "所有", row["sku_count"],
-                    row["total_units"], row["in_stock_units"], pct(row["in_stock_rate"]),
-                    gap_val, exempt_val, row.get("note") or "",
+                self._owner_tree.insert(
+                    "", tk.END, values=values,
+                    tags=self._owner_rate_tag(row, idx),
                 )
-            self._owner_tree.insert(
-                "", tk.END, values=values,
-                tags=self._owner_rate_tag(row, idx),
-            )
+        elif self._owner_tree.get_children():
+            self._owner_tree.delete(*self._owner_tree.get_children())
+
+        if view in ("分栏视图", "渠道明细"):
+            selected_owner = self._owner_detail_filter if view == "分栏视图" else None
+            channel_rows = self._filtered_owner_channels(report, owner_filter, selected_owner)
+            self._render_owner_channel_table(channel_rows, store_specific)
+        elif self._owner_channel_tree and self._owner_channel_tree.get_children():
+            self._owner_channel_tree.delete(*self._owner_channel_tree.get_children())
 
         fname = Path(self._cached_owner_path).name if self._cached_owner_path else "channel_owners.csv"
+        detail_count = len(self._filtered_owner_channels(
+            report, owner_filter, self._owner_detail_filter if view == "分栏视图" else None,
+        )) if view in ("分栏视图", "渠道明细") else len(report["channels"])
         self._owner_status_lbl.configure(
-            text=f"配置：{fname} · {len(report['owners'])} 位负责人 · {len(report['channels'])} 条渠道规则",
+            text=(
+                f"配置：{fname} · {len(report['owners'])} 位负责人 · "
+                f"{len(report['channels'])} 条渠道规则 · 当前明细 {detail_count} 条"
+            ),
         )
 
     def _export_owner_report(self):
@@ -1603,27 +1716,72 @@ class PanelApp:
                 ])
         self._owner_status_lbl.configure(text=f"已导出：{out_path}")
 
-    def _scroll_owner(self, direction):
-        if self._owner_tree:
-            self._owner_tree.yview_scroll(direction * SCROLL_UNITS, "units")
+    def _scroll_owner(self, direction, widget=None):
+        target = widget
+        if target is None:
+            target = self._owner_tree
+        if target:
+            target.yview_scroll(direction * SCROLL_UNITS, "units")
 
     def _on_owner_wheel(self, event):
         step = -1 if event.delta > 0 else 1
-        self._scroll_owner(step)
+        widget = event.widget
+        if widget is self._owner_channel_tree:
+            self._scroll_owner(step, self._owner_channel_tree)
+        else:
+            self._scroll_owner(step, self._owner_tree)
 
-    def _on_owner_double_click(self, _event=None):
+    def _on_owner_select(self, _event=None):
+        if self._owner_view_var.get() != "分栏视图" or not self._owner_tree:
+            return
+        sel = self._owner_tree.selection()
+        if not sel:
+            self._owner_detail_filter = None
+        else:
+            values = self._owner_tree.item(sel[0], "values")
+            self._owner_detail_filter = str(values[0]) if values else None
+        if not self._cached_owner_report:
+            return
+        store_specific = self._cached_summary.get("store_specific", self._is_store_selected())
+        owner_filter = self._owner_filter_var.get()
+        channel_rows = self._filtered_owner_channels(
+            self._cached_owner_report, owner_filter, self._owner_detail_filter,
+        )
+        self._render_owner_channel_table(channel_rows, store_specific)
+        report = self._cached_owner_report
+        fname = Path(self._cached_owner_path).name if self._cached_owner_path else "channel_owners.csv"
+        self._owner_status_lbl.configure(
+            text=(
+                f"配置：{fname} · {len(report['owners'])} 位负责人 · "
+                f"{len(report['channels'])} 条渠道规则 · 当前明细 {len(channel_rows)} 条"
+            ),
+        )
+
+    def _on_owner_summary_double_click(self, _event=None):
         sel = self._owner_tree.selection() if self._owner_tree else ()
         if not sel:
             return
         values = self._owner_tree.item(sel[0], "values")
         if not values:
             return
-        channel = str(values[1])
+        owner = str(values[0])
         if self._owner_view_var.get() == "负责人汇总":
-            self._owner_filter_var.set(str(values[0]))
+            self._owner_filter_var.set(owner)
             self._owner_view_var.set("渠道明细")
+            self._owner_detail_filter = None
             self._render_owner_table(self._cached_summary.get("store_specific", self._is_store_selected()))
             return
+        self._owner_detail_filter = owner
+        self._on_owner_select()
+
+    def _on_owner_channel_double_click(self, _event=None):
+        sel = self._owner_channel_tree.selection() if self._owner_channel_tree else ()
+        if not sel:
+            return
+        values = self._owner_channel_tree.item(sel[0], "values")
+        if not values:
+            return
+        channel = str(values[1])
         if channel and channel != "-":
             self.search_var.set(channel)
             if self._notebook:
