@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.1"
+APP_VERSION = "1.9.2"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -562,7 +562,7 @@ class PanelApp:
         island_inner.pack(fill=tk.BOTH, expand=True)
         tk.Label(
             island_inner,
-            text="按全国仓库存划分：北岛=Carbine+Walls，南岛=GC · 数字为 SKU 数，下方为占比",
+            text="按全国仓库存划分：北岛=Carbine+Walls，南岛=GC · 先选负责人，再选其下属渠道",
             bg="white", fg=C_MUTED, font=("Segoe UI", 9),
         ).pack(anchor="w", padx=8, pady=(6, 4))
         island_filter_bar = tk.Frame(island_inner, bg="white")
@@ -584,7 +584,7 @@ class PanelApp:
             values=["全部负责人"],
         )
         self._island_owner_combo.pack(side=tk.LEFT, padx=(6, 12))
-        self._island_owner_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_island_scope_change())
+        self._island_owner_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_island_owner_change())
         tk.Label(island_filter_bar, text="渠道", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(
             side=tk.LEFT,
         )
@@ -593,7 +593,7 @@ class PanelApp:
             values=["全部渠道"],
         )
         self._island_channel_combo.pack(side=tk.LEFT, padx=(6, 12))
-        self._island_channel_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_island_scope_change())
+        self._island_channel_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_island_channel_change())
         self._island_unsupported_lbl = tk.Label(
             island_inner, text="", bg="white", fg=C_CARD_GAP, font=("Segoe UI", 10),
         )
@@ -1733,23 +1733,41 @@ class PanelApp:
             self._island_channel_filter_var.set("全部渠道")
         self._island_selected_class = None
         self._sync_island_filter_var(None)
+        self._update_island_owner_channel_combos()
         self._render_island_quadrants(self._cached_summary.get("store_specific", self._is_store_selected()))
 
+    def _on_island_owner_change(self):
+        self._island_selected_class = None
+        self._sync_island_filter_var(None)
+        self._update_island_channel_combo(reset=True)
+        self._render_island_quadrants(self._cached_summary.get("store_specific", self._is_store_selected()))
+
+    def _on_island_channel_change(self):
+        self._island_selected_class = None
+        self._sync_island_filter_var(None)
+        self._render_island_quadrants(self._cached_summary.get("store_specific", self._is_store_selected()))
+
+    def _update_island_channel_combo(self, reset=False):
+        owner = self._island_owner_filter_var.get()
+        if owner in ("", "全部负责人"):
+            channels = ["全部渠道"]
+            channel_state = "disabled"
+        else:
+            channels = ["全部渠道"] + panel_data.channels_for_owner(self._cached_owner_config, owner)
+            channel_state = "readonly"
+        if self._island_channel_combo:
+            self._island_channel_combo.configure(values=channels, state=channel_state)
+        current = self._island_channel_filter_var.get()
+        if reset or current not in channels:
+            self._island_channel_filter_var.set("全部渠道")
+
     def _update_island_owner_channel_combos(self):
-        owners = ["全部负责人"] + sorted({
-            cfg["owner"] for cfg in (self._cached_owner_config or []) if cfg.get("owner")
-        })
-        channels = ["全部渠道"] + sorted({
-            cfg["channel"] for cfg in (self._cached_owner_config or []) if cfg.get("channel")
-        }, key=str)
+        owners = ["全部负责人"] + list(panel_data.list_owner_channel_tree(self._cached_owner_config)[0])
         if self._island_owner_combo:
             self._island_owner_combo.configure(values=owners)
             if self._island_owner_filter_var.get() not in owners:
                 self._island_owner_filter_var.set("全部负责人")
-        if self._island_channel_combo:
-            self._island_channel_combo.configure(values=channels)
-            if self._island_channel_filter_var.get() not in channels:
-                self._island_channel_filter_var.set("全部渠道")
+        self._update_island_channel_combo(reset=True)
 
     def _island_scope_filters(self):
         view_mode = self._island_view_mode_var.get()
@@ -1819,6 +1837,7 @@ class PanelApp:
         self._island_view_mode_var.set("总览")
         if meta.get("owner"):
             self._island_owner_filter_var.set(meta["owner"])
+            self._update_island_channel_combo(reset=False)
         if meta.get("channel"):
             self._island_channel_filter_var.set(meta["channel"])
         self._island_selected_class = class_key
@@ -1919,11 +1938,14 @@ class PanelApp:
                     text=f"当前地区 {region} 暂无南北岛划分（仅 NZ 支持）。",
                 )
         view_mode = self._island_view_mode_var.get()
-        combo_state = "readonly" if view_mode == "总览" else "disabled"
         if self._island_owner_combo:
-            self._island_owner_combo.configure(state=combo_state)
-        if self._island_channel_combo:
-            self._island_channel_combo.configure(state=combo_state)
+            self._island_owner_combo.configure(
+                state="readonly" if view_mode == "总览" else "disabled",
+            )
+        if view_mode == "总览":
+            self._update_island_channel_combo(reset=False)
+        elif self._island_channel_combo:
+            self._island_channel_combo.configure(state="disabled")
         if view_mode == "总览":
             if self._island_single_frame:
                 self._island_single_frame.pack(fill=tk.X, padx=8, pady=(0, 8))

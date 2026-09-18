@@ -385,6 +385,31 @@ def resolve_product_owner_channel(product, config_rows):
     return "", ""
 
 
+def list_owner_channel_tree(config_rows):
+    """负责人 → 渠道 二级结构（用于级联筛选）。"""
+    owners = sorted({cfg["owner"] for cfg in (config_rows or []) if cfg.get("owner")})
+    channels_by_owner = {}
+    for cfg in config_rows or []:
+        owner = cfg.get("owner")
+        channel = cfg.get("channel")
+        if not owner or not channel:
+            continue
+        channels_by_owner.setdefault(owner, set()).add(str(channel))
+    channels_by_owner = {
+        owner: sorted(channels, key=str)
+        for owner, channels in channels_by_owner.items()
+    }
+    return owners, channels_by_owner
+
+
+def channels_for_owner(config_rows, owner=None):
+    """返回某负责人下的渠道列表；未选负责人时返回空（需先选一级）。"""
+    if not owner or owner in ("", "全部负责人"):
+        return []
+    _, channels_by_owner = list_owner_channel_tree(config_rows)
+    return list(channels_by_owner.get(owner, []))
+
+
 def filter_products_by_owner_channel(products, config_rows, owner=None, channel=None,
                                      include_discontinued=False):
     """按负责人/渠道筛选 SKU（与 channel_owners 规则一致）。"""
