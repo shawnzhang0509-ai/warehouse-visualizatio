@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.8.4"
+APP_VERSION = "1.8.5"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -1108,14 +1108,7 @@ class PanelApp:
             src_line += "  |  ⚠ 无 ImageUrl"
         self.source_var.set(src_line)
         self._update_blacklist_label()
-        try:
-            owner_cfg, owner_path = panel_data.load_channel_owner_config(
-                region, data.get("data_dir") or self._cached_data_dir,
-            )
-        except Exception:
-            owner_cfg, owner_path = [], ""
-        self._cached_owner_config = owner_cfg
-        self._cached_owner_path = owner_path or ""
+        self._reload_owner_config(region, data.get("data_dir") or self._cached_data_dir)
         self._prefix_rendered_for = None
         self._owner_rendered_for = None
         self._loaded_full_stock = bool(data.get("summary", {}).get("includes_discontinued"))
@@ -1443,10 +1436,19 @@ class PanelApp:
             return ("warn",)
         return ("low",)
 
+    def _reload_owner_config(self, region=None, data_dir=None):
+        region = region or self._cached_summary.get("region") or self._current_region()
+        data_dir = data_dir or self._cached_data_dir
+        owner_cfg, owner_path = panel_data.load_channel_owner_config(region, data_dir)
+        self._cached_owner_config = owner_cfg
+        self._cached_owner_path = owner_path or panel_data.resolve_channel_owner_path(region, data_dir) or ""
+
     def _render_owner_table(self, store_specific=True):
         if not self._owner_tree:
             return
-        expected = panel_data.expected_channel_owner_path(self._cached_summary.get("region"))
+        region = self._cached_summary.get("region") or self._current_region()
+        self._reload_owner_config(region)
+        expected = panel_data.expected_channel_owner_path(region)
         if not self._cached_owner_config:
             if self._cached_owner_path:
                 fname = Path(self._cached_owner_path).name

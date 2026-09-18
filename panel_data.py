@@ -650,8 +650,19 @@ def _dict_row_has_channel_headers(row):
 
 
 def _read_channel_owner_raw_lines(path):
-    with open(path, "r", encoding="utf-8-sig", newline="") as f:
-        return list(csv.reader(f))
+    """Excel 另存 CSV 可能是 GBK 或分号分隔，需兼容。"""
+    raw_text = None
+    for enc in ("utf-8-sig", "utf-8", "gbk", "gb2312", "cp936"):
+        try:
+            raw_text = Path(path).read_text(encoding=enc)
+            break
+        except UnicodeDecodeError:
+            continue
+    if raw_text is None:
+        raw_text = Path(path).read_text(encoding="utf-8", errors="replace")
+    sample = raw_text[:4096]
+    delimiter = ";" if sample.count(";") > sample.count(",") else ","
+    return list(csv.reader(raw_text.splitlines(), delimiter=delimiter))
 
 
 def _load_channel_owner_config(path):
@@ -716,18 +727,35 @@ def _load_channel_owner_config(path):
     return rows
 
 
-def load_channel_owner_config(region=None, data_dir=None):
+def resolve_channel_owner_path(region=None, data_dir=None):
+    """返回 Output 目录里 channel_owner(s).csv 的路径（不读内容）。"""
     region_key = str(region or default_region() or "NZ").strip().upper()
     base = Path(data_dir) if data_dir else _region_output_dir(region_key)
     path = _find_channel_owner_file(base)
+    if path:
+        return str(path)
+    for stem in CHANNEL_OWNER_STEMS:
+        for ext in (".csv", ".xlsx"):
+            candidate = base / f"{stem}{ext}"
+            if candidate.is_file():
+                return str(candidate)
+    return None
+
+
+def load_channel_owner_config(region=None, data_dir=None):
+    region_key = str(region or default_region() or "NZ").strip().upper()
+    path = resolve_channel_owner_path(region, data_dir)
     if not path:
         template = ROOT_DIR / f"Data-{region_key}" / "channel_owners.example.csv"
         if template.is_file():
-            path = template
+            path = str(template)
     rows = []
     if path:
-        rows = _load_channel_owner_config(path)
-    return rows, str(path) if path else None
+        try:
+            rows = _load_channel_owner_config(path)
+        except Exception:
+            rows = []
+    return rows, path
 
 
 def _prefix_number(code):
