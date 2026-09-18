@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.0"
+APP_VERSION = "1.9.1"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -130,8 +130,12 @@ class PanelApp:
         self._owner_rendered_for = None
         self._island_rendered_for = None
         self._island_quadrant_cards = {}
+        self._island_quadrant_pcts = {}
         self._island_quadrant_meta = {}
         self._island_selected_class = None
+        self._island_groups_canvas = None
+        self._island_groups_frame = None
+        self._island_single_frame = None
         self._cached_owner_config = []
         self._cached_owner_path = ""
         self._lazy_groups = {}
@@ -191,6 +195,9 @@ class PanelApp:
         self.discontinue_filter_var = tk.StringVar(value="在产")
         self.group_sort_var = tk.StringVar(value="库存总数多到少")
         self.island_filter_var = tk.StringVar(value="全部")
+        self._island_view_mode_var = tk.StringVar(value="总览")
+        self._island_owner_filter_var = tk.StringVar(value="全部负责人")
+        self._island_channel_filter_var = tk.StringVar(value="全部渠道")
         self.load_images_var = tk.BooleanVar(value=True)
         self.result_count_var = tk.StringVar(value="")
         self._status_var = tk.StringVar(value="")
@@ -555,15 +562,65 @@ class PanelApp:
         island_inner.pack(fill=tk.BOTH, expand=True)
         tk.Label(
             island_inner,
-            text="按全国仓库存划分：北岛=Carbine+Walls，南岛=GC · 点击象限筛选下方 SKU 列表",
+            text="按全国仓库存划分：北岛=Carbine+Walls，南岛=GC · 数字为 SKU 数，下方为占比",
             bg="white", fg=C_MUTED, font=("Segoe UI", 9),
         ).pack(anchor="w", padx=8, pady=(6, 4))
+        island_filter_bar = tk.Frame(island_inner, bg="white")
+        island_filter_bar.pack(fill=tk.X, padx=8, pady=(0, 6))
+        tk.Label(island_filter_bar, text="视图", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(
+            side=tk.LEFT,
+        )
+        self._island_view_combo = ttk.Combobox(
+            island_filter_bar, width=10, state="readonly", textvariable=self._island_view_mode_var,
+            values=["总览", "按负责人", "按渠道"],
+        )
+        self._island_view_combo.pack(side=tk.LEFT, padx=(6, 12))
+        self._island_view_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_island_scope_change())
+        tk.Label(island_filter_bar, text="负责人", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(
+            side=tk.LEFT,
+        )
+        self._island_owner_combo = ttk.Combobox(
+            island_filter_bar, width=12, state="readonly", textvariable=self._island_owner_filter_var,
+            values=["全部负责人"],
+        )
+        self._island_owner_combo.pack(side=tk.LEFT, padx=(6, 12))
+        self._island_owner_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_island_scope_change())
+        tk.Label(island_filter_bar, text="渠道", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(
+            side=tk.LEFT,
+        )
+        self._island_channel_combo = ttk.Combobox(
+            island_filter_bar, width=12, state="readonly", textvariable=self._island_channel_filter_var,
+            values=["全部渠道"],
+        )
+        self._island_channel_combo.pack(side=tk.LEFT, padx=(6, 12))
+        self._island_channel_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_island_scope_change())
         self._island_unsupported_lbl = tk.Label(
             island_inner, text="", bg="white", fg=C_CARD_GAP, font=("Segoe UI", 10),
         )
         self._island_unsupported_lbl.pack(anchor="w", padx=8, pady=(0, 4))
-        quadrant_wrap = tk.Frame(island_inner, bg="white")
-        quadrant_wrap.pack(fill=tk.X, padx=8, pady=(0, 8))
+        self._island_single_frame = tk.Frame(island_inner, bg="white")
+        self._island_single_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
+        quadrant_wrap = tk.Frame(self._island_single_frame, bg="white")
+        quadrant_wrap.pack(fill=tk.X)
+        groups_outer = tk.Frame(island_inner, bg="white")
+        groups_outer.pack(fill=tk.BOTH, expand=False, padx=8, pady=(0, 8))
+        self._island_groups_canvas = tk.Canvas(groups_outer, bg="white", height=220, highlightthickness=0)
+        groups_scroll = ttk.Scrollbar(groups_outer, orient="vertical", command=self._island_groups_canvas.yview)
+        self._island_groups_frame = tk.Frame(self._island_groups_canvas, bg="white")
+        self._island_groups_window = self._island_groups_canvas.create_window(
+            (0, 0), window=self._island_groups_frame, anchor="nw",
+        )
+        self._island_groups_frame.bind(
+            "<Configure>",
+            lambda _e: self._island_groups_canvas.configure(
+                scrollregion=self._island_groups_canvas.bbox("all"),
+            ),
+        )
+        self._island_groups_canvas.configure(yscrollcommand=groups_scroll.set)
+        self._island_groups_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        groups_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        groups_outer.pack_forget()
+        self._island_groups_outer = groups_outer
         tk.Label(quadrant_wrap, text="", bg="white", width=8).grid(row=1, column=0)
         tk.Label(
             quadrant_wrap, text="北岛有货", bg="white", fg=C_MUTED,
@@ -598,19 +655,24 @@ class PanelApp:
                     card, text="0", bg=bg, fg=fg, font=("Segoe UI", 22, "bold"), cursor="hand2",
                 )
                 val_lbl.pack(anchor="w", pady=(4, 0))
+                pct_lbl = tk.Label(
+                    card, text="0.0%", bg=bg, fg=fg, font=("Segoe UI", 10), cursor="hand2",
+                )
+                pct_lbl.pack(anchor="w")
                 hint_lbl = tk.Label(
                     card, text="点击筛选", bg=bg, fg=fg, font=("Segoe UI", 8), cursor="hand2",
                 )
                 hint_lbl.pack(anchor="w")
-                for widget in (card, title_lbl, val_lbl, hint_lbl):
+                for widget in (card, title_lbl, val_lbl, pct_lbl, hint_lbl):
                     widget.bind(
                         "<Button-1>",
                         lambda _e, key=class_key: self._on_island_quadrant_click(key),
                     )
                 self._island_quadrant_cards[class_key] = val_lbl
+                self._island_quadrant_pcts[class_key] = pct_lbl
                 self._island_quadrant_meta[class_key] = {
-                    "card": card, "widgets": [title_lbl, val_lbl, hint_lbl],
-                    "bg": bg, "bg_active": bg_active, "fg": fg,
+                    "card": card, "widgets": [title_lbl, val_lbl, pct_lbl, hint_lbl],
+                    "bg": bg, "bg_active": bg_active, "fg": fg, "hint": hint_lbl,
                 }
         for col in (1, 2):
             quadrant_wrap.grid_columnconfigure(col, weight=1)
@@ -630,15 +692,15 @@ class PanelApp:
         self._island_status_lbl.pack(side=tk.RIGHT)
         island_table_wrap = tk.Frame(island_inner, bg="white")
         island_table_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
-        icols = ("code", "name", "north", "south", "island", "stock", "status")
+        icols = ("code", "name", "owner", "channel", "north", "south", "island", "stock", "status")
         self._island_tree = ttk.Treeview(
             island_table_wrap, columns=icols, show="headings",
             selectmode="browse", style="Prefix.Treeview",
         )
         island_headings = {
-            "code": ("编码", 104), "name": ("名称", 280), "north": ("北岛", 64),
-            "south": ("南岛", 64), "island": ("象限", 80), "stock": ("店面库存", 88),
-            "status": ("状态", 120),
+            "code": ("编码", 96), "name": ("名称", 220), "owner": ("负责人", 72),
+            "channel": ("渠道", 64), "north": ("北岛", 52), "south": ("南岛", 52),
+            "island": ("象限", 72), "stock": ("店面库存", 72), "status": ("状态", 100),
         }
         for col, (text, width) in island_headings.items():
             self._island_tree.heading(col, text=text)
@@ -654,7 +716,7 @@ class PanelApp:
         self._island_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._island_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._island_tree.bind("<Double-1>", self._on_island_double_click)
-        for widget in (island_inner, self._tab_island, self._island_tree):
+        for widget in (island_inner, self._tab_island, self._island_tree, self._island_groups_canvas):
             widget.bind("<MouseWheel>", self._on_island_wheel)
             widget.bind("<Button-4>", lambda _e: self._scroll_island(-1))
             widget.bind("<Button-5>", lambda _e: self._scroll_island(1))
@@ -1660,8 +1722,138 @@ class PanelApp:
             meta["card"].configure(bg=bg, highlightbackground=border, highlightthickness=thickness)
             for widget in meta["widgets"]:
                 widget.configure(bg=bg, fg=meta["fg"])
-                if isinstance(widget, tk.Label) and widget.cget("text") == "点击筛选":
-                    widget.configure(text="✓ 筛选中" if selected else "点击筛选")
+            hint = meta.get("hint")
+            if hint:
+                hint.configure(text="✓ 筛选中" if selected else "点击筛选")
+
+    def _on_island_scope_change(self):
+        view_mode = self._island_view_mode_var.get()
+        if view_mode != "总览":
+            self._island_owner_filter_var.set("全部负责人")
+            self._island_channel_filter_var.set("全部渠道")
+        self._island_selected_class = None
+        self._sync_island_filter_var(None)
+        self._render_island_quadrants(self._cached_summary.get("store_specific", self._is_store_selected()))
+
+    def _update_island_owner_channel_combos(self):
+        owners = ["全部负责人"] + sorted({
+            cfg["owner"] for cfg in (self._cached_owner_config or []) if cfg.get("owner")
+        })
+        channels = ["全部渠道"] + sorted({
+            cfg["channel"] for cfg in (self._cached_owner_config or []) if cfg.get("channel")
+        }, key=str)
+        if self._island_owner_combo:
+            self._island_owner_combo.configure(values=owners)
+            if self._island_owner_filter_var.get() not in owners:
+                self._island_owner_filter_var.set("全部负责人")
+        if self._island_channel_combo:
+            self._island_channel_combo.configure(values=channels)
+            if self._island_channel_filter_var.get() not in channels:
+                self._island_channel_filter_var.set("全部渠道")
+
+    def _island_scope_filters(self):
+        view_mode = self._island_view_mode_var.get()
+        owner = self._island_owner_filter_var.get()
+        channel = self._island_channel_filter_var.get()
+        if view_mode != "总览":
+            return None, None
+        if owner == "全部负责人":
+            owner = None
+        if channel == "全部渠道":
+            channel = None
+        return owner, channel
+
+    def _update_main_island_quadrant(self, report):
+        counts = report.get("counts") or {}
+        percents = report.get("percents") or {}
+        for class_key, lbl in self._island_quadrant_cards.items():
+            lbl.configure(text=str(counts.get(class_key, 0)))
+        for class_key, lbl in self._island_quadrant_pcts.items():
+            lbl.configure(text=f"{percents.get(class_key, 0.0):.1f}%")
+
+    def _clear_island_group_widgets(self):
+        if not self._island_groups_frame:
+            return
+        for child in self._island_groups_frame.winfo_children():
+            child.destroy()
+
+    def _build_mini_island_quadrant(self, parent, title, counts, percents, meta):
+        wrap = tk.Frame(parent, bg="white", padx=4, pady=4)
+        tk.Label(
+            wrap, text=title, bg="white", fg=C_TEXT, font=("Segoe UI", 9, "bold"), anchor="w",
+        ).pack(anchor="w")
+        tk.Label(
+            wrap, text=f"共 {sum(counts.values())} SKU", bg="white", fg=C_MUTED,
+            font=("Segoe UI", 8), anchor="w",
+        ).pack(anchor="w", pady=(0, 4))
+        grid = tk.Frame(wrap, bg="white")
+        grid.pack(fill=tk.X)
+        for row_idx, row_keys in enumerate(panel_data.ISLAND_STOCK_GRID):
+            for col_idx, class_key in enumerate(row_keys):
+                bg, _bg_active, fg = ISLAND_QUADRANT_STYLE[class_key]
+                cell = tk.Frame(grid, bg=bg, padx=8, pady=6, cursor="hand2")
+                cell.grid(row=row_idx, column=col_idx, padx=3, pady=3, sticky="nsew")
+                title_lbl = tk.Label(
+                    cell, text=panel_data.ISLAND_STOCK_CLASSES[class_key], bg=bg, fg=fg,
+                    font=("Segoe UI", 8, "bold"), cursor="hand2",
+                )
+                title_lbl.pack(anchor="w")
+                count_lbl = tk.Label(
+                    cell, text=str(counts.get(class_key, 0)), bg=bg, fg=fg,
+                    font=("Segoe UI", 14, "bold"), cursor="hand2",
+                )
+                count_lbl.pack(anchor="w")
+                pct_lbl = tk.Label(
+                    cell, text=f"{percents.get(class_key, 0.0):.1f}%", bg=bg, fg=fg,
+                    font=("Segoe UI", 8), cursor="hand2",
+                )
+                pct_lbl.pack(anchor="w")
+                for widget in (cell, title_lbl, count_lbl, pct_lbl):
+                    widget.bind(
+                        "<Button-1>",
+                        lambda _e, key=class_key, m=meta: self._on_island_group_cell_click(m, key),
+                    )
+        return wrap
+
+    def _on_island_group_cell_click(self, meta, class_key):
+        self._island_view_mode_var.set("总览")
+        if meta.get("owner"):
+            self._island_owner_filter_var.set(meta["owner"])
+        if meta.get("channel"):
+            self._island_channel_filter_var.set(meta["channel"])
+        self._island_selected_class = class_key
+        self._sync_island_filter_var(class_key)
+        self._render_island_quadrants(self._cached_summary.get("store_specific", self._is_store_selected()))
+        self._refresh_view()
+
+    def _render_island_group_quadrants(self, store_specific=True):
+        view_mode = self._island_view_mode_var.get()
+        group_by = "owner" if view_mode == "按负责人" else "channel"
+        groups = panel_data.aggregate_island_quadrants_grouped(
+            self._cached_products, group_by, self._cached_owner_config,
+        )
+        self._clear_island_group_widgets()
+        if not groups:
+            tk.Label(
+                self._island_groups_frame,
+                text="未找到 channel_owner(s).csv 配置，无法按负责人/渠道分组。",
+                bg="white", fg=C_MUTED, font=("Segoe UI", 9),
+            ).pack(anchor="w", padx=8, pady=8)
+            return
+        row_frame = None
+        for idx, group in enumerate(groups):
+            if idx % 2 == 0:
+                row_frame = tk.Frame(self._island_groups_frame, bg="white")
+                row_frame.pack(fill=tk.X, pady=(0, 8))
+            meta = {"owner": group.get("owner"), "channel": group.get("channel")}
+            mini = self._build_mini_island_quadrant(
+                row_frame, group["label"], group["counts"], group["percents"], meta,
+            )
+            mini.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4)
+        if self._island_status_lbl:
+            self._island_status_lbl.configure(
+                text=f"{view_mode} · {len(groups)} 组 · 点击小象限可筛选下方列表",
+            )
 
     def _on_island_quadrant_click(self, class_key):
         if self._island_selected_class == class_key:
@@ -1675,9 +1867,11 @@ class PanelApp:
 
     def _clear_island_quadrant_filter(self):
         self._island_selected_class = None
+        self._island_owner_filter_var.set("全部负责人")
+        self._island_channel_filter_var.set("全部渠道")
         self._sync_island_filter_var(None)
         self._apply_island_quadrant_styles()
-        self._render_island_table()
+        self._render_island_quadrants(self._cached_summary.get("store_specific", self._is_store_selected()))
         self._refresh_view()
 
     def _open_island_selection_in_products(self):
@@ -1714,6 +1908,8 @@ class PanelApp:
         if not self._island_tree:
             return
         region = self._cached_summary.get("region") or self._current_region()
+        self._reload_owner_config(region)
+        self._update_island_owner_channel_combos()
         supported = bool(self._cached_summary.get("island_stock_supported"))
         if self._island_unsupported_lbl:
             if supported:
@@ -1722,10 +1918,40 @@ class PanelApp:
                 self._island_unsupported_lbl.configure(
                     text=f"当前地区 {region} 暂无南北岛划分（仅 NZ 支持）。",
                 )
-        counts = (self._cached_summary.get("island_quadrant_counts") or {})
-        for class_key, lbl in self._island_quadrant_cards.items():
-            lbl.configure(text=str(counts.get(class_key, 0)))
-        self._apply_island_quadrant_styles()
+        view_mode = self._island_view_mode_var.get()
+        combo_state = "readonly" if view_mode == "总览" else "disabled"
+        if self._island_owner_combo:
+            self._island_owner_combo.configure(state=combo_state)
+        if self._island_channel_combo:
+            self._island_channel_combo.configure(state=combo_state)
+        if view_mode == "总览":
+            if self._island_single_frame:
+                self._island_single_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
+            if self._island_groups_outer:
+                self._island_groups_outer.pack_forget()
+            owner, channel = self._island_scope_filters()
+            report = panel_data.aggregate_island_quadrants(
+                self._cached_products,
+                owner=owner, channel=channel, config_rows=self._cached_owner_config,
+            )
+            self._update_main_island_quadrant(report)
+            self._apply_island_quadrant_styles()
+            if self._island_status_lbl:
+                scope = []
+                if owner:
+                    scope.append(owner)
+                if channel:
+                    scope.append(channel)
+                scope_text = " · ".join(scope) if scope else "全部 SKU"
+                self._island_status_lbl.configure(
+                    text=f"总览 · {scope_text} · 共 {report.get('total', 0)} 条在产 SKU",
+                )
+        else:
+            if self._island_single_frame:
+                self._island_single_frame.pack_forget()
+            if self._island_groups_outer:
+                self._island_groups_outer.pack(fill=tk.BOTH, expand=False, padx=8, pady=(0, 8))
+            self._render_island_group_quadrants(store_specific)
         self._render_island_table(store_specific)
 
     def _render_island_table(self, store_specific=True):
@@ -1734,10 +1960,14 @@ class PanelApp:
         if not self._cached_summary.get("island_stock_supported"):
             if self._island_tree.get_children():
                 self._island_tree.delete(*self._island_tree.get_children())
-            if self._island_status_lbl:
+            if self._island_status_lbl and self._island_view_mode_var.get() == "总览":
                 self._island_status_lbl.configure(text="")
             return
-        report = panel_data.aggregate_island_quadrants(self._cached_products)
+        owner, channel = self._island_scope_filters()
+        report = panel_data.aggregate_island_quadrants(
+            self._cached_products,
+            owner=owner, channel=channel, config_rows=self._cached_owner_config,
+        )
         rows = []
         if self._island_selected_class:
             rows = report["rows"].get(self._island_selected_class, [])
@@ -1754,11 +1984,16 @@ class PanelApp:
             self._island_tree.delete(*self._island_tree.get_children())
         for idx, item in enumerate(rows):
             stock = int(item.get("stock_qty") or 0) if item.get("in_stock") else 0
+            owner_name, channel_name = panel_data.resolve_product_owner_channel(
+                item, self._cached_owner_config,
+            )
             self._island_tree.insert(
                 "", tk.END,
                 values=(
                     item.get("code") or "",
                     item.get("name") or "",
+                    owner_name or "-",
+                    channel_name or "-",
                     item.get("north_stock_qty", 0),
                     item.get("south_stock_qty", 0),
                     item.get("island_stock_label") or "-",
@@ -1767,7 +2002,7 @@ class PanelApp:
                 ),
                 tags=self._island_row_tag(item, idx),
             )
-        if self._island_status_lbl:
+        if self._island_status_lbl and self._island_view_mode_var.get() == "总览":
             label = (
                 panel_data.ISLAND_STOCK_CLASSES[self._island_selected_class]
                 if self._island_selected_class else "全部象限"
@@ -1780,7 +2015,11 @@ class PanelApp:
 
     def _on_island_wheel(self, event):
         step = -1 if event.delta > 0 else 1
-        self._scroll_island(step)
+        widget = event.widget
+        if widget is self._island_groups_canvas and self._island_groups_canvas:
+            self._island_groups_canvas.yview_scroll(step * SCROLL_UNITS, "units")
+        else:
+            self._scroll_island(step)
 
     def _on_island_double_click(self, _event=None):
         sel = self._island_tree.selection() if self._island_tree else ()

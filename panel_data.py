@@ -345,8 +345,14 @@ def _enrich_island_stock(item, region_key):
     return item
 
 
-def aggregate_island_quadrants(products, include_discontinued=False):
-    """统计四象限 SKU 数（默认仅计在产）。"""
+def _island_percents(counts):
+    total = sum(counts.values())
+    if not total:
+        return {key: 0.0 for key in ISLAND_STOCK_CLASSES}
+    return {key: round(counts[key] / total * 100, 1) for key in ISLAND_STOCK_CLASSES}
+
+
+def _island_counts_from_products(products, include_discontinued=False):
     counts = {key: 0 for key in ISLAND_STOCK_CLASSES}
     rows = {key: [] for key in ISLAND_STOCK_CLASSES}
     for product in products:
@@ -357,7 +363,114 @@ def aggregate_island_quadrants(products, include_discontinued=False):
             continue
         counts[cls] += 1
         rows[cls].append(product)
-    return {"counts": counts, "rows": rows}
+    return counts, rows
+
+
+def products_for_channel_config(products, cfg, include_discontinued=False):
+    """与负责人报表一致的渠道 SKU 匹配。"""
+    active = [p for p in products if include_discontinued or not p.get("discontinued")]
+    matched = [p for p in active if product_matches_channel(p.get("code", ""), cfg["channel"])]
+    if not matched:
+        return []
+    if not _is_merge_all(cfg["merge_products"]):
+        tokens = [t.strip() for t in cfg["merge_products"].split("+") if t.strip()]
+        matched = [p for p in matched if any(_token_in_product(t, p) for t in tokens)]
+    return matched
+
+
+def resolve_product_owner_channel(product, config_rows):
+    for cfg in config_rows or []:
+        if products_for_channel_config([product], cfg):
+            return cfg["owner"], cfg["channel"]
+    return "", ""
+
+
+def filter_products_by_owner_channel(products, config_rows, owner=None, channel=None,
+                                     include_discontinued=False):
+    """按负责人/渠道筛选 SKU（与 channel_owners 规则一致）。"""
+    if not config_rows:
+        return products
+    owner = str(owner or "").strip()
+    channel = str(channel or "").strip()
+    if owner in ("", "全部负责人") and channel in ("", "全部渠道"):
+        return products
+    codes = set()
+    for cfg in config_rows:
+        if owner and owner not in ("全部负责人",) and cfg["owner"] != owner:
+            continue
+        if channel and channel not in ("全部渠道",) and cfg["channel"] != channel:
+            continue
+        for product in products_for_channel_config(products, cfg, include_discontinued):
+            codes.add(product.get("norm_code") or product.get("code"))
+    return [
+        p for p in products
+        if (p.get("norm_code") or p.get("code")) in codes
+    ]
+
+
+def aggregate_island_quadrants(products, include_discontinued=False, owner=None, channel=None,
+                               config_rows=None):
+    """统计四象限 SKU 数（默认仅计在产），可按负责人/渠道筛选。"""
+    scoped = products
+    if config_rows and (owner or channel):
+        scoped = filter_products_by_owner_channel(
+            products, config_rows, owner=owner, channel=channel,
+            include_discontinued=include_discontinued,
+        )
+    counts, rows = _island_counts_from_products(scoped, include_discontinued)
+    return {
+        "counts": counts,
+        "rows": rows,
+        "percents": _island_percents(counts),
+        "total": sum(counts.values()),
+    }
+
+
+def aggregate_island_quadrants_grouped(products, group_by, config_rows, include_discontinued=False):
+    """按负责人或渠道生成多组四象限统计（含占比）。"""
+    groups = []
+    if not config_rows:
+        return groups
+    if group_by == "channel":
+        for cfg in config_rows:
+            matched = products_for_channel_config(products, cfg, include_discontinued)
+            if not matched:
+                continue
+            counts, _ = _island_counts_from_products(matched, include_discontinued)
+            total = sum(counts.values())
+            groups.append({
+                "key": cfg["channel"],
+                "label": str(cfg["channel"]),
+                "owner": cfg["owner"],
+                "channel": cfg["channel"],
+                "counts": counts,
+                "percents": _island_percents(counts),
+                "total": total,
+            })
+    else:
+        by_owner = {}
+        for cfg in config_rows:
+            matched = products_for_channel_config(products, cfg, include_discontinued)
+            bucket = by_owner.setdefault(cfg["owner"], {})
+            for product in matched:
+                code = product.get("norm_code") or product.get("code")
+                if code not in bucket:
+                    bucket[code] = product
+        for owner, prod_map in by_owner.items():
+            matched = list(prod_map.values())
+            counts, _ = _island_counts_from_products(matched, include_discontinued)
+            total = sum(counts.values())
+            groups.append({
+                "key": owner,
+                "label": owner,
+                "owner": owner,
+                "channel": "",
+                "counts": counts,
+                "percents": _island_percents(counts),
+                "total": total,
+            })
+    groups.sort(key=lambda item: (-item["total"], str(item["label"]).lower()))
+    return groups
 
 
 def _stock_breakdown(warehouse_stock, warehouse_keys):
