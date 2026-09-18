@@ -46,9 +46,9 @@ IMAGE_HOST_ALTERNATES = {
 }
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
-# 启动时预加载停产 SKU（停产为常态时避免每次切筛选都重算）
-EAGER_DISCONTINUED_STOCK = os.getenv("PANEL_EAGER_DISCONTINUED", "1").strip().lower() not in (
-    "0", "false", "no", "off",
+# 启动时预加载停产 SKU（默认关闭，先秒开在产；设 PANEL_EAGER_DISCONTINUED=1 可恢复旧行为）
+EAGER_DISCONTINUED_STOCK = os.getenv("PANEL_EAGER_DISCONTINUED", "0").strip().lower() in (
+    "1", "true", "yes", "on",
 )
 
 CODE_KEYS = ["productcode", "product_code", "sku", "itemcode", "item_code",
@@ -311,13 +311,14 @@ def _apply_store_stock(product, store, region_key, warehouse_keys=None):
     else:
         qty = float(product.get("stock_qty") or 0)
         breakdown = ""
-    return {
-        **product,
+    item = product.copy()
+    item.update({
         "stock_qty": qty,
         "in_stock": qty > 0,
         "stock_warehouses": warehouse_keys,
         "stock_breakdown": breakdown,
-    }
+    })
+    return item
 
 
 def _read_csv(path):
