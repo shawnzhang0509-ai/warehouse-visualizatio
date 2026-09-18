@@ -103,6 +103,22 @@
 - 黑名单对**所有店面**生效（Onehunga、Westgate、CHCH 等都会排除）
 - 修改后必须点「刷新数据」
 
+## 渠道负责人（可选，负责人报表）
+
+复制 `Data-NZ/channel_owners.example.csv` 到 `Output-NZ/channel_owners.csv`。
+
+| 列 | 说明 |
+|----|------|
+| owner / 负责人 | kaya、Andy、Juli 等 |
+| channel / 渠道 | SKU 前三位或区间（如 `271`、`155-319`） |
+| lead_time | Lead Time 天数（报表展示） |
+| merge_products / 必须合并计算的产品 | `所有` 或 `Calton+Arden+Bexley`（+ 分隔，合并为 1 个统计单位） |
+| merge_regions | 如 `南北岛`（备注） |
+| note / 拆分原因 | 可选备注 |
+
+看板 **「负责人报表」** 标签页：按负责人汇总有货率，可导出 `owner_report_*.csv` 定期报表。  
+**「SKU前三位汇总」** 表会增加 **负责人** 列。
+
 ## 注意
 
 - 不要放 `stock.txt` 这类占位文件，会和 `product_stock_price.sql` 抢同一个 stock.csv 导致数据被覆盖。
