@@ -129,8 +129,15 @@ _STORE_VIEW_CACHE = {}
 _EXEMPTION_CONFIG_CACHE = None
 
 
+def _strip_cell_bom(value):
+    text = str(value).strip()
+    if text.startswith("\ufeff"):
+        text = text[1:].strip()
+    return text
+
+
 def _pick(row, keys):
-    lower = {str(k).strip().lower(): v for k, v in row.items()}
+    lower = {_strip_cell_bom(k).lower(): v for k, v in row.items()}
     for key in keys:
         if key in lower:
             value = lower[key]
@@ -625,8 +632,8 @@ def _channel_owner_row_dict(owner, channel, extra=None):
 
 
 def _parse_channel_owner_dict_row(row):
-    owner = str(_pick(row, OWNER_KEYS) or "").strip()
-    channel = str(_pick(row, CHANNEL_KEYS) or "").strip()
+    owner = _strip_cell_bom(_pick(row, OWNER_KEYS) or "")
+    channel = _normalize_channel_code(_pick(row, CHANNEL_KEYS) or "")
     if not owner or not channel:
         return None
     lead_raw = _pick(row, LEAD_TIME_KEYS)
@@ -649,20 +656,52 @@ def _dict_row_has_channel_headers(row):
     return bool(keys & {k.lower() for k in OWNER_KEYS}) and bool(keys & {k.lower() for k in CHANNEL_KEYS})
 
 
-def _read_channel_owner_raw_lines(path):
-    """Excel 另存 CSV 可能是 GBK 或分号分隔，需兼容。"""
-    raw_text = None
-    for enc in ("utf-8-sig", "utf-8", "gbk", "gb2312", "cp936"):
+_CHANNEL_OWNER_ENCODINGS = (
+    "utf-8-sig", "utf-8", "utf-16", "utf-16-le", "utf-16-be",
+    "gbk", "gb2312", "cp936",
+)
+
+
+def _read_channel_owner_text(path):
+    path = Path(path)
+    for enc in _CHANNEL_OWNER_ENCODINGS:
         try:
-            raw_text = Path(path).read_text(encoding=enc)
-            break
+            return path.read_text(encoding=enc), enc
         except UnicodeDecodeError:
             continue
-    if raw_text is None:
-        raw_text = Path(path).read_text(encoding="utf-8", errors="replace")
-    sample = raw_text[:4096]
-    delimiter = ";" if sample.count(";") > sample.count(",") else ","
+    return path.read_text(encoding="utf-8", errors="replace"), "utf-8"
+
+
+def _detect_channel_owner_delimiter(sample):
+    counts = {"\t": sample.count("\t"), ";": sample.count(";"), ",": sample.count(",")}
+    best = max(counts, key=lambda ch: counts[ch])
+    return best if counts[best] > 0 else ","
+
+
+def _normalize_channel_code(channel):
+    text = _strip_cell_bom(channel)
+    if re.fullmatch(r"\d+\.0+", text):
+        try:
+            return str(int(float(text)))
+        except ValueError:
+            pass
+    return text
+
+
+def _read_channel_owner_raw_lines(path):
+    """Excel 另存 CSV 可能是 GBK、UTF-16、分号或 Tab 分隔，需兼容。"""
+    raw_text, _ = _read_channel_owner_text(path)
+    delimiter = _detect_channel_owner_delimiter(raw_text[:4096])
     return list(csv.reader(raw_text.splitlines(), delimiter=delimiter))
+
+
+def _read_channel_owner_dict_rows(path):
+    raw_text, _ = _read_channel_owner_text(path)
+    delimiter = _detect_channel_owner_delimiter(raw_text[:4096])
+    rows = []
+    for row in csv.DictReader(raw_text.splitlines(), delimiter=delimiter):
+        rows.append({_strip_cell_bom(k): v for k, v in row.items() if k is not None})
+    return rows
 
 
 def _load_channel_owner_config(path):
@@ -688,15 +727,15 @@ def _load_channel_owner_config(path):
 
     start = 0
     if len(raw[0]) >= 2:
-        h0 = str(raw[0][0]).strip().lower()
-        h1 = str(raw[0][1]).strip().lower()
+        h0 = _strip_cell_bom(raw[0][0]).lower()
+        h1 = _strip_cell_bom(raw[0][1]).lower()
         if (h0, h1) in CHANNEL_OWNER_HEADER_PAIRS or (
             h0 in {k.lower() for k in OWNER_KEYS} and h1 in {k.lower() for k in CHANNEL_KEYS}
         ):
             start = 1
 
     if start == 0:
-        dict_rows = _read_csv(path) if suffix != ".xlsx" else []
+        dict_rows = _read_channel_owner_dict_rows(path) if suffix != ".xlsx" else []
         if dict_rows and _dict_row_has_channel_headers(dict_rows[0]):
             for row in dict_rows:
                 parsed = _parse_channel_owner_dict_row(row)
@@ -705,12 +744,16 @@ def _load_channel_owner_config(path):
             if rows:
                 return rows
 
+    owner_keys_lower = {k.lower() for k in OWNER_KEYS}
+    channel_keys_lower = {k.lower() for k in CHANNEL_KEYS}
     for line in raw[start:]:
         if len(line) < 2:
             continue
-        owner = str(line[0]).strip()
-        channel = str(line[1]).strip()
+        owner = _strip_cell_bom(line[0])
+        channel = _normalize_channel_code(line[1])
         if not owner or not channel:
+            continue
+        if owner.lower() in owner_keys_lower and channel.lower() in channel_keys_lower:
             continue
         lead_time = None
         if len(line) > 2 and str(line[2]).strip():

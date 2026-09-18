@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.8.5"
+APP_VERSION = "1.8.6"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -424,9 +424,10 @@ class PanelApp:
         self._prefix_tree.bind("<Double-1>", self._on_prefix_double_click)
 
         # ── 负责人报表 ──
-        tab_owner = ttk.Frame(self._notebook)
-        self._notebook.add(tab_owner, text="负责人报表")
-        owner_inner = tk.Frame(tab_owner, bg="white")
+        self._tab_owner = ttk.Frame(self._notebook)
+        self._notebook.add(self._tab_owner, text="负责人报表")
+        self._notebook.bind("<<NotebookTabChanged>>", self._on_notebook_tab_change)
+        owner_inner = tk.Frame(self._tab_owner, bg="white")
         owner_inner.pack(fill=tk.BOTH, expand=True)
         owner_toolbar = tk.Frame(owner_inner, bg="white")
         owner_toolbar.pack(fill=tk.X, padx=4, pady=(0, 6))
@@ -479,7 +480,7 @@ class PanelApp:
         self._owner_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._owner_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._owner_tree.bind("<Double-1>", self._on_owner_double_click)
-        for widget in (owner_inner, tab_owner, self._owner_tree):
+        for widget in (owner_inner, self._tab_owner, self._owner_tree):
             widget.bind("<MouseWheel>", self._on_owner_wheel)
             widget.bind("<Button-4>", lambda _e: self._scroll_owner(-1))
             widget.bind("<Button-5>", lambda _e: self._scroll_owner(1))
@@ -1436,6 +1437,17 @@ class PanelApp:
             return ("warn",)
         return ("low",)
 
+    def _on_notebook_tab_change(self, _event=None):
+        if not self._notebook or not self._cached_products:
+            return
+        try:
+            if self._notebook.select() != str(self._tab_owner):
+                return
+        except Exception:
+            return
+        store_specific = self._cached_summary.get("store_specific", self._is_store_selected())
+        self._render_owner_table(store_specific)
+
     def _reload_owner_config(self, region=None, data_dir=None):
         region = region or self._cached_summary.get("region") or self._current_region()
         data_dir = data_dir or self._cached_data_dir
@@ -1454,8 +1466,8 @@ class PanelApp:
                 fname = Path(self._cached_owner_path).name
                 self._owner_status_lbl.configure(
                     text=(
-                        f"已找到 {fname}，但未能读取负责人/渠道数据。"
-                        f"请确认 A列=负责人、B列=渠道（可无表头），或第一行写 owner,channel 后点「刷新数据」"
+                        f"已找到 {fname}，但未能读取负责人/渠道数据（{self._cached_owner_path}）。"
+                        f"请确认 A列=负责人、B列=渠道（可无表头），Excel 请另存为 CSV UTF-8 后点「刷新数据」"
                     ),
                 )
             else:
