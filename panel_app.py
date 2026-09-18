@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.8.7"
+APP_VERSION = "1.9.0"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -72,6 +72,12 @@ C_ROW_ALT = "#fafbfc"
 C_ROW_DISC = "#fee2e2"
 C_TEXT = "#1e293b"
 C_MUTED = "#64748b"
+ISLAND_QUADRANT_STYLE = {
+    "both": (C_CARD_OK_BG, C_CARD_OK_BG_ACTIVE, C_CARD_OK),
+    "south_only": (C_CARD_WAREHOUSE_BG, C_CARD_WAREHOUSE_BG_ACTIVE, C_CARD_WAREHOUSE),
+    "north_only": (C_CARD_INFO_BG, C_CARD_INFO_BG, C_CARD_INFO),
+    "none": (C_CARD_NEUTRAL_BG, C_CARD_NEUTRAL_BG, C_CARD_NEUTRAL),
+}
 
 SORTABLE_COLS = {
     "code": lambda p: (p.get("code") or "").lower(),
@@ -81,6 +87,12 @@ SORTABLE_COLS = {
     "stock": lambda p: float(p.get("stock_qty") or 0),
     "display": lambda p: 0 if p.get("displayed") else 1,
     "discontinue": lambda p: 0 if p.get("discontinued") else 1,
+    "island": lambda p: (
+        0 if p.get("island_stock_class") == "both" else
+        1 if p.get("island_stock_class") == "south_only" else
+        2 if p.get("island_stock_class") == "north_only" else
+        3 if p.get("island_stock_class") == "none" else 9
+    ),
     "status": lambda p: (
         0 if p.get("ready_not_displayed") else
         1 if p.get("warehouse_only") and not p.get("exempted") else
@@ -116,6 +128,10 @@ class PanelApp:
         self._products_cache = {}
         self._prefix_rendered_for = None
         self._owner_rendered_for = None
+        self._island_rendered_for = None
+        self._island_quadrant_cards = {}
+        self._island_quadrant_meta = {}
+        self._island_selected_class = None
         self._cached_owner_config = []
         self._cached_owner_path = ""
         self._lazy_groups = {}
@@ -174,6 +190,7 @@ class PanelApp:
         self.display_filter_var = tk.StringVar(value="全部")
         self.discontinue_filter_var = tk.StringVar(value="在产")
         self.group_sort_var = tk.StringVar(value="库存总数多到少")
+        self.island_filter_var = tk.StringVar(value="全部")
         self.load_images_var = tk.BooleanVar(value=True)
         self.result_count_var = tk.StringVar(value="")
         self._status_var = tk.StringVar(value="")
@@ -262,7 +279,9 @@ class PanelApp:
             ("库存", self.stock_filter_var, ("全部", "有货", "无货"), 1),
             ("展示", self.display_filter_var, ("全部", "已展示", "未展示"), 2),
             ("停产", self.discontinue_filter_var, ("在产", "全部", "已停产"), 3),
-            ("组排序", self.group_sort_var, ("字母序", "SKU数量多到少", "库存总数多到少"), 4),
+            ("南北岛", self.island_filter_var,
+             ("全部", "南北都有", "南有北无", "北有南无", "南北都没"), 4),
+            ("组排序", self.group_sort_var, ("字母序", "SKU数量多到少", "库存总数多到少"), 5),
         ]
         for label, var, values, col in filters:
             tk.Label(filter_bar, text=label, bg="white", fg=C_MUTED, font=("Segoe UI", 9)).grid(
@@ -272,13 +291,13 @@ class PanelApp:
             cb.bind("<<ComboboxSelected>>", lambda _e: self._on_filter_combo_change())
 
         ttk.Checkbutton(filter_bar, text="行内缩略图", variable=self.load_images_var,
-                        command=self._on_toggle_inline_images).grid(row=1, column=5, sticky="w", padx=(4, 0))
+                        command=self._on_toggle_inline_images).grid(row=1, column=6, sticky="w", padx=(4, 0))
 
         tk.Label(filter_bar, textvariable=self.result_count_var, bg="white", fg=C_MUTED,
-                 font=("Segoe UI", 9)).grid(row=1, column=6, sticky="e", padx=(12, 0))
+                 font=("Segoe UI", 9)).grid(row=1, column=7, sticky="e", padx=(12, 0))
         tk.Label(filter_bar, textvariable=self._status_var, bg="white", fg=C_CARD_GAP,
-                 font=("Segoe UI", 9)).grid(row=0, column=6, sticky="e", padx=(12, 0))
-        filter_bar.columnconfigure(6, weight=1)
+                 font=("Segoe UI", 9)).grid(row=0, column=7, sticky="e", padx=(12, 0))
+        filter_bar.columnconfigure(7, weight=1)
 
         cards = tk.Frame(self.root, bg=C_BG, padx=12, pady=8)
         cards.pack(fill=tk.X)
@@ -367,14 +386,14 @@ class PanelApp:
         tree_body.grid_rowconfigure(0, weight=1)
         tree_body.grid_columnconfigure(0, weight=1)
 
-        columns = ("code", "name", "family", "price", "stock", "display", "discontinue", "status")
+        columns = ("code", "name", "family", "price", "stock", "island", "display", "discontinue", "status")
         self._tree = ttk.Treeview(tree_body, columns=columns, show="tree headings", selectmode="browse")
         self._tree.heading("#0", text="产品图")
         self._tree.column("#0", width=72, minwidth=68, stretch=False, anchor="center")
         headings = {
-            "code": ("编码", 104), "name": ("名称", 280), "family": ("系列", 92),
-            "price": ("价格", 76), "stock": ("库存", 108), "display": ("展示", 58),
-            "discontinue": ("停产", 52), "status": ("状态", 136),
+            "code": ("编码", 104), "name": ("名称", 260), "family": ("系列", 88),
+            "price": ("价格", 72), "stock": ("库存", 100), "island": ("南北岛", 76),
+            "display": ("展示", 58), "discontinue": ("停产", 52), "status": ("状态", 128),
         }
         for col, (text, width) in headings.items():
             self._tree.heading(col, text=text, command=lambda c=col: self._on_sort_column(c))
@@ -529,6 +548,117 @@ class PanelApp:
             widget.bind("<Button-4>", lambda _e: self._scroll_owner(-1))
             widget.bind("<Button-5>", lambda _e: self._scroll_owner(1))
 
+        # ── 南北岛象限 ──
+        self._tab_island = ttk.Frame(self._notebook)
+        self._notebook.add(self._tab_island, text="南北岛象限")
+        island_inner = tk.Frame(self._tab_island, bg="white")
+        island_inner.pack(fill=tk.BOTH, expand=True)
+        tk.Label(
+            island_inner,
+            text="按全国仓库存划分：北岛=Carbine+Walls，南岛=GC · 点击象限筛选下方 SKU 列表",
+            bg="white", fg=C_MUTED, font=("Segoe UI", 9),
+        ).pack(anchor="w", padx=8, pady=(6, 4))
+        self._island_unsupported_lbl = tk.Label(
+            island_inner, text="", bg="white", fg=C_CARD_GAP, font=("Segoe UI", 10),
+        )
+        self._island_unsupported_lbl.pack(anchor="w", padx=8, pady=(0, 4))
+        quadrant_wrap = tk.Frame(island_inner, bg="white")
+        quadrant_wrap.pack(fill=tk.X, padx=8, pady=(0, 8))
+        tk.Label(quadrant_wrap, text="", bg="white", width=8).grid(row=1, column=0)
+        tk.Label(
+            quadrant_wrap, text="北岛有货", bg="white", fg=C_MUTED,
+            font=("Segoe UI", 9, "bold"),
+        ).grid(row=0, column=1, padx=6, pady=(0, 4))
+        tk.Label(
+            quadrant_wrap, text="北岛无货", bg="white", fg=C_MUTED,
+            font=("Segoe UI", 9, "bold"),
+        ).grid(row=0, column=2, padx=6, pady=(0, 4))
+        tk.Label(
+            quadrant_wrap, text="南岛有货", bg="white", fg=C_MUTED,
+            font=("Segoe UI", 9, "bold"), anchor="e",
+        ).grid(row=1, column=0, padx=(0, 6), sticky="e")
+        tk.Label(
+            quadrant_wrap, text="南岛无货", bg="white", fg=C_MUTED,
+            font=("Segoe UI", 9, "bold"), anchor="e",
+        ).grid(row=2, column=0, padx=(0, 6), sticky="e")
+        for row_idx, row_keys in enumerate(panel_data.ISLAND_STOCK_GRID):
+            for col_idx, class_key in enumerate(row_keys):
+                bg, bg_active, fg = ISLAND_QUADRANT_STYLE[class_key]
+                card = tk.Frame(
+                    quadrant_wrap, bg=bg, padx=18, pady=14, cursor="hand2",
+                    highlightthickness=2, highlightbackground=C_CARD_BORDER_IDLE,
+                )
+                card.grid(row=row_idx + 1, column=col_idx + 1, padx=6, pady=6, sticky="nsew")
+                title_lbl = tk.Label(
+                    card, text=panel_data.ISLAND_STOCK_CLASSES[class_key], bg=bg, fg=fg,
+                    font=("Segoe UI", 10, "bold"), cursor="hand2",
+                )
+                title_lbl.pack(anchor="w")
+                val_lbl = tk.Label(
+                    card, text="0", bg=bg, fg=fg, font=("Segoe UI", 22, "bold"), cursor="hand2",
+                )
+                val_lbl.pack(anchor="w", pady=(4, 0))
+                hint_lbl = tk.Label(
+                    card, text="点击筛选", bg=bg, fg=fg, font=("Segoe UI", 8), cursor="hand2",
+                )
+                hint_lbl.pack(anchor="w")
+                for widget in (card, title_lbl, val_lbl, hint_lbl):
+                    widget.bind(
+                        "<Button-1>",
+                        lambda _e, key=class_key: self._on_island_quadrant_click(key),
+                    )
+                self._island_quadrant_cards[class_key] = val_lbl
+                self._island_quadrant_meta[class_key] = {
+                    "card": card, "widgets": [title_lbl, val_lbl, hint_lbl],
+                    "bg": bg, "bg_active": bg_active, "fg": fg,
+                }
+        for col in (1, 2):
+            quadrant_wrap.grid_columnconfigure(col, weight=1)
+        island_toolbar = tk.Frame(island_inner, bg="white")
+        island_toolbar.pack(fill=tk.X, padx=8, pady=(0, 4))
+        ttk.Button(
+            island_toolbar, text="清除象限筛选", style="Tool.TButton",
+            command=self._clear_island_quadrant_filter,
+        ).pack(side=tk.LEFT)
+        ttk.Button(
+            island_toolbar, text="在产品明细中查看", style="Tool.TButton",
+            command=self._open_island_selection_in_products,
+        ).pack(side=tk.LEFT, padx=(8, 0))
+        self._island_status_lbl = tk.Label(
+            island_toolbar, text="", bg="white", fg=C_MUTED, font=("Segoe UI", 9),
+        )
+        self._island_status_lbl.pack(side=tk.RIGHT)
+        island_table_wrap = tk.Frame(island_inner, bg="white")
+        island_table_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        icols = ("code", "name", "north", "south", "island", "stock", "status")
+        self._island_tree = ttk.Treeview(
+            island_table_wrap, columns=icols, show="headings",
+            selectmode="browse", style="Prefix.Treeview",
+        )
+        island_headings = {
+            "code": ("编码", 104), "name": ("名称", 280), "north": ("北岛", 64),
+            "south": ("南岛", 64), "island": ("象限", 80), "stock": ("店面库存", 88),
+            "status": ("状态", 120),
+        }
+        for col, (text, width) in island_headings.items():
+            self._island_tree.heading(col, text=text)
+            self._island_tree.column(col, width=width, anchor="center" if col != "name" else "w")
+        self._island_tree.tag_configure("ok", background=C_ROW_OK)
+        self._island_tree.tag_configure("warn", background="#fff7ed")
+        self._island_tree.tag_configure("low", background=C_ROW_GAP)
+        self._island_tree.tag_configure("alt", background=C_ROW_ALT)
+        self._island_vscroll = ttk.Scrollbar(
+            island_table_wrap, orient="vertical", command=self._island_tree.yview,
+        )
+        self._island_tree.configure(yscrollcommand=self._island_vscroll.set)
+        self._island_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._island_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._island_tree.bind("<Double-1>", self._on_island_double_click)
+        for widget in (island_inner, self._tab_island, self._island_tree):
+            widget.bind("<MouseWheel>", self._on_island_wheel)
+            widget.bind("<Button-4>", lambda _e: self._scroll_island(-1))
+            widget.bind("<Button-5>", lambda _e: self._scroll_island(1))
+
         self._placeholder_photo = self._make_placeholder_photo()
         for widget in (inner, self._tab_products, self._tree):
             widget.bind("<MouseWheel>", self._on_product_wheel)
@@ -641,6 +771,17 @@ class PanelApp:
             if self.only_exempted_var.get():
                 self.only_exempted_var.set(False)
             self._quick_filter = None
+        island_f = self.island_filter_var.get()
+        if island_f == "全部":
+            self._island_selected_class = None
+        else:
+            for class_key, label in panel_data.ISLAND_STOCK_CLASSES.items():
+                if label == island_f:
+                    self._island_selected_class = class_key
+                    break
+        self._apply_island_quadrant_styles()
+        if self._cached_products and self._cached_summary.get("island_stock_supported"):
+            self._render_island_table(self._cached_summary.get("store_specific", self._is_store_selected()))
         self._refresh_view()
 
     def _clear_card_filters(self):
@@ -1260,6 +1401,10 @@ class PanelApp:
                 and p.get("exempted")
             ):
                 continue
+            island_f = self.island_filter_var.get()
+            if island_f != "全部":
+                if p.get("island_stock_label") != island_f:
+                    continue
             out.append(p)
         return out
 
@@ -1401,7 +1546,11 @@ class PanelApp:
         self.root.update_idletasks()
         self._render_tree(filtered)
         prefix_key = (s.get("region"), s.get("store"))
-        if prefix_key != self._prefix_rendered_for or prefix_key != self._owner_rendered_for:
+        if (
+            prefix_key != self._prefix_rendered_for
+            or prefix_key != self._owner_rendered_for
+            or prefix_key != self._island_rendered_for
+        ):
             self.root.after_idle(
                 lambda: self._render_summary_tables_deferred(prefix_key, store_specific)
             )
@@ -1419,8 +1568,10 @@ class PanelApp:
             return
         self._render_prefix_table(store_specific)
         self._render_owner_table(store_specific)
+        self._render_island_quadrants(store_specific)
         self._prefix_rendered_for = prefix_key
         self._owner_rendered_for = prefix_key
+        self._island_rendered_for = prefix_key
         n = len(self._apply_client_filters(self._cached_products))
         self._status_var.set(
             f"就绪 · {n} 条"
@@ -1484,13 +1635,164 @@ class PanelApp:
     def _on_notebook_tab_change(self, _event=None):
         if not self._notebook or not self._cached_products:
             return
+        store_specific = self._cached_summary.get("store_specific", self._is_store_selected())
         try:
-            if self._notebook.select() != str(self._tab_owner):
-                return
+            selected = self._notebook.select()
         except Exception:
             return
-        store_specific = self._cached_summary.get("store_specific", self._is_store_selected())
-        self._render_owner_table(store_specific)
+        if selected == str(self._tab_owner):
+            self._render_owner_table(store_specific)
+        elif selected == str(self._tab_island):
+            self._render_island_quadrants(store_specific)
+
+    def _sync_island_filter_var(self, class_key=None):
+        if class_key:
+            self.island_filter_var.set(panel_data.ISLAND_STOCK_CLASSES[class_key])
+        else:
+            self.island_filter_var.set("全部")
+
+    def _apply_island_quadrant_styles(self):
+        for class_key, meta in self._island_quadrant_meta.items():
+            selected = self._island_selected_class == class_key
+            bg = meta["bg_active"] if selected else meta["bg"]
+            border = meta["fg"] if selected else C_CARD_BORDER_IDLE
+            thickness = 4 if selected else 2
+            meta["card"].configure(bg=bg, highlightbackground=border, highlightthickness=thickness)
+            for widget in meta["widgets"]:
+                widget.configure(bg=bg, fg=meta["fg"])
+                if isinstance(widget, tk.Label) and widget.cget("text") == "点击筛选":
+                    widget.configure(text="✓ 筛选中" if selected else "点击筛选")
+
+    def _on_island_quadrant_click(self, class_key):
+        if self._island_selected_class == class_key:
+            self._clear_island_quadrant_filter()
+            return
+        self._island_selected_class = class_key
+        self._sync_island_filter_var(class_key)
+        self._apply_island_quadrant_styles()
+        self._render_island_table()
+        self._refresh_view()
+
+    def _clear_island_quadrant_filter(self):
+        self._island_selected_class = None
+        self._sync_island_filter_var(None)
+        self._apply_island_quadrant_styles()
+        self._render_island_table()
+        self._refresh_view()
+
+    def _open_island_selection_in_products(self):
+        if self._notebook:
+            self._notebook.select(self._tab_products)
+        self._refresh_view()
+
+    def _island_row_tag(self, product, index):
+        cls = product.get("island_stock_class")
+        if cls == "both":
+            return ("ok",)
+        if cls in ("south_only", "north_only"):
+            return ("warn",)
+        if cls == "none":
+            return ("low",)
+        return ("alt",) if index % 2 == 1 else ()
+
+    def _island_status_text(self, item):
+        if item.get("ready_not_displayed") and not item.get("exempted"):
+            return "★ 双有未陈列"
+        if item.get("gap"):
+            return "★ 有货未展示"
+        if item.get("warehouse_only") and not item.get("exempted"):
+            return "仓有·店仓无"
+        if item.get("exempted"):
+            return "○ 同组已展示"
+        if item.get("discontinued"):
+            return "已停产"
+        if item.get("in_stock"):
+            return "有货"
+        return "无货"
+
+    def _render_island_quadrants(self, store_specific=True):
+        if not self._island_tree:
+            return
+        region = self._cached_summary.get("region") or self._current_region()
+        supported = bool(self._cached_summary.get("island_stock_supported"))
+        if self._island_unsupported_lbl:
+            if supported:
+                self._island_unsupported_lbl.configure(text="")
+            else:
+                self._island_unsupported_lbl.configure(
+                    text=f"当前地区 {region} 暂无南北岛划分（仅 NZ 支持）。",
+                )
+        counts = (self._cached_summary.get("island_quadrant_counts") or {})
+        for class_key, lbl in self._island_quadrant_cards.items():
+            lbl.configure(text=str(counts.get(class_key, 0)))
+        self._apply_island_quadrant_styles()
+        self._render_island_table(store_specific)
+
+    def _render_island_table(self, store_specific=True):
+        if not self._island_tree:
+            return
+        if not self._cached_summary.get("island_stock_supported"):
+            if self._island_tree.get_children():
+                self._island_tree.delete(*self._island_tree.get_children())
+            if self._island_status_lbl:
+                self._island_status_lbl.configure(text="")
+            return
+        report = panel_data.aggregate_island_quadrants(self._cached_products)
+        rows = []
+        if self._island_selected_class:
+            rows = report["rows"].get(self._island_selected_class, [])
+        else:
+            for class_key in panel_data.ISLAND_STOCK_CLASSES:
+                rows.extend(report["rows"].get(class_key, []))
+        rows.sort(key=lambda p: (
+            p.get("island_stock_class") or "",
+            not p.get("in_stock"),
+            -(p.get("north_stock_qty") or 0) - (p.get("south_stock_qty") or 0),
+            p.get("code") or "",
+        ))
+        if self._island_tree.get_children():
+            self._island_tree.delete(*self._island_tree.get_children())
+        for idx, item in enumerate(rows):
+            stock = int(item.get("stock_qty") or 0) if item.get("in_stock") else 0
+            self._island_tree.insert(
+                "", tk.END,
+                values=(
+                    item.get("code") or "",
+                    item.get("name") or "",
+                    item.get("north_stock_qty", 0),
+                    item.get("south_stock_qty", 0),
+                    item.get("island_stock_label") or "-",
+                    stock if store_specific else "-",
+                    self._island_status_text(item),
+                ),
+                tags=self._island_row_tag(item, idx),
+            )
+        if self._island_status_lbl:
+            label = (
+                panel_data.ISLAND_STOCK_CLASSES[self._island_selected_class]
+                if self._island_selected_class else "全部象限"
+            )
+            self._island_status_lbl.configure(text=f"{label} · 显示 {len(rows)} 条在产 SKU")
+
+    def _scroll_island(self, direction):
+        if self._island_tree:
+            self._island_tree.yview_scroll(direction * SCROLL_UNITS, "units")
+
+    def _on_island_wheel(self, event):
+        step = -1 if event.delta > 0 else 1
+        self._scroll_island(step)
+
+    def _on_island_double_click(self, _event=None):
+        sel = self._island_tree.selection() if self._island_tree else ()
+        if not sel:
+            return
+        values = self._island_tree.item(sel[0], "values")
+        if not values:
+            return
+        self.search_var.set(str(values[0]))
+        if self._notebook:
+            self._notebook.select(self._tab_products)
+        self._refresh_view()
 
     def _reload_owner_config(self, region=None, data_dir=None):
         region = region or self._cached_summary.get("region") or self._current_region()
@@ -1849,9 +2151,10 @@ class PanelApp:
                 status = "有货"
         else:
             status = "无货"
+        island = item.get("island_stock_label") or "-"
         return (
             item["code"], item.get("name") or "", item.get("family") or "",
-            price, stock, displayed, discontinue, status,
+            price, stock, island, displayed, discontinue, status,
         )
 
     def _insert_group_children(self, parent, items, render_token, start=0):

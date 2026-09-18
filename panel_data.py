@@ -104,6 +104,18 @@ REGION_STORE_STOCK_RULES = {
     ],
 }
 DEFAULT_ALL_WAREHOUSES = ("carbine", "walls", "geraldconnelly")
+NZ_NORTH_WAREHOUSES = ("carbine", "walls")
+NZ_SOUTH_WAREHOUSES = ("geraldconnelly",)
+ISLAND_STOCK_CLASSES = {
+    "both": "南北都有",
+    "south_only": "南有北无",
+    "north_only": "北有南无",
+    "none": "南北都没",
+}
+ISLAND_STOCK_GRID = (
+    ("both", "south_only"),
+    ("north_only", "none"),
+)
 STORE_NAME_SKIP_TOKENS = frozenset({
     "shop", "display", "store", "warehouse", "wh", "the", "for", "and", "repair", "outlet",
 })
@@ -298,6 +310,54 @@ def _warehouses_for_store(store_name, region_key, catalog_keys=None):
 
 def _qty_from_warehouses(warehouse_stock, warehouse_keys):
     return sum(float(warehouse_stock.get(k, 0) or 0) for k in warehouse_keys)
+
+
+def island_stock_supported(region_key):
+    return str(region_key or "").upper() == "NZ"
+
+
+def classify_island_stock(warehouse_stock, region_key="NZ"):
+    """按北岛(Carbine+Walls) / 南岛(GC) 库存分为四象限。"""
+    if not island_stock_supported(region_key):
+        return None, 0, 0, ""
+    north = _qty_from_warehouses(warehouse_stock or {}, NZ_NORTH_WAREHOUSES)
+    south = _qty_from_warehouses(warehouse_stock or {}, NZ_SOUTH_WAREHOUSES)
+    north_ok = north > 0
+    south_ok = south > 0
+    if north_ok and south_ok:
+        key = "both"
+    elif south_ok:
+        key = "south_only"
+    elif north_ok:
+        key = "north_only"
+    else:
+        key = "none"
+    return key, int(north), int(south), ISLAND_STOCK_CLASSES[key]
+
+
+def _enrich_island_stock(item, region_key):
+    warehouse_stock = item.get("warehouse_stock") or {}
+    cls, north_q, south_q, label = classify_island_stock(warehouse_stock, region_key)
+    item["island_stock_class"] = cls
+    item["north_stock_qty"] = north_q
+    item["south_stock_qty"] = south_q
+    item["island_stock_label"] = label
+    return item
+
+
+def aggregate_island_quadrants(products, include_discontinued=False):
+    """统计四象限 SKU 数（默认仅计在产）。"""
+    counts = {key: 0 for key in ISLAND_STOCK_CLASSES}
+    rows = {key: [] for key in ISLAND_STOCK_CLASSES}
+    for product in products:
+        if not include_discontinued and product.get("discontinued"):
+            continue
+        cls = product.get("island_stock_class")
+        if not cls:
+            continue
+        counts[cls] += 1
+        rows[cls].append(product)
+    return {"counts": counts, "rows": rows}
 
 
 def _stock_breakdown(warehouse_stock, warehouse_keys):
@@ -1692,6 +1752,8 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         item["storage_qty"] = storage_qty if in_storage else 0
         item["warehouse_only"] = warehouse_only
         item["ready_not_displayed"] = ready_not_displayed
+        if island_stock_supported(region_key):
+            _enrich_island_stock(item, region_key)
         products.append(item)
 
     if store_specific:
@@ -1718,6 +1780,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
     warehouse_only_n = 0
     ready_not_displayed_n = 0
     in_storage_n = 0
+    island_quadrant_counts = {key: 0 for key in ISLAND_STOCK_CLASSES}
     for p in products:
         disc = bool(p.get("discontinued"))
         in_stock = bool(p.get("in_stock"))
@@ -1745,6 +1808,8 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
                 warehouse_only_n += 1
             if p.get("ready_not_displayed") and not exempted:
                 ready_not_displayed_n += 1
+        if not disc and p.get("island_stock_class"):
+            island_quadrant_counts[p["island_stock_class"]] += 1
 
     summary = {
         "store": store,
@@ -1784,6 +1849,8 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         "warehouse_only_count": warehouse_only_n if store_specific else None,
         "ready_not_displayed_count": ready_not_displayed_n if store_specific else None,
         "includes_discontinued": bool(full_stock),
+        "island_stock_supported": island_stock_supported(region_key),
+        "island_quadrant_counts": island_quadrant_counts if island_stock_supported(region_key) else None,
     }
 
     products.sort(key=lambda p: (
