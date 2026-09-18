@@ -55,6 +55,14 @@ CODE_KEYS = ["productcode", "product_code", "sku", "itemcode", "item_code",
              "code", "productid", "product_id", "product", "item"]
 BLACKLIST_STEMS = ["blacklist", "sku_blacklist", "black_list", "product_blacklist"]
 BLACKLIST_KEYS = ["sku", "blacklist", "blacklistsku"] + CODE_KEYS
+CHANNEL_OWNER_STEMS = ["channel_owners", "sku_owners", "owner_channels", "channel_owner"]
+OWNER_KEYS = ["owner", "负责人", "person", "personincharge"]
+CHANNEL_KEYS = ["channel", "渠道", "sku_prefix", "prefix", "channelcode"]
+LEAD_TIME_KEYS = ["lead_time", "leadtime", "leadtime_days", "lead timedays"]
+MERGE_PRODUCT_KEYS = ["merge_products", "merge", "mergeproducts", "必须合并计算的产品"]
+MERGE_REGION_KEYS = ["merge_regions", "regions", "merge_regions", "必须合并计算的地区"]
+OWNER_NOTE_KEYS = ["note", "remark", "split_reason", "拆分原因", "备注"]
+MERGE_ALL_TOKENS = frozenset({"所有", "all", "ALL", "*", ""})
 NAME_KEYS = ["productname", "product_name", "name", "description", "desc", "title"]
 FAMILY_KEYS = ["family", "productfamily", "product_family", "category",
                "categoryname", "category_name", "group", "producttype", "type",
@@ -569,6 +577,213 @@ def expected_blacklist_path(region=None):
     """黑名单默认放置路径（Output-{region}/blacklist.csv）。"""
     region_key = str(region or default_region() or "NZ").strip().upper()
     return _region_output_dir(region_key) / "blacklist.csv"
+
+
+def expected_channel_owner_path(region=None):
+    """渠道负责人配置默认路径（Output-{region}/channel_owners.csv）。"""
+    region_key = str(region or default_region() or "NZ").strip().upper()
+    return _region_output_dir(region_key) / "channel_owners.csv"
+
+
+def _find_channel_owner_file(data_dir):
+    return _find_region_data_file(data_dir, CHANNEL_OWNER_STEMS)
+
+
+def _load_channel_owner_config(path):
+    rows = []
+    if not path or not Path(path).is_file():
+        return rows
+    for row in _read_table(path):
+        owner = str(_pick(row, OWNER_KEYS) or "").strip()
+        channel = str(_pick(row, CHANNEL_KEYS) or "").strip()
+        if not owner or not channel:
+            continue
+        lead_raw = _pick(row, LEAD_TIME_KEYS)
+        lead_time = None
+        if lead_raw is not None and str(lead_raw).strip() != "":
+            try:
+                lead_time = int(float(str(lead_raw).strip()))
+            except ValueError:
+                lead_time = str(lead_raw).strip()
+        rows.append({
+            "owner": owner,
+            "channel": channel,
+            "lead_time": lead_time,
+            "merge_products": str(_pick(row, MERGE_PRODUCT_KEYS) or "所有").strip() or "所有",
+            "merge_regions": str(_pick(row, MERGE_REGION_KEYS) or "").strip(),
+            "note": str(_pick(row, OWNER_NOTE_KEYS) or "").strip(),
+        })
+    return rows
+
+
+def load_channel_owner_config(region=None, data_dir=None):
+    region_key = str(region or default_region() or "NZ").strip().upper()
+    base = Path(data_dir) if data_dir else _region_output_dir(region_key)
+    path = _find_channel_owner_file(base)
+    rows = _load_channel_owner_config(path)
+    return rows, str(path) if path else None
+
+
+def _prefix_number(code):
+    text = sku_prefix(code)
+    return int(text) if text.isdigit() else None
+
+
+def product_matches_channel(code, channel_rule):
+    """渠道列支持 271、155-319（前三位数值区间）等。"""
+    rule = str(channel_rule or "").strip()
+    if not rule:
+        return False
+    prefix = sku_prefix(code)
+    if re.fullmatch(r"\d+-\d+", rule):
+        lo_s, hi_s = rule.split("-", 1)
+        pnum = _prefix_number(code)
+        if pnum is not None:
+            return int(lo_s) <= pnum <= int(hi_s)
+    if prefix == rule[:3] or prefix == rule:
+        return True
+    return code.upper().startswith(rule.upper())
+
+
+def _token_in_product(token, product):
+    needle = str(token or "").strip().lower()
+    if not needle:
+        return False
+    for field in (product.get("family"), product.get("name")):
+        if field and needle in str(field).lower():
+            return True
+    return False
+
+
+def _is_merge_all(merge_products):
+    return str(merge_products or "所有").strip() in MERGE_ALL_TOKENS
+
+
+def _compute_bucket_stats(products, merge_products, store_specific):
+    """按渠道行配置计算统计单位；合并组=每个 token 至少有一款有货才算 1 个有货单位。"""
+    if not products:
+        return 0, 0, 0, 0
+    if _is_merge_all(merge_products):
+        total = len(products)
+        in_stock = sum(1 for p in products if p.get("in_stock"))
+        gap = sum(1 for p in products if p.get("gap")) if store_specific else 0
+        exempted = sum(1 for p in products if p.get("exempted")) if store_specific else 0
+        return total, in_stock, gap, exempted
+
+    tokens = [t.strip() for t in str(merge_products).split("+") if t.strip()]
+    matched = [p for p in products if any(_token_in_product(t, p) for t in tokens)]
+    remaining = [p for p in products if p not in matched]
+
+    total_units = in_stock_units = gap_units = exempted_units = 0
+    if tokens and matched:
+        total_units += 1
+        group_in_stock = all(
+            any(_token_in_product(t, p) and p.get("in_stock") for p in matched)
+            for t in tokens
+        )
+        if group_in_stock:
+            in_stock_units += 1
+        if store_specific:
+            if any(p.get("gap") for p in matched):
+                gap_units += 1
+            if any(p.get("exempted") for p in matched):
+                exempted_units += 1
+
+    for p in remaining:
+        total_units += 1
+        if p.get("in_stock"):
+            in_stock_units += 1
+        if store_specific and p.get("gap"):
+            gap_units += 1
+        if store_specific and p.get("exempted"):
+            exempted_units += 1
+    return total_units, in_stock_units, gap_units, exempted_units
+
+
+def _owner_for_prefix(prefix, config_rows):
+    for row in config_rows:
+        if product_matches_channel(f"{prefix}-000", row["channel"]):
+            return row["owner"]
+    return ""
+
+
+def aggregate_by_channel_owner(products, region=None, store_specific=True, config_rows=None):
+    """按 channel_owners.csv 生成负责人汇总 + 渠道明细。"""
+    if config_rows is None:
+        config_rows, _ = load_channel_owner_config(region)
+    if not config_rows:
+        return {"owners": [], "channels": [], "config_rows": 0}
+
+    active = [p for p in products if not p.get("discontinued")]
+    channel_rows = []
+    for cfg in config_rows:
+        matched = [p for p in active if product_matches_channel(p.get("code", ""), cfg["channel"])]
+        if not matched:
+            continue
+        if not _is_merge_all(cfg["merge_products"]):
+            tokens = [t.strip() for t in cfg["merge_products"].split("+") if t.strip()]
+            matched = [p for p in matched if any(_token_in_product(t, p) for t in tokens)]
+            if not matched:
+                continue
+        total, in_stock, gap, exempted = _compute_bucket_stats(
+            matched, cfg["merge_products"], store_specific,
+        )
+        channel_rows.append({
+            "owner": cfg["owner"],
+            "channel": cfg["channel"],
+            "lead_time": cfg.get("lead_time"),
+            "merge_products": cfg["merge_products"],
+            "merge_regions": cfg.get("merge_regions") or "",
+            "note": cfg.get("note") or "",
+            "sku_count": len(matched),
+            "total_units": total,
+            "in_stock_units": in_stock,
+            "in_stock_rate": round(in_stock / total * 100, 1) if total else None,
+            "gap_count": gap if store_specific else None,
+            "exempted_count": exempted if store_specific else None,
+        })
+
+    channel_rows.sort(key=lambda r: (r["owner"].lower(), -(r["in_stock_rate"] or 0), r["channel"]))
+
+    owner_buckets = {}
+    for row in channel_rows:
+        bucket = owner_buckets.setdefault(row["owner"], {
+            "owner": row["owner"],
+            "channel_count": 0,
+            "sku_count": 0,
+            "total_units": 0,
+            "in_stock_units": 0,
+            "gap_count": 0,
+            "exempted_count": 0,
+        })
+        bucket["channel_count"] += 1
+        bucket["sku_count"] += row["sku_count"]
+        bucket["total_units"] += row["total_units"]
+        bucket["in_stock_units"] += row["in_stock_units"]
+        if store_specific:
+            bucket["gap_count"] += row.get("gap_count") or 0
+            bucket["exempted_count"] += row.get("exempted_count") or 0
+
+    owner_rows = []
+    for owner, bucket in owner_buckets.items():
+        total = bucket["total_units"]
+        in_stock = bucket["in_stock_units"]
+        owner_rows.append({
+            "owner": owner,
+            "channel_count": bucket["channel_count"],
+            "sku_count": bucket["sku_count"],
+            "total_units": total,
+            "in_stock_units": in_stock,
+            "in_stock_rate": round(in_stock / total * 100, 1) if total else None,
+            "gap_count": bucket["gap_count"] if store_specific else None,
+            "exempted_count": bucket["exempted_count"] if store_specific else None,
+        })
+    owner_rows.sort(key=lambda r: (-(r["in_stock_rate"] or 0), r["owner"].lower()))
+    return {
+        "owners": owner_rows,
+        "channels": channel_rows,
+        "config_rows": len(config_rows),
+    }
 
 
 def _ensure_discontinued_rows(bundle):
@@ -1166,7 +1381,8 @@ def sku_prefix(code, length=SKU_PREFIX_LEN):
     return text[:length] if text else "???"
 
 
-def aggregate_by_sku_prefix(products, prefix_len=SKU_PREFIX_LEN, store_specific=True):
+def aggregate_by_sku_prefix(products, prefix_len=SKU_PREFIX_LEN, store_specific=True,
+                              owner_config=None):
     """按 SKU 前三位汇总；产品数仅计在产（non-discontinue）SKU。"""
     buckets = {}
     for p in products:
@@ -1189,6 +1405,7 @@ def aggregate_by_sku_prefix(products, prefix_len=SKU_PREFIX_LEN, store_specific=
             exempted = []
         rows.append({
             "prefix": prefix,
+            "owner": _owner_for_prefix(prefix, owner_config) if owner_config else "",
             "total": total,
             "in_stock_count": in_stock_n,
             "in_stock_rate": round(in_stock_n / total * 100, 1) if total else None,
