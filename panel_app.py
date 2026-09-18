@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.8.3"
+APP_VERSION = "1.8.4"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -165,7 +165,7 @@ class PanelApp:
         self.search_var = tk.StringVar()
         self.stock_filter_var = tk.StringVar(value="全部")
         self.display_filter_var = tk.StringVar(value="全部")
-        self.discontinue_filter_var = tk.StringVar(value="全部")
+        self.discontinue_filter_var = tk.StringVar(value="在产")
         self.group_sort_var = tk.StringVar(value="库存总数多到少")
         self.load_images_var = tk.BooleanVar(value=True)
         self.result_count_var = tk.StringVar(value="")
@@ -1071,6 +1071,14 @@ class PanelApp:
             fg = C_MUTED
         self._blacklist_lbl.configure(text=text, fg=fg)
 
+    def _safe_apply_loaded_data(self, data, region):
+        try:
+            self._apply_loaded_data(data, region)
+        except Exception as exc:
+            self._status_var.set(f"界面更新失败：{exc}")
+            if "gap" in self._stat_labels:
+                self._stat_labels["gap"].configure(text="!")
+
     def _apply_loaded_data(self, data, region):
         self._cached_products = data["products"]
         self._cached_summary = data["summary"]
@@ -1100,17 +1108,17 @@ class PanelApp:
             src_line += "  |  ⚠ 无 ImageUrl"
         self.source_var.set(src_line)
         self._update_blacklist_label()
-        owner_cfg, owner_path = panel_data.load_channel_owner_config(
-            region, data.get("data_dir") or self._cached_data_dir,
-        )
+        try:
+            owner_cfg, owner_path = panel_data.load_channel_owner_config(
+                region, data.get("data_dir") or self._cached_data_dir,
+            )
+        except Exception:
+            owner_cfg, owner_path = [], ""
         self._cached_owner_config = owner_cfg
         self._cached_owner_path = owner_path or ""
         self._prefix_rendered_for = None
         self._owner_rendered_for = None
-        self._loaded_full_stock = (
-            panel_data.EAGER_DISCONTINUED_STOCK
-            or self.discontinue_filter_var.get() in ("全部", "已停产")
-        )
+        self._loaded_full_stock = bool(data.get("summary", {}).get("includes_discontinued"))
         self._refresh_view()
 
     def _cache_key(self, region, store, include_discontinued):
@@ -1129,74 +1137,48 @@ class PanelApp:
         region = self._current_region()
         store = self.store_combo.get() if self.store_combo else self.store_var.get()
         need_disc = self._needs_discontinued_stock()
-        full_key = self._cache_key(region, store, True)
-        active_key = self._cache_key(region, store, False)
+        cache_key = self._cache_key(region, store, need_disc)
 
         if force:
             self._products_cache = {}
             panel_data.clear_region_cache(region)
 
-        if not force:
-            if need_disc and full_key in self._products_cache:
-                self._apply_loaded_data(self._products_cache[full_key], region)
-                return
-            if not need_disc and active_key in self._products_cache:
-                self._apply_loaded_data(self._products_cache[active_key], region)
-                return
+        if not force and cache_key in self._products_cache:
+            self._safe_apply_loaded_data(self._products_cache[cache_key], region)
+            return
 
-        self._show_loading_state("正在计算店面数据…（在产）")
+        loading_msg = "正在计算店面数据…"
+        if need_disc:
+            loading_msg += "（含停产）"
+        self._show_loading_state(loading_msg)
         self._set_controls_state(False)
         self._set_busy(True)
 
-        def worker_active():
+        def worker():
             return panel_data.build_products(
-                store=store, only_gap=False, include_discontinued=False,
+                store=store, only_gap=False, include_discontinued=need_disc,
                 region=region, force_refresh=force,
             )
 
-        def done_active(err, data):
-            if token != self._reload_token:
-                return
-            if err:
-                self._set_busy(False)
-                self._set_controls_state(True)
-                self._stat_labels["gap"].configure(text="!")
-                self._status_var.set(f"加载失败：{err}")
-                return
-
-            self._products_cache[active_key] = data
-            if need_disc:
-                self._apply_loaded_data(data, region)
-                self._status_var.set("在产数据已就绪，正在后台加载停产…")
-                self._set_controls_state(True)
-
-                def worker_full():
-                    return panel_data.build_products(
-                        store=store, only_gap=False, include_discontinued=True,
-                        region=region, force_refresh=False,
-                    )
-
-                def done_full(err2, data2):
-                    if token != self._reload_token:
-                        return
-                    self._set_busy(False)
-                    if err2:
-                        self._status_var.set(f"停产数据加载失败：{err2}（在产数据仍可用）")
-                        return
-                    self._products_cache[full_key] = data2
-                    self._apply_loaded_data(data2, region)
-                    if store != panel_data.ALL_STORES:
-                        self._schedule_store_prewarm(region, store, include_discontinued=False)
-
-                self._run_bg(worker_full, done_full)
-            else:
-                self._set_busy(False)
-                self._set_controls_state(True)
-                self._apply_loaded_data(data, region)
+        def done(err, data):
+            try:
+                if token != self._reload_token:
+                    return
+                if err:
+                    self._status_var.set(f"加载失败：{err}")
+                    if "gap" in self._stat_labels:
+                        self._stat_labels["gap"].configure(text="!")
+                    return
+                self._products_cache[cache_key] = data
+                self._safe_apply_loaded_data(data, region)
                 if store != panel_data.ALL_STORES:
                     self._schedule_store_prewarm(region, store, include_discontinued=False)
+            finally:
+                if token == self._reload_token:
+                    self._set_busy(False)
+                    self._set_controls_state(True)
 
-        self._run_bg(worker_active, done_active)
+        self._run_bg(worker, done)
 
     def _apply_client_filters(self, products):
         q = self.search_var.get().strip().lower()

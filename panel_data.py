@@ -662,9 +662,7 @@ def _load_channel_owner_config(path):
     suffix = Path(path).suffix.lower()
     if suffix == ".xlsx":
         if _load_workbook is None:
-            raise ValueError(
-                f"负责人配置为 Excel（{Path(path).name}），请另存为 channel_owner.csv，或运行：pip install openpyxl"
-            )
+            return rows
         wb = _load_workbook(path, read_only=True, data_only=True)
         ws = wb.active
         raw = []
@@ -1714,6 +1712,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         "in_storage_count": in_storage_n if store_specific else None,
         "warehouse_only_count": warehouse_only_n if store_specific else None,
         "ready_not_displayed_count": ready_not_displayed_n if store_specific else None,
+        "includes_discontinued": bool(full_stock),
     }
 
     products.sort(key=lambda p: (
