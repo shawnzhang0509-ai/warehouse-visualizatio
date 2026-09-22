@@ -1,4 +1,17 @@
 region_runner_config.local.json
+# 各人本地的 On Hold / 配件 SQL（与 blacklist 一样，不进仓库）
+Data-NZ/on_hold.txt
+Data-NZ/on_hold.sql
+Data-NZ/parts.txt
+Data-NZ/parts.sql
+Data-AU/on_hold.txt
+Data-AU/on_hold.sql
+Data-AU/parts.txt
+Data-AU/parts.sql
+Data-CA/on_hold.txt
+Data-CA/on_hold.sql
+Data-CA/parts.txt
+Data-CA/parts.sql
 __pycache__/
 *.pyc
 data/daily_snapshots.json

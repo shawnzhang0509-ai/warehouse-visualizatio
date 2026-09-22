@@ -11,7 +11,9 @@
 | display_with_families.sql / display.sql | display.csv（**陈列区** `%Display%`） |
 | **storage.sql** | **storage.csv**（**店面后仓** `%Storage%`，勿覆盖 display） |
 | **on_hold.txt** / on_hold.sql | **on_hold.csv**（`StockOnHoldStatus` 冻结库存） |
-| **parts.txt** / parts.sql | **parts.csv**（配件库存，可按业务改 WHERE） |
+| **parts.txt** / parts.sql | **parts.csv**（配件库存） |
+
+`on_hold.txt` / `parts.txt` **只放你本机**（已加入 `.gitignore`，`git pull` 不会覆盖）。仓库里仅有 `on_hold.example.txt`、`parts.example.txt` 作参考。
 | weekly_sales.sql | weekly_sales.csv |
 
 **两个 stock 模板请一起执行（两库）。** 看板启动时会读 `stock.csv` + `stock_discontinued.csv`，状态栏会显示 `stock.csv + stock_discontinued.csv（两库）`。只导出一个文件时，停产=「全部」会缺数据。

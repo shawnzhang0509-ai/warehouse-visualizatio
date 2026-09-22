@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.3"
+APP_VERSION = "1.9.14"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -135,6 +135,15 @@ class PanelApp:
         self._island_selected_class = None
         self._mining_tree = None
         self._mining_vscroll = None
+        self._mining_transfer_tree = None
+        self._mining_transfer_vscroll = None
+        self._mining_onhold_tree = None
+        self._mining_onhold_vscroll = None
+        self._onhold_summary_frame = None
+        self._onhold_status_combo = None
+        self._mining_onhold_render_token = 0
+        self._mining_onhold_row_data = {}
+        self._mining_notebook = None
         self._mining_rendered_for = None
         self._island_groups_canvas = None
         self._island_groups_frame = None
@@ -202,6 +211,7 @@ class PanelApp:
         self._island_owner_filter_var = tk.StringVar(value="全部负责人")
         self._island_channel_filter_var = tk.StringVar(value="全部渠道")
         self._mining_kind_var = tk.StringVar(value="全部")
+        self._onhold_status_filter_var = tk.StringVar(value="全部状态")
         self.load_images_var = tk.BooleanVar(value=True)
         self.result_count_var = tk.StringVar(value="")
         self._status_var = tk.StringVar(value="")
@@ -566,7 +576,7 @@ class PanelApp:
         island_inner.pack(fill=tk.BOTH, expand=True)
         tk.Label(
             island_inner,
-            text="按全国仓库存划分：北岛=Carbine+Walls，南岛=GC · 先选负责人，再选其下属渠道",
+            text="按全国仓库存划分：北岛=Carbine+Walls，南岛=GC · 先选负责人，再选渠道（SKU 前三位，如 130、830）",
             bg="white", fg=C_MUTED, font=("Segoe UI", 9),
         ).pack(anchor="w", padx=8, pady=(6, 4))
         island_filter_bar = tk.Frame(island_inner, bg="white")
@@ -593,11 +603,14 @@ class PanelApp:
             side=tk.LEFT,
         )
         self._island_channel_combo = ttk.Combobox(
-            island_filter_bar, width=12, state="readonly", textvariable=self._island_channel_filter_var,
+            island_filter_bar, width=12, state="disabled", textvariable=self._island_channel_filter_var,
             values=["全部渠道"],
         )
         self._island_channel_combo.pack(side=tk.LEFT, padx=(6, 12))
         self._island_channel_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_island_channel_change())
+        self._island_channel_combo.bind(
+            "<FocusOut>", lambda _e: self.root.after_idle(self._on_island_channel_change),
+        )
         self._island_unsupported_lbl = tk.Label(
             island_inner, text="", bg="white", fg=C_CARD_GAP, font=("Segoe UI", 10),
         )
@@ -732,11 +745,20 @@ class PanelApp:
         mining_inner.pack(fill=tk.BOTH, expand=True)
         tk.Label(
             mining_inner,
-            text="读取 Output 目录 on_hold.csv / parts.csv（由 Data-NZ 的 on_hold.txt、parts.txt 导出）",
+            text="读取 Output 目录 on_hold.csv / parts.csv ·「跨仓借调」按 Carbine / Walls / CHCH 合并 Parts 估算可凑套数",
             bg="white", fg=C_MUTED, font=("Segoe UI", 9),
         ).pack(anchor="w", padx=8, pady=(6, 4))
-        mining_toolbar = tk.Frame(mining_inner, bg="white")
-        mining_toolbar.pack(fill=tk.X, padx=8, pady=(0, 6))
+        self._mining_status_lbl = tk.Label(
+            mining_inner, text="", bg="white", fg=C_MUTED, font=("Segoe UI", 9),
+        )
+        self._mining_status_lbl.pack(anchor="e", padx=8, pady=(0, 4))
+        self._mining_notebook = ttk.Notebook(mining_inner)
+        self._mining_notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        self._mining_list_tab = ttk.Frame(self._mining_notebook)
+        self._mining_notebook.add(self._mining_list_tab, text="库存清单")
+        mining_list_tab = self._mining_list_tab
+        mining_toolbar = tk.Frame(mining_list_tab, bg="white")
+        mining_toolbar.pack(fill=tk.X, pady=(6, 6))
         tk.Label(mining_toolbar, text="类型", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(side=tk.LEFT)
         self._mining_kind_combo = ttk.Combobox(
             mining_toolbar, width=12, state="readonly", textvariable=self._mining_kind_var,
@@ -744,12 +766,8 @@ class PanelApp:
         )
         self._mining_kind_combo.pack(side=tk.LEFT, padx=(6, 12))
         self._mining_kind_combo.bind("<<ComboboxSelected>>", lambda _e: self._render_mining_table())
-        self._mining_status_lbl = tk.Label(
-            mining_toolbar, text="", bg="white", fg=C_MUTED, font=("Segoe UI", 9),
-        )
-        self._mining_status_lbl.pack(side=tk.RIGHT)
-        mining_table_wrap = tk.Frame(mining_inner, bg="white")
-        mining_table_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        mining_table_wrap = tk.Frame(mining_list_tab, bg="white")
+        mining_table_wrap.pack(fill=tk.BOTH, expand=True)
         mcols = ("kind", "code", "name", "family", "qty", "detail", "warehouses")
         self._mining_tree = ttk.Treeview(
             mining_table_wrap, columns=mcols, show="headings",
@@ -775,7 +793,99 @@ class PanelApp:
         self._mining_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._mining_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._mining_tree.bind("<Double-1>", self._on_mining_double_click)
-        for widget in (mining_inner, self._tab_mining, self._mining_tree):
+
+        self._mining_onhold_tab = ttk.Frame(self._mining_notebook)
+        self._mining_notebook.add(self._mining_onhold_tab, text="On Hold 分析")
+        onhold_tab = self._mining_onhold_tab
+        tk.Label(
+            onhold_tab,
+            text="按 StockOnHoldStatus 汇总；冻结天数需 CSV 含 OnHoldDate/HoldSince 等列（否则仅显示状态与数量）",
+            bg="white", fg=C_MUTED, font=("Segoe UI", 9), wraplength=920, justify="left",
+        ).pack(anchor="w", padx=4, pady=(6, 4))
+        self._onhold_summary_frame = tk.Frame(onhold_tab, bg="white")
+        self._onhold_summary_frame.pack(fill=tk.X, padx=4, pady=(0, 6))
+        onhold_toolbar = tk.Frame(onhold_tab, bg="white")
+        onhold_toolbar.pack(fill=tk.X, padx=4, pady=(0, 6))
+        tk.Label(onhold_toolbar, text="状态", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        self._onhold_status_combo = ttk.Combobox(
+            onhold_toolbar, width=28, state="readonly", textvariable=self._onhold_status_filter_var,
+            values=["全部状态"],
+        )
+        self._onhold_status_combo.pack(side=tk.LEFT, padx=(6, 12))
+        self._onhold_status_combo.bind("<<ComboboxSelected>>", lambda _e: self._render_on_hold_analysis())
+        ttk.Button(
+            onhold_toolbar, text="查看图片", style="Tool.TButton",
+            command=self._open_onhold_selected_image,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        onhold_wrap = tk.Frame(onhold_tab, bg="white")
+        onhold_wrap.pack(fill=tk.BOTH, expand=True)
+        ohcols = ("code", "name", "status", "hold_days", "hold_since", "qty", "warehouses")
+        self._mining_onhold_tree = ttk.Treeview(
+            onhold_wrap, columns=ohcols, show="tree headings", selectmode="browse",
+        )
+        self._mining_onhold_tree.heading("#0", text="图")
+        self._mining_onhold_tree.column("#0", width=56, minwidth=52, stretch=False, anchor="center")
+        onhold_headings = {
+            "code": ("编码", 100), "name": ("名称", 220), "status": ("On Hold 类型", 140),
+            "hold_days": ("冻结天数", 72), "hold_since": ("起始日", 88), "qty": ("数量", 56),
+            "warehouses": ("仓", 200),
+        }
+        for col, (text, width) in onhold_headings.items():
+            self._mining_onhold_tree.heading(col, text=text)
+            self._mining_onhold_tree.column(
+                col, width=width, anchor="center" if col not in ("name", "warehouses", "status") else "w",
+            )
+        self._mining_onhold_tree.tag_configure("hold", background="#fef3c7")
+        self._mining_onhold_tree.tag_configure("alt", background=C_ROW_ALT)
+        self._mining_onhold_vscroll = ttk.Scrollbar(
+            onhold_wrap, orient="vertical", command=self._mining_onhold_tree.yview,
+        )
+        self._mining_onhold_tree.configure(yscrollcommand=self._mining_onhold_vscroll.set)
+        self._mining_onhold_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._mining_onhold_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._mining_onhold_tree.bind("<Double-1>", self._on_mining_onhold_double_click)
+
+        self._mining_transfer_tab = ttk.Frame(self._mining_notebook)
+        self._mining_notebook.add(self._mining_transfer_tab, text="跨仓借调")
+        mining_transfer_tab = self._mining_transfer_tab
+        tk.Label(
+            mining_transfer_tab,
+            text="现有合计=三仓各自成套数之和；调货后=Parts 在 Carbine/Walls/CHCH 间借调后可凑的最大套数；借调收益=调货后−现有合计",
+            bg="white", fg=C_MUTED, font=("Segoe UI", 9), wraplength=900, justify="left",
+        ).pack(anchor="w", padx=4, pady=(6, 4))
+        transfer_wrap = tk.Frame(mining_transfer_tab, bg="white")
+        transfer_wrap.pack(fill=tk.BOTH, expand=True, padx=0, pady=(0, 6))
+        tcols = (
+            "parent", "name", "part_count", "sets_carbine", "sets_walls", "sets_chch",
+            "sets_current", "sets_after", "gain", "distribution",
+        )
+        self._mining_transfer_tree = ttk.Treeview(
+            transfer_wrap, columns=tcols, show="headings",
+            selectmode="browse", style="Prefix.Treeview",
+        )
+        transfer_headings = {
+            "parent": ("母件 SKU", 88), "name": ("名称", 200), "part_count": ("部件数", 56),
+            "sets_carbine": ("Carbine", 64), "sets_walls": ("Walls", 56), "sets_chch": ("CHCH", 56),
+            "sets_current": ("现有合计", 72), "sets_after": ("调货后", 64), "gain": ("借调收益", 72),
+            "distribution": ("Parts 分布", 280),
+        }
+        for col, (text, width) in transfer_headings.items():
+            self._mining_transfer_tree.heading(col, text=text)
+            self._mining_transfer_tree.column(
+                col, width=width, anchor="center" if col not in ("name", "distribution") else "w",
+            )
+        self._mining_transfer_tree.tag_configure("gain", background="#dcfce7")
+        self._mining_transfer_tree.tag_configure("alt", background=C_ROW_ALT)
+        self._mining_transfer_vscroll = ttk.Scrollbar(
+            transfer_wrap, orient="vertical", command=self._mining_transfer_tree.yview,
+        )
+        self._mining_transfer_tree.configure(yscrollcommand=self._mining_transfer_vscroll.set)
+        self._mining_transfer_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._mining_transfer_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._mining_transfer_tree.bind("<Double-1>", self._on_mining_transfer_double_click)
+        self._mining_notebook.bind("<<NotebookTabChanged>>", self._on_mining_tab_changed)
+
+        for widget in (mining_inner, self._tab_mining, self._mining_tree, self._mining_onhold_tree, self._mining_transfer_tree):
             widget.bind("<MouseWheel>", self._on_mining_wheel)
             widget.bind("<Button-4>", lambda _e: self._scroll_mining(-1))
             widget.bind("<Button-5>", lambda _e: self._scroll_mining(1))
@@ -1691,7 +1801,7 @@ class PanelApp:
         self._render_prefix_table(store_specific)
         self._render_owner_table(store_specific)
         self._render_island_quadrants(store_specific)
-        self._render_mining_table()
+        self._render_mining_panels()
         self._prefix_rendered_for = prefix_key
         self._owner_rendered_for = prefix_key
         self._island_rendered_for = prefix_key
@@ -1769,7 +1879,7 @@ class PanelApp:
         elif selected == str(self._tab_island):
             self._render_island_quadrants(store_specific)
         elif selected == str(self._tab_mining):
-            self._render_mining_table()
+            self._render_mining_panels()
 
     def _mining_kind_key(self):
         kind = self._mining_kind_var.get()
@@ -1816,19 +1926,321 @@ class PanelApp:
             )
         oh_n = len(bundle.get("on_hold_by_code") or {})
         pt_n = len(bundle.get("parts_by_code") or {})
+        oh_rows = int(bundle.get("on_hold_row_count") or 0)
+        pt_rows = int(bundle.get("parts_row_count") or 0)
         if self._mining_status_lbl:
+            oh_diag = panel_data.diagnose_on_hold_bundle(bundle)
             if oh_n or pt_n:
                 self._mining_status_lbl.configure(
                     text=f"On Hold {oh_n} SKU · 配件 {pt_n} SKU · 当前显示 {len(rows)} 条",
                 )
+            elif oh_rows or pt_rows:
+                parts_hint = (
+                    f"parts {pt_rows} 行未识别 SKU"
+                    if pt_rows and not pt_n else f"parts {pt_rows} 行"
+                )
+                oh_hint = oh_diag or f"on_hold {oh_rows} 行未识别 SKU"
+                self._mining_status_lbl.configure(text=f"{oh_hint} · {parts_hint} · 请点「刷新数据」")
             else:
                 self._mining_status_lbl.configure(
-                    text="请执行 on_hold.txt / parts.txt 导出到 Output-NZ 后点「刷新数据」",
+                    text=oh_diag or "请执行 on_hold.txt / parts.txt 导出到 Output-NZ 后点「刷新数据」",
                 )
 
+    def _render_mining_panels(self):
+        self._render_mining_table()
+        self._render_on_hold_analysis()
+        self._render_mining_transfer_table()
+
+    def _on_mining_tab_changed(self, _event=None):
+        if not self._mining_notebook:
+            return
+        selected = str(self._mining_notebook.select())
+        if self._mining_onhold_tab and selected == str(self._mining_onhold_tab):
+            self._render_on_hold_analysis()
+        elif self._mining_transfer_tab and selected == str(self._mining_transfer_tab):
+            self._render_mining_transfer_table()
+
+    def _catalog_by_norm(self):
+        out = {}
+        for product in self._cached_products or []:
+            norm = product.get("norm_code") or panel_data._norm_code(product.get("code"))
+            if norm:
+                out[norm] = product
+        return out
+
+    def _clear_onhold_summary_cards(self):
+        if not self._onhold_summary_frame:
+            return
+        for child in self._onhold_summary_frame.winfo_children():
+            child.destroy()
+
+    def _render_on_hold_summary(self, status_rows):
+        self._clear_onhold_summary_cards()
+        if not self._onhold_summary_frame:
+            return
+        if not status_rows:
+            try:
+                bundle = panel_data.get_region_bundle(
+                    self._cached_summary.get("region") or self._current_region(),
+                )
+            except Exception:
+                bundle = {}
+            diag = panel_data.diagnose_on_hold_bundle(bundle) or "暂无 On Hold 数据"
+            tk.Label(
+                self._onhold_summary_frame, text=diag, bg="white", fg="#b45309",
+                font=("Segoe UI", 9), wraplength=920, justify="left",
+            ).pack(anchor="w")
+            return
+        for row in status_rows[:8]:
+            text = (
+                f"{row.get('status')}：{row.get('sku_count', 0)} SKU · "
+                f"{row.get('total_qty', 0)} 件 · {row.get('row_count', 0)} 行"
+            )
+            tk.Label(
+                self._onhold_summary_frame, text=text, bg="#fef3c7", fg="#92400e",
+                font=("Segoe UI", 9), padx=8, pady=4,
+            ).pack(side=tk.LEFT, padx=(0, 8), pady=2)
+
+    def _apply_onhold_row_image(self, iid, photo, cache_key):
+        if photo:
+            self._img_cache[cache_key] = photo
+        if self._mining_onhold_tree and self._mining_onhold_tree.exists(iid):
+            self._mining_onhold_tree.item(iid, image=photo or self._placeholder_photo)
+
+    def _schedule_onhold_row_image(self, iid, raw, render_token):
+        if not raw or not self._images_enabled():
+            return
+        cache_key = f"{raw}@{THUMB[0]}x{THUMB[1]}"
+        if cache_key in self._img_cache:
+            self._apply_onhold_row_image(iid, self._img_cache[cache_key], cache_key)
+            return
+        waiters = self._pending_urls.setdefault(raw, set())
+        waiters.add((f"onhold:{iid}", render_token))
+        if raw in self._loading_urls:
+            return
+        self._loading_urls.add(raw)
+
+        def worker():
+            photo = None
+            try:
+                with self._image_semaphore:
+                    if str(raw).lower().startswith(("http://", "https://")):
+                        data = self._fetch_image_bytes(raw)
+                        if Image is not None:
+                            photo = self._pil_to_photo(Image.open(io.BytesIO(data)))
+                    else:
+                        path = Path(raw)
+                        if not path.is_absolute():
+                            path = Path(panel_data.ROOT_DIR) / path
+                        if path.is_file() and Image is not None:
+                            photo = self._pil_to_photo(Image.open(path))
+            except Exception:
+                photo = None
+
+            def apply():
+                self._loading_urls.discard(raw)
+                targets = list(self._pending_urls.pop(raw, set()))
+                if photo:
+                    self._img_cache[cache_key] = photo
+                for target, token in targets:
+                    if not str(target).startswith("onhold:") or token != self._mining_onhold_render_token:
+                        continue
+                    oid = str(target).split(":", 1)[1]
+                    self._apply_onhold_row_image(oid, photo, cache_key)
+
+            if self.root.winfo_exists():
+                self.root.after(0, apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _render_on_hold_analysis(self):
+        if not self._mining_onhold_tree:
+            return
+        region = self._cached_summary.get("region") or self._current_region()
+        try:
+            bundle = panel_data.get_region_bundle(region)
+        except Exception:
+            bundle = {}
+        status_rows = panel_data.aggregate_on_hold_by_status(
+            on_hold_rows=bundle.get("on_hold_rows"),
+            on_hold_by_code=bundle.get("on_hold_by_code"),
+        )
+        self._render_on_hold_summary(status_rows)
+        options = ["全部状态"] + [r["status"] for r in status_rows]
+        if self._onhold_status_combo:
+            self._onhold_status_combo.configure(values=options)
+            if self._onhold_status_filter_var.get() not in options:
+                self._onhold_status_filter_var.set("全部状态")
+        status_f = self._onhold_status_filter_var.get()
+        rows = panel_data.list_on_hold_analysis(
+            bundle, status_filter=status_f, catalog_by_norm=self._catalog_by_norm(),
+        )
+        self._mining_onhold_render_token += 1
+        token = self._mining_onhold_render_token
+        self._mining_onhold_row_data = {}
+        if self._mining_onhold_tree.get_children():
+            self._mining_onhold_tree.delete(*self._mining_onhold_tree.get_children())
+        for idx, row in enumerate(rows):
+            wh_text = "、".join(
+                f"{w.get('warehouse', '')} {int(w.get('qty', 0))}"
+                for w in (row.get("warehouses") or [])[:4]
+            )
+            if len(row.get("warehouses") or []) > 4:
+                wh_text += "…"
+            hold_days = row.get("hold_days")
+            hold_days_text = str(hold_days) if hold_days is not None else "-"
+            iid = self._mining_onhold_tree.insert(
+                "", tk.END,
+                image=self._placeholder_photo,
+                values=(
+                    row.get("code") or "",
+                    row.get("name") or "",
+                    row.get("status") or "-",
+                    hold_days_text,
+                    row.get("hold_since") or "-",
+                    int(row.get("qty") or 0),
+                    wh_text or "-",
+                ),
+                tags=("hold", "alt") if idx % 2 else ("hold",),
+            )
+            self._mining_onhold_row_data[iid] = row
+            raw = self._image_url_for_item(row)
+            if raw:
+                self._schedule_onhold_row_image(iid, raw, token)
+        if self._mining_status_lbl and self._mining_notebook:
+            on_tab = (
+                self._mining_onhold_tab
+                and str(self._mining_notebook.select()) == str(self._mining_onhold_tab)
+            )
+            if on_tab:
+                if not rows:
+                    diag = panel_data.diagnose_on_hold_bundle(bundle)
+                    self._mining_status_lbl.configure(
+                        text=diag or "On Hold 0 SKU",
+                    )
+                else:
+                    no_date = sum(1 for r in rows if r.get("hold_days") is None)
+                    hint = f"On Hold {len(rows)} SKU"
+                    if status_rows:
+                        hint += f" · {len(status_rows)} 种状态"
+                    if no_date:
+                        hint += f" · {no_date} 个无冻结日期（请在 on_hold SQL 导出 OnHoldDate）"
+                    self._mining_status_lbl.configure(text=hint)
+
+    def _open_onhold_selected_image(self):
+        sel = self._mining_onhold_tree.selection() if self._mining_onhold_tree else ()
+        if not sel:
+            if messagebox:
+                messagebox.showinfo("查看图片", "请先选中一行 On Hold 产品。")
+            return
+        item = (self._mining_onhold_row_data or {}).get(sel[0])
+        if not item:
+            return
+        self._open_image_for_item(item)
+
+    def _on_mining_onhold_double_click(self, _event=None):
+        sel = self._mining_onhold_tree.selection() if self._mining_onhold_tree else ()
+        if not sel:
+            return
+        item = (self._mining_onhold_row_data or {}).get(sel[0])
+        if not item:
+            return
+        if self._images_enabled():
+            self._open_image_for_item(item)
+            return
+        self.search_var.set(str(item.get("code") or ""))
+        if self._notebook:
+            self._notebook.select(self._tab_products)
+        self._refresh_view()
+
+    def _render_mining_transfer_table(self):
+        if not self._mining_transfer_tree:
+            return
+        region = self._cached_summary.get("region") or self._current_region()
+        try:
+            bundle = panel_data.get_region_bundle(region)
+        except Exception:
+            bundle = {}
+        raw_parts = bundle.get("parts_rows") or []
+        detail = bundle.get("parts_detail_rows") or []
+        bom = bundle.get("parts_kit_bom") or {}
+        rows = panel_data.analyze_parts_transfer(
+            raw_parts or detail,
+            parts_kit_bom=bom,
+            warehouse_hints=bundle.get("warehouse_transfer_hints"),
+            warehouse_overrides=bundle.get("warehouse_bucket_overrides"),
+        )
+        if self._mining_transfer_tree.get_children():
+            self._mining_transfer_tree.delete(*self._mining_transfer_tree.get_children())
+        for idx, row in enumerate(rows):
+            gain = int(row.get("transfer_gain") or 0)
+            tags = ("gain",) if gain > 0 else ()
+            if idx % 2 == 1 and not tags:
+                tags = ("alt",)
+            elif idx % 2 == 1 and tags:
+                tags = ("gain",)
+            self._mining_transfer_tree.insert(
+                "", tk.END,
+                values=(
+                    row.get("parent") or "",
+                    row.get("name") or "",
+                    row.get("part_count") or 0,
+                    row.get("sets_carbine") or 0,
+                    row.get("sets_walls") or 0,
+                    row.get("sets_chch") or 0,
+                    row.get("sets_current_total") or 0,
+                    row.get("sets_after_transfer") or 0,
+                    gain,
+                    row.get("parts_distribution") or "-",
+                ),
+                tags=tags,
+            )
+        gain_n = sum(1 for r in rows if (r.get("transfer_gain") or 0) > 0)
+        if self._mining_status_lbl and self._mining_notebook:
+            on_transfer = str(self._mining_notebook.select()) == str(self._mining_transfer_tab)
+            if on_transfer:
+                if rows:
+                    self._mining_status_lbl.configure(
+                        text=f"借调可增收 {gain_n} 个母件 · 共 {len(rows)} 条（按借调收益排序）",
+                    )
+                elif int(bundle.get("parts_row_count") or 0):
+                    hint = panel_data.describe_parts_transfer_gap(detail or [])
+                    self._mining_status_lbl.configure(
+                        text=(
+                            f"{hint}。"
+                            "可配置 Data-NZ/parts_kits.csv（母件+子件 SKU）或让配件 SKU 共享前两段（130-051-xx）。"
+                        ),
+                    )
+                else:
+                    self._mining_status_lbl.configure(
+                        text="请导出 parts.csv 后点「刷新数据」",
+                    )
+
+    def _on_mining_transfer_double_click(self, _event=None):
+        sel = self._mining_transfer_tree.selection() if self._mining_transfer_tree else ()
+        if not sel:
+            return
+        values = self._mining_transfer_tree.item(sel[0], "values")
+        if not values:
+            return
+        self.search_var.set(str(values[0]))
+        if self._notebook:
+            self._notebook.select(self._tab_products)
+        self._refresh_view()
+
     def _scroll_mining(self, direction):
-        if self._mining_tree:
-            self._mining_tree.yview_scroll(direction * SCROLL_UNITS, "units")
+        tree = self._mining_tree
+        if self._mining_notebook:
+            try:
+                selected = str(self._mining_notebook.select())
+                if self._mining_onhold_tab and selected == str(self._mining_onhold_tab):
+                    tree = self._mining_onhold_tree
+                elif self._mining_transfer_tab and selected == str(self._mining_transfer_tab):
+                    tree = self._mining_transfer_tree
+            except tk.TclError:
+                pass
+        if tree:
+            tree.yview_scroll(direction * SCROLL_UNITS, "units")
 
     def _on_mining_wheel(self, event):
         step = -1 if event.delta > 0 else 1
@@ -1872,7 +2284,7 @@ class PanelApp:
             self._island_channel_filter_var.set("全部渠道")
         self._island_selected_class = None
         self._sync_island_filter_var(None)
-        self._update_island_owner_channel_combos()
+        self._update_island_owner_channel_combos(reset_channel=True)
         self._render_island_quadrants(self._cached_summary.get("store_specific", self._is_store_selected()))
 
     def _on_island_owner_change(self):
@@ -1881,10 +2293,41 @@ class PanelApp:
         self._update_island_channel_combo(reset=True)
         self._render_island_quadrants(self._cached_summary.get("store_specific", self._is_store_selected()))
 
-    def _on_island_channel_change(self):
+    def _on_island_channel_change(self, _event=None):
+        # Windows 下等下拉框提交选中值后再刷新，避免立刻被重置
+        self.root.after_idle(self._apply_island_channel_filter)
+
+    def _apply_island_channel_filter(self):
+        self._sync_island_combo_to_var(self._island_channel_combo, self._island_channel_filter_var)
         self._island_selected_class = None
         self._sync_island_filter_var(None)
         self._render_island_quadrants(self._cached_summary.get("store_specific", self._is_store_selected()))
+
+    @staticmethod
+    def _sync_island_combo_to_var(combo, var):
+        """ttk Combobox 在 Windows 上常只改显示、不写 StringVar，筛选前强制同步。"""
+        if not combo or not var:
+            return
+        try:
+            shown = str(combo.get()).strip()
+        except tk.TclError:
+            return
+        if shown:
+            var.set(shown)
+
+    def _island_owner_filter_value(self):
+        self._sync_island_combo_to_var(self._island_owner_combo, self._island_owner_filter_var)
+        owner = str(self._island_owner_filter_var.get()).strip()
+        if owner in ("", "全部负责人"):
+            return None
+        return owner
+
+    def _island_channel_filter_value(self):
+        self._sync_island_combo_to_var(self._island_channel_combo, self._island_channel_filter_var)
+        channel = str(self._island_channel_filter_var.get()).strip()
+        if channel in ("", "全部渠道"):
+            return None
+        return channel
 
     def _update_island_channel_combo(self, reset=False):
         owner = self._island_owner_filter_var.get()
@@ -1892,33 +2335,31 @@ class PanelApp:
             channels = ["全部渠道"]
             channel_state = "disabled"
         else:
-            channels = ["全部渠道"] + panel_data.channels_for_owner(self._cached_owner_config, owner)
-            channel_state = "readonly"
+            opts = panel_data.list_island_channel_options(
+                self._cached_products, self._cached_owner_config, owner=owner,
+            )
+            channels = ["全部渠道"] + [str(c) for c in opts]
+            channel_state = "readonly" if opts else "disabled"
         if self._island_channel_combo:
             self._island_channel_combo.configure(values=channels, state=channel_state)
         current = self._island_channel_filter_var.get()
         if reset or current not in channels:
             self._island_channel_filter_var.set("全部渠道")
 
-    def _update_island_owner_channel_combos(self):
+    def _update_island_owner_channel_combos(self, reset_channel=False):
         owners = ["全部负责人"] + list(panel_data.list_owner_channel_tree(self._cached_owner_config)[0])
         if self._island_owner_combo:
             self._island_owner_combo.configure(values=owners)
             if self._island_owner_filter_var.get() not in owners:
                 self._island_owner_filter_var.set("全部负责人")
-        self._update_island_channel_combo(reset=True)
+                reset_channel = True
+        self._update_island_channel_combo(reset=reset_channel)
 
     def _island_scope_filters(self):
         view_mode = self._island_view_mode_var.get()
-        owner = self._island_owner_filter_var.get()
-        channel = self._island_channel_filter_var.get()
         if view_mode != "总览":
             return None, None
-        if owner == "全部负责人":
-            owner = None
-        if channel == "全部渠道":
-            channel = None
-        return owner, channel
+        return self._island_owner_filter_value(), self._island_channel_filter_value()
 
     def _update_main_island_quadrant(self, report):
         counts = report.get("counts") or {}
@@ -2067,7 +2508,8 @@ class PanelApp:
             return
         region = self._cached_summary.get("region") or self._current_region()
         self._reload_owner_config(region)
-        self._update_island_owner_channel_combos()
+        # 刷新时勿 reset 渠道，否则用户刚选的 130/830 会被打回「全部渠道」
+        self._update_island_owner_channel_combos(reset_channel=False)
         supported = bool(self._cached_summary.get("island_stock_supported"))
         if self._island_unsupported_lbl:
             if supported:
@@ -2093,7 +2535,8 @@ class PanelApp:
             owner, channel = self._island_scope_filters()
             report = panel_data.aggregate_island_quadrants(
                 self._cached_products,
-                owner=owner, channel=channel, config_rows=self._cached_owner_config,
+                owner=owner, channel=channel,
+                config_rows=self._cached_owner_config,
             )
             self._update_main_island_quadrant(report)
             self._apply_island_quadrant_styles()
@@ -2102,7 +2545,7 @@ class PanelApp:
                 if owner:
                     scope.append(owner)
                 if channel:
-                    scope.append(channel)
+                    scope.append(f"渠道 {channel}")
                 scope_text = " · ".join(scope) if scope else "全部 SKU"
                 self._island_status_lbl.configure(
                     text=f"总览 · {scope_text} · 共 {report.get('total', 0)} 条在产 SKU",
@@ -2127,7 +2570,8 @@ class PanelApp:
         owner, channel = self._island_scope_filters()
         report = panel_data.aggregate_island_quadrants(
             self._cached_products,
-            owner=owner, channel=channel, config_rows=self._cached_owner_config,
+            owner=owner, channel=channel,
+            config_rows=self._cached_owner_config,
         )
         rows = []
         if self._island_selected_class:
@@ -2145,16 +2589,17 @@ class PanelApp:
             self._island_tree.delete(*self._island_tree.get_children())
         for idx, item in enumerate(rows):
             stock = int(item.get("stock_qty") or 0) if item.get("in_stock") else 0
-            owner_name, channel_name = panel_data.resolve_product_owner_channel(
+            owner_name, _cfg_channel = panel_data.resolve_product_owner_channel(
                 item, self._cached_owner_config,
             )
+            channel_label = panel_data.sku_prefix(item.get("code", "")) or _cfg_channel or "-"
             self._island_tree.insert(
                 "", tk.END,
                 values=(
                     item.get("code") or "",
                     item.get("name") or "",
                     owner_name or "-",
-                    channel_name or "-",
+                    channel_label,
                     item.get("north_stock_qty", 0),
                     item.get("south_stock_qty", 0),
                     item.get("island_stock_label") or "-",
@@ -2168,7 +2613,15 @@ class PanelApp:
                 panel_data.ISLAND_STOCK_CLASSES[self._island_selected_class]
                 if self._island_selected_class else "全部象限"
             )
-            self._island_status_lbl.configure(text=f"{label} · 显示 {len(rows)} 条在产 SKU")
+            scope_bits = []
+            if owner:
+                scope_bits.append(owner)
+            if channel:
+                scope_bits.append(f"渠道 {channel}")
+            scope_text = " · ".join(scope_bits) if scope_bits else "全部 SKU"
+            self._island_status_lbl.configure(
+                text=f"{label} · {scope_text} · 显示 {len(rows)} 条在产 SKU",
+            )
 
     def _scroll_island(self, direction):
         if self._island_tree:

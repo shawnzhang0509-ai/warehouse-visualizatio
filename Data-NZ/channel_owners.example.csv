@@ -1,6 +1,6 @@
-owner,channel,lead_time,merge_products,merge_regions,note
-kaya,271,90,所有,南北岛,
-Andy,821,90,所有,南北岛,
-Juli,155-319,90,Calton+Arden+Bexley,南北岛,工厂在不同省份
-Helen,918,120,MotionFlexi bed+MotionFlexi床垫,南北岛,
-Danna,357,90,VEGAS+Winston,南北岛,
+owner,channel,sub_channel,lead_time,merge_products,merge_regions,note
+kaya,271,,90,所有,南北岛,
+Andy,821,,90,所有,南北岛,
+Juli,155-319,,90,Calton+Arden+Bexley,南北岛,工厂在不同省份
+Helen,918,,120,MotionFlexi bed+MotionFlexi床垫,南北岛,
+Danna,357,,90,VEGAS+Winston,南北岛,二级渠道可填 SKU 前三位；留空则按 SKU 前三位自动列出

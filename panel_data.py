@@ -15,6 +15,8 @@ import csv
 import json
 import os
 import re
+from collections import Counter, defaultdict
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -64,6 +66,38 @@ CHANNEL_OWNER_HEADER_PAIRS = (
 )
 OWNER_KEYS = ["owner", "负责人", "person", "personincharge"]
 CHANNEL_KEYS = ["channel", "渠道", "sku_prefix", "prefix", "channelcode"]
+SUB_CHANNEL_KEYS = ["sub_channel", "二级渠道", "subchannel", "channel2", "二级", "subchannelcode"]
+PARTS_PARENT_KEYS = [
+    "parentsku", "parent_sku", "kitsku", "kit_sku", "productsku", "product_sku",
+    "productsk", "productcc", "productcode",
+    "mainsku", "main_sku", "成品sku", "母件sku", "setsku", "kitcode",
+]
+PARTS_COMPONENT_KEYS = [
+    "partsku", "part_sku", "componentsku", "component_sku", "subsku", "子件sku",
+    "componentcode", "partcode", "partname", "part_name",
+]
+PARTS_PER_SET_KEYS = [
+    "partsperset", "parts_per_set", "qtyperset", "unitqty", "部件数", "requiredqty",
+    "标准部件", "标准部件数",
+]
+WIDE_PART_NAME_KEYS = ["partname", "part_name", "部件名", "部件名称", "part"]
+TRANSFER_WAREHOUSE_BUCKETS = (
+    ("carbine", (
+        "carbine", "carbine rd", "carbin", "carbin rd", "cbn", "carbine road",
+        "carbine warehouse", "carbine wh",
+    )),
+    ("walls", (
+        "walls", "wall rd", "walls road", "walls in transit", "wall warehouse",
+        "walls wh", "walls transit",
+    )),
+    ("chch", (
+        "gerald", "gerald connelly", "geraldconnelly", "gerald connolly",
+        "gc", "g c", "chch", "connelly", "christchurch", "chc warehouse",
+        "south island", "southisland",
+    )),
+)
+PARTS_KIT_FILE_STEMS = ("parts_kits", "parts_kit", "kit_parts", "parts_bom")
+WAREHOUSE_BUCKET_FILE_STEMS = ("warehouse_buckets", "warehouse_map", "warehouse_aliases")
 LEAD_TIME_KEYS = ["lead_time", "leadtime", "leadtime_days", "lead timedays"]
 MERGE_PRODUCT_KEYS = ["merge_products", "merge", "mergeproducts", "必须合并计算的产品"]
 MERGE_REGION_KEYS = ["merge_regions", "regions", "merge_regions", "必须合并计算的地区"]
@@ -372,6 +406,11 @@ def products_for_channel_config(products, cfg, include_discontinued=False):
     matched = [p for p in active if product_matches_channel(p.get("code", ""), cfg["channel"])]
     if not matched:
         return []
+    sub = str(cfg.get("sub_channel") or "").strip()
+    if sub:
+        matched = [p for p in matched if product_matches_channel(p.get("code", ""), sub)]
+    if not matched:
+        return []
     if not _is_merge_all(cfg["merge_products"]):
         tokens = [t.strip() for t in cfg["merge_products"].split("+") if t.strip()]
         matched = [p for p in matched if any(_token_in_product(t, p) for t in tokens)]
@@ -411,35 +450,124 @@ def channels_for_owner(config_rows, owner=None):
 
 
 def filter_products_by_owner_channel(products, config_rows, owner=None, channel=None,
-                                     include_discontinued=False):
-    """按负责人/渠道筛选 SKU（与 channel_owners 规则一致）。"""
+                                     sub_channel=None, include_discontinued=False):
+    """按负责人 / 一级渠道 / 二级渠道筛选 SKU。"""
     if not config_rows:
-        return products
+        scoped = list(products)
+    else:
+        owner = str(owner or "").strip()
+        channel = str(channel or "").strip()
+        sub_channel = str(sub_channel or "").strip()
+        if (
+            owner in ("", "全部负责人")
+            and channel in ("", "全部渠道")
+            and sub_channel in ("", "全部二级渠道")
+        ):
+            scoped = list(products)
+        else:
+            codes = set()
+            for cfg in config_rows:
+                if owner and owner not in ("全部负责人",) and cfg["owner"] != owner:
+                    continue
+                if channel and channel not in ("全部渠道",) and cfg["channel"] != channel:
+                    continue
+                if sub_channel and sub_channel not in ("全部二级渠道",):
+                    cfg_sub = str(cfg.get("sub_channel") or "").strip()
+                    if cfg_sub and cfg_sub != sub_channel:
+                        continue
+                for product in products_for_channel_config(products, cfg, include_discontinued):
+                    codes.add(product.get("norm_code") or product.get("code"))
+            scoped = [
+                p for p in products
+                if (p.get("norm_code") or p.get("code")) in codes
+            ]
+    sub_channel = str(sub_channel or "").strip()
+    if sub_channel and sub_channel not in ("", "全部二级渠道"):
+        scoped = [
+            p for p in scoped
+            if product_matches_channel(p.get("code", ""), sub_channel)
+            or sku_prefix(p.get("code", "")) == sub_channel
+        ]
+    return scoped
+
+
+def filter_island_scope(products, config_rows=None, owner=None, channel=None,
+                        include_discontinued=False):
+    """南北岛页：负责人（channel_owners 规则）+ 渠道（SKU 前三位，如 130、830）。"""
+    scoped = list(products)
+    if owner and owner not in ("", "全部负责人"):
+        if config_rows:
+            scoped = filter_products_by_owner_channel(
+                products, config_rows, owner=owner, channel=None, sub_channel=None,
+                include_discontinued=include_discontinued,
+            )
+        else:
+            scoped = list(products)
+    if channel and channel not in ("", "全部渠道"):
+        ch = str(channel).strip()
+        scoped = [
+            p for p in scoped
+            if product_matches_channel(p.get("code", ""), ch)
+            or sku_prefix(p.get("code", "")) == ch
+            or sku_prefix(p.get("code", "")) == ch[:SKU_PREFIX_LEN]
+        ]
+    if not include_discontinued:
+        scoped = [p for p in scoped if not p.get("discontinued")]
+    return scoped
+
+
+def list_island_channel_options(products, config_rows, owner=None, include_discontinued=False):
+    """负责人下可选渠道 = 其 SKU 的前三位汇总（与产品表「渠道」列一致）。"""
+    if not owner or owner in ("", "全部负责人"):
+        return []
+    scoped = filter_island_scope(
+        products, config_rows, owner=owner, channel=None,
+        include_discontinued=include_discontinued,
+    )
+    return sorted({
+        sku_prefix(p.get("code", ""))
+        for p in scoped
+        if p.get("code") and sku_prefix(p.get("code", "")) not in ("", "???")
+    })
+
+
+def list_secondary_channels_for_scope(products, config_rows, owner=None, channel=None,
+                                      include_discontinued=False):
+    """二级渠道：优先 channel_owners 的 sub_channel 列，否则用 SKU 前三位。"""
     owner = str(owner or "").strip()
     channel = str(channel or "").strip()
-    if owner in ("", "全部负责人") and channel in ("", "全部渠道"):
-        return products
-    codes = set()
-    for cfg in config_rows:
-        if owner and owner not in ("全部负责人",) and cfg["owner"] != owner:
+    if owner in ("", "全部负责人"):
+        return []
+    subs = set()
+    for cfg in config_rows or []:
+        if cfg.get("owner") != owner:
             continue
-        if channel and channel not in ("全部渠道",) and cfg["channel"] != channel:
+        if channel and channel not in ("", "全部渠道") and cfg.get("channel") != channel:
             continue
-        for product in products_for_channel_config(products, cfg, include_discontinued):
-            codes.add(product.get("norm_code") or product.get("code"))
-    return [
-        p for p in products
-        if (p.get("norm_code") or p.get("code")) in codes
-    ]
+        sc = str(cfg.get("sub_channel") or "").strip()
+        if sc:
+            subs.add(sc)
+    if subs:
+        return sorted(subs, key=str)
+    scoped = filter_products_by_owner_channel(
+        products, config_rows, owner=owner, channel=channel or None,
+        include_discontinued=include_discontinued,
+    )
+    return sorted({
+        sku_prefix(p.get("code", ""))
+        for p in scoped
+        if p.get("code") and sku_prefix(p.get("code", ""))
+    })
 
 
 def aggregate_island_quadrants(products, include_discontinued=False, owner=None, channel=None,
-                               config_rows=None):
+                               sub_channel=None, config_rows=None):
     """统计四象限 SKU 数（默认仅计在产），可按负责人/渠道筛选。"""
+    ch = channel or sub_channel
     scoped = products
-    if config_rows and (owner or channel):
-        scoped = filter_products_by_owner_channel(
-            products, config_rows, owner=owner, channel=channel,
+    if owner or ch:
+        scoped = filter_island_scope(
+            products, config_rows, owner=owner, channel=ch,
             include_discontinued=include_discontinued,
         )
     counts, rows = _island_counts_from_products(scoped, include_discontinued)
@@ -627,9 +755,25 @@ def _region_parts_stems(region_key):
 
 
 STORAGE_QTY_KEYS = ["storageqty", "storage_qty", "qty", "quantity", "displayqty"]
-ON_HOLD_QTY_KEYS = ["onholdqty", "on_hold_qty", "holdqty", "hold_qty", "qty", "quantity"]
+ON_HOLD_QTY_KEYS = [
+    "onholdqty", "on_hold_qty", "holdqty", "hold_qty", "quantity", "qty",
+    "onholdquantity", "sum", "total", "amount",
+]
 ON_HOLD_STATUS_KEYS = ["stockonholdstatus", "onholdstatus", "holdstatus", "status"]
-PARTS_QTY_KEYS = ["partsqty", "parts_qty", "partqty", "qty", "quantity"]
+ON_HOLD_DATE_KEYS = [
+    "onholddate", "on_hold_date", "holddate", "hold_since", "holdstart", "hold_start",
+    "stockonholddate", "onholdsince", "onholdtime", "startdate", "createdon", "modifiedon",
+    "冻结日期", "冻结时间", "holdtime",
+]
+ON_HOLD_DAYS_KEYS = [
+    "holddays", "on_hold_days", "daysonhold", "hold_days", "dayonhold", "冻结天数",
+]
+PARTS_QTY_KEYS = [
+    "partsqty", "parts_qty", "partqty", "quantity", "qty", "sum", "total", "amount",
+]
+MINING_CODE_KEYS = CODE_KEYS + [
+    "serialnumber", "serial_number", "serial", "materialcode", "material", "barcode",
+]
 
 
 def _load_runner_regions():
@@ -832,6 +976,7 @@ def _channel_owner_row_dict(owner, channel, extra=None):
     data = {
         "owner": str(owner or "").strip(),
         "channel": str(channel or "").strip(),
+        "sub_channel": "",
         "lead_time": None,
         "merge_products": "所有",
         "merge_regions": "",
@@ -855,6 +1000,7 @@ def _parse_channel_owner_dict_row(row):
         except ValueError:
             lead_time = str(lead_raw).strip()
     return _channel_owner_row_dict(owner, channel, {
+        "sub_channel": _normalize_channel_code(_pick(row, SUB_CHANNEL_KEYS) or ""),
         "lead_time": lead_time,
         "merge_products": str(_pick(row, MERGE_PRODUCT_KEYS) or "所有").strip() or "所有",
         "merge_regions": str(_pick(row, MERGE_REGION_KEYS) or "").strip(),
@@ -1247,17 +1393,32 @@ def _load_region_bundle(region, force=False):
     on_hold_by_code = {}
     on_hold_row_count = 0
     if on_hold_path and Path(on_hold_path).is_file():
-        on_hold_rows = _read_table(on_hold_path)
+        on_hold_rows = _read_mining_table(on_hold_path)
         on_hold_by_code = _load_on_hold_inventory(on_hold_rows)
         on_hold_row_count = len(on_hold_rows)
+    else:
+        on_hold_rows = []
     parts_by_code = {}
     parts_row_count = 0
     if parts_path and Path(parts_path).is_file():
-        parts_rows = _read_table(parts_path)
-        parts_by_code = _load_parts_inventory(parts_rows)
+        parts_rows = _read_mining_table(parts_path)
+        parts_by_code = _load_parts_inventory_wide(parts_rows) or _load_parts_inventory(parts_rows)
         parts_row_count = len(parts_rows)
+        parts_kit_bom = _load_parts_kit_bom(data_dir)
+        parts_detail_rows = _parse_parts_detail_rows(parts_rows)
+        parts_detail_rows = _apply_parts_kit_bom(parts_detail_rows, parts_kit_bom)
+        parts_detail_rows = _reparent_parts_detail(parts_detail_rows)
+    else:
+        parts_rows = []
+        parts_detail_rows = []
+        parts_kit_bom = {}
     blacklist = _load_blacklist(blacklist_path)
     stock_raw_rows = _read_table(stock_path)
+    warehouse_transfer_hints = _warehouse_hints_from_stock_rows(stock_raw_rows)
+    warehouse_bucket_overrides = _load_warehouse_bucket_overrides(data_dir)
+    parts_detail_rows = _apply_warehouse_buckets(
+        parts_detail_rows, warehouse_transfer_hints, warehouse_bucket_overrides,
+    )
     active_rows = _load_stock(stock_raw_rows, data_dir, discontinued=False)
     _enrich_catalog_metadata(active_rows)
     bundle = {
@@ -1291,11 +1452,17 @@ def _load_region_bundle(region, force=False):
         "on_hold_path": str(on_hold_path) if on_hold_path else None,
         "on_hold_mtime": on_hold_mtime,
         "on_hold_by_code": on_hold_by_code,
+        "on_hold_rows": on_hold_rows,
         "on_hold_row_count": on_hold_row_count,
         "parts_path": str(parts_path) if parts_path else None,
         "parts_mtime": parts_mtime,
         "parts_by_code": parts_by_code,
         "parts_row_count": parts_row_count,
+        "parts_detail_rows": parts_detail_rows,
+        "parts_rows": parts_rows,
+        "parts_kit_bom": parts_kit_bom if parts_path and Path(parts_path).is_file() else {},
+        "warehouse_transfer_hints": warehouse_transfer_hints,
+        "warehouse_bucket_overrides": warehouse_bucket_overrides,
         "stock_row_count": len(stock_raw_rows),
     }
     _REGION_CACHE[region_key] = bundle
@@ -1594,49 +1761,265 @@ def _load_storage(rows, display_store_keys=()):
     return by_store, storage_details, storage_map, unmapped
 
 
+def _column_key_map(row):
+    return {
+        re.sub(r"[\s_\-]+", "", _strip_cell_bom(k).lower()): v
+        for k, v in row.items() if k is not None
+    }
+
+
+def _pick_fuzzy(row, keys):
+    lower = _column_key_map(row)
+    for key in keys:
+        nk = re.sub(r"[\s_\-]+", "", str(key).lower())
+        if nk in lower:
+            val = lower[nk]
+            if val is not None and str(val).strip() != "":
+                return val
+    return None
+
+
+def _looks_like_product_sku(text):
+    text = str(text or "").strip().upper()
+    if not text or len(text) < 4:
+        return False
+    if re.fullmatch(r"\d{3}-\d{2,}([-.][A-Z0-9]+)?", text):
+        return True
+    if re.fullmatch(r"[A-Z0-9]{2,}-\d{2,}", text):
+        return True
+    return False
+
+
+def _mining_code_from_row(row):
+    code = _pick(row, CODE_KEYS) or _pick_fuzzy(row, MINING_CODE_KEYS)
+    if code:
+        return str(code).strip()
+    for val in row.values():
+        text = str(val or "").strip()
+        if _looks_like_product_sku(text):
+            return text
+    return ""
+
+
+def _mining_qty_from_row(row, qty_keys):
+    """无数量列时按 1 计（序列号级导出每行=1 件）。"""
+    raw = _pick(row, qty_keys) or _pick_fuzzy(row, qty_keys)
+    qty = _to_float(raw)
+    if qty is None or qty <= 0:
+        return 1.0
+    return qty
+
+
+def _read_mining_table(path):
+    """on_hold / parts 可能是 Excel 分号或 Tab 导出。"""
+    path = Path(path)
+    raw_text, _ = _read_channel_owner_text(path)
+    delimiter = _detect_channel_owner_delimiter(raw_text[:8192])
+    return list(csv.DictReader(raw_text.splitlines(), delimiter=delimiter))
+
+
+def _parse_hold_datetime(raw):
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y", "%m/%d/%Y",
+        "%Y/%m/%d", "%d-%m-%Y", "%Y%m%d",
+    ):
+        try:
+            chunk = text[:19] if len(text) > 10 and " " in text else text[:10]
+            return datetime.strptime(chunk, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _hold_days_from_row(row, hold_at=None):
+    raw = _pick_fuzzy(row, ON_HOLD_DAYS_KEYS)
+    days = _to_float(raw)
+    if days is not None and days >= 0:
+        return int(days)
+    if hold_at:
+        return max(0, (date.today() - hold_at).days)
+    return None
+
+
+def _format_hold_since(hold_at):
+    if not hold_at:
+        return ""
+    if isinstance(hold_at, datetime):
+        hold_at = hold_at.date()
+    return hold_at.isoformat()
+
+
 def _load_on_hold_inventory(rows):
-    """on_hold.csv → {norm_code: {code, name, family, total_qty, statuses, warehouses}}"""
+    """on_hold.csv → {norm_code: {code, name, family, total_qty, statuses, warehouses, ...}}"""
     by_code = {}
     for row in rows:
-        code = _pick(row, CODE_KEYS)
+        code = _mining_code_from_row(row)
         if not code:
             continue
         norm = _norm_code(code)
-        qty = _to_float(_pick(row, ON_HOLD_QTY_KEYS)) or 0.0
-        if qty <= 0:
-            continue
-        status = str(_pick(row, ON_HOLD_STATUS_KEYS) or "").strip()
-        warehouse = str(_pick(row, STORE_KEYS + ["warehousename"]) or "").strip()
+        qty = _mining_qty_from_row(row, ON_HOLD_QTY_KEYS)
+        status = str(_pick(row, ON_HOLD_STATUS_KEYS) or _pick_fuzzy(row, ON_HOLD_STATUS_KEYS) or "").strip()
+        if not status:
+            status = "（未标注状态）"
+        warehouse = str(
+            _pick(row, STORE_KEYS + ["warehousename"]) or _pick_fuzzy(row, STORE_KEYS + ["warehousename"]) or ""
+        ).strip()
+        hold_at = _parse_hold_datetime(_pick_fuzzy(row, ON_HOLD_DATE_KEYS))
+        hold_days = _hold_days_from_row(row, hold_at)
         bucket = by_code.setdefault(norm, {
             "code": str(code).strip(),
-            "name": str(_pick(row, NAME_KEYS) or "").strip(),
+            "name": str(_pick(row, NAME_KEYS) or _pick_fuzzy(row, NAME_KEYS) or "").strip(),
             "family": str(_pick(row, FAMILY_KEYS) or "").strip(),
             "total_qty": 0.0,
             "statuses": set(),
+            "status_qty": {},
             "warehouses": [],
+            "earliest_hold_at": None,
+            "max_hold_days": None,
         })
         bucket["total_qty"] += qty
-        if status:
-            bucket["statuses"].add(status)
+        bucket["statuses"].add(status)
+        bucket["status_qty"][status] = bucket["status_qty"].get(status, 0.0) + qty
+        if hold_at:
+            prev = bucket.get("earliest_hold_at")
+            if not prev or hold_at < prev:
+                bucket["earliest_hold_at"] = hold_at
+        if hold_days is not None:
+            prev_days = bucket.get("max_hold_days")
+            bucket["max_hold_days"] = max(prev_days if prev_days is not None else 0, hold_days)
         if warehouse:
             bucket["warehouses"].append({
                 "warehouse": warehouse, "qty": qty, "status": status,
+                "hold_at": hold_at, "hold_days": hold_days,
             })
     return by_code
+
+
+def aggregate_on_hold_by_status(on_hold_rows=None, on_hold_by_code=None):
+    """按 StockOnHoldStatus 汇总行数 / SKU 数 / 数量。"""
+    by_status = defaultdict(lambda: {"row_count": 0, "sku_codes": set(), "total_qty": 0.0})
+    if on_hold_rows:
+        for row in on_hold_rows:
+            code = _mining_code_from_row(row)
+            if not code:
+                continue
+            status = str(
+                _pick(row, ON_HOLD_STATUS_KEYS) or _pick_fuzzy(row, ON_HOLD_STATUS_KEYS) or ""
+            ).strip() or "（未标注状态）"
+            qty = _mining_qty_from_row(row, ON_HOLD_QTY_KEYS)
+            slot = by_status[status]
+            slot["row_count"] += 1
+            slot["sku_codes"].add(_norm_code(code))
+            slot["total_qty"] += qty
+    elif on_hold_by_code:
+        for item in on_hold_by_code.values():
+            for status, qty in (item.get("status_qty") or {}).items():
+                slot = by_status[status or "（未标注状态）"]
+                slot["row_count"] += 1
+                slot["sku_codes"].add(_norm_code(item.get("code")))
+                slot["total_qty"] += float(qty or 0)
+    rows = []
+    for status, slot in by_status.items():
+        rows.append({
+            "status": status,
+            "row_count": slot["row_count"],
+            "sku_count": len(slot["sku_codes"]),
+            "total_qty": int(slot["total_qty"]) if slot["total_qty"] == int(slot["total_qty"]) else slot["total_qty"],
+        })
+    rows.sort(key=lambda r: (-r["total_qty"], r["status"]))
+    return rows
+
+
+def list_on_hold_status_options(bundle):
+    rows = aggregate_on_hold_by_status(
+        on_hold_rows=bundle.get("on_hold_rows"),
+        on_hold_by_code=bundle.get("on_hold_by_code"),
+    )
+    return [r["status"] for r in rows]
+
+
+def diagnose_on_hold_bundle(bundle):
+    """说明 On Hold 为 0 的常见原因（文件缺失 / 空文件 / 列名不匹配）。"""
+    path = bundle.get("on_hold_path")
+    row_count = int(bundle.get("on_hold_row_count") or 0)
+    sku_count = len(bundle.get("on_hold_by_code") or {})
+    if not path or not Path(path).is_file():
+        return (
+            "未找到 on_hold.csv：请在 Data-NZ 放置 on_hold.txt，执行 SQL 导出到 Output-NZ/on_hold.csv，"
+            "然后点「刷新数据」。"
+        )
+    name = Path(path).name
+    if row_count <= 0:
+        return (
+            f"已找到 {name}，但没有数据行（0 行）。请运行 on_hold.txt 导出；"
+            "仅有表头或空文件时看板会显示 On Hold 0。"
+        )
+    if sku_count <= 0:
+        sample = (bundle.get("on_hold_rows") or [])[:1]
+        cols = list(sample[0].keys()) if sample else []
+        col_text = "、".join(str(c) for c in cols[:10]) if cols else "（无表头）"
+        return (
+            f"已读取 {row_count} 行，但未识别 SKU（当前 0 个）。表头：{col_text}。"
+            "请确认含 Sku / ProductCode 列，或 SKU 形如 130-051。"
+        )
+    return ""
+
+
+def list_on_hold_analysis(bundle, status_filter=None, catalog_by_norm=None):
+    """On Hold 分析明细（含冻结天数、状态、图片字段来自 stock 目录）。"""
+    by_code = dict(bundle.get("on_hold_by_code") or {})
+    if not by_code and bundle.get("on_hold_rows"):
+        by_code = _load_on_hold_inventory(bundle.get("on_hold_rows"))
+    catalog_by_norm = catalog_by_norm or {}
+    out = []
+    status_filter = str(status_filter or "").strip()
+    for norm, item in by_code.items():
+        statuses = item.get("statuses") or set()
+        if status_filter and status_filter not in ("", "全部状态"):
+            if status_filter not in statuses:
+                continue
+        cat = catalog_by_norm.get(norm) or {}
+        status_text = "、".join(sorted(s for s in statuses if s)) or "（未标注状态）"
+        hold_days = item.get("max_hold_days")
+        hold_since = _format_hold_since(item.get("earliest_hold_at"))
+        out.append({
+            "norm_code": norm,
+            "code": item.get("code") or "",
+            "name": item.get("name") or cat.get("name") or "",
+            "family": item.get("family") or cat.get("family") or "",
+            "status": status_text,
+            "hold_days": hold_days,
+            "hold_since": hold_since,
+            "qty": item.get("total_qty") or 0,
+            "warehouses": item.get("warehouses") or [],
+            "status_qty": item.get("status_qty") or {},
+            "image_raw": cat.get("image_raw") or item.get("image_raw"),
+            "image": cat.get("image"),
+        })
+    out.sort(key=lambda r: (
+        -(r.get("hold_days") if r.get("hold_days") is not None else -1),
+        -(float(r.get("qty") or 0)),
+        r.get("code") or "",
+    ))
+    return out
 
 
 def _load_parts_inventory(rows):
     """parts.csv → {norm_code: {code, name, family, total_qty, warehouses}}"""
     by_code = {}
     for row in rows:
-        code = _pick(row, CODE_KEYS)
+        code = _mining_code_from_row(row)
         if not code:
             continue
         norm = _norm_code(code)
-        qty = _to_float(_pick(row, PARTS_QTY_KEYS)) or 0.0
-        if qty <= 0:
-            continue
-        warehouse = str(_pick(row, STORE_KEYS + ["warehousename"]) or "").strip()
+        qty = _mining_qty_from_row(row, PARTS_QTY_KEYS)
+        warehouse = str(
+            _pick(row, STORE_KEYS + ["warehousename"]) or _pick_fuzzy(row, STORE_KEYS + ["warehousename"]) or ""
+        ).strip()
         bucket = by_code.setdefault(norm, {
             "code": str(code).strip(),
             "name": str(_pick(row, NAME_KEYS) or "").strip(),
@@ -1648,6 +2031,452 @@ def _load_parts_inventory(rows):
         if warehouse:
             bucket["warehouses"].append({"warehouse": warehouse, "qty": qty})
     return by_code
+
+
+def _infer_kit_parent_sku(sku):
+    """从配件 SKU 推断母件，如 130-051-LEG → 130-051。"""
+    text = str(sku or "").strip().upper()
+    text = text.replace(".", "-").replace("_", "-")
+    match = re.match(r"^(\d+-\d+)(?:-.+)?$", text)
+    if match:
+        return match.group(1)
+    for pat in (
+        r"^(.+)-(?:PART|PKT|PK|LEG|ARM|BASE|TOP|BTM|LHS|RHS|L|R|A|B|C|D)(?:\d*)$",
+        r"^(.+)-(\d+)$",
+    ):
+        m = re.match(pat, text, re.I)
+        if m and len(m.group(1)) >= 5:
+            return m.group(1).upper()
+    match = re.match(r"^(\d+-\d+)", text)
+    if match:
+        return match.group(1)
+    return text
+
+
+def _load_parts_kit_bom(data_dir):
+    """可选 parts_kits.csv：parent_sku, part_sku, qty_per_set。"""
+    if not data_dir:
+        return {}
+    path = _find_region_data_file(data_dir, PARTS_KIT_FILE_STEMS)
+    if not path:
+        return {}
+    by_part = {}
+    try:
+        rows = _read_table(path)
+    except Exception:
+        return {}
+    for row in rows:
+        parent = str(
+            _pick_fuzzy(row, PARTS_PARENT_KEYS + ["parent", "kit", "setsku"]) or ""
+        ).strip()
+        part = str(
+            _pick_fuzzy(row, PARTS_COMPONENT_KEYS + ["part", "child", "sku", "partsku"]) or ""
+        ).strip()
+        if not parent or not part:
+            continue
+        qty = _to_float(_pick_fuzzy(row, PARTS_PER_SET_KEYS)) or 1.0
+        if qty <= 0:
+            qty = 1.0
+        by_part[_norm_code(part)] = (parent, qty)
+    return {"by_part": by_part, "path": str(path)}
+
+
+def _apply_parts_kit_bom(detail, bom):
+    if not detail or not bom:
+        return detail
+    by_part = bom.get("by_part") or {}
+    if not by_part:
+        return detail
+    for line in detail:
+        key = _norm_code(line.get("part") or "")
+        hit = by_part.get(key)
+        if hit:
+            line["parent"] = hit[0]
+            line["need_per_set"] = hit[1]
+    return detail
+
+
+def _reparent_parts_detail(detail):
+    """同一母件下凑不出多配件时，按 SKU 前缀 / ProductFamily 再归组。"""
+    if not detail:
+        return detail
+    base_parts = {}
+    for line in detail:
+        base = _infer_kit_parent_sku(line.get("part") or "")
+        base_parts.setdefault(base, set()).add(line["part"])
+    for line in detail:
+        base = _infer_kit_parent_sku(line.get("part") or "")
+        if len(base_parts.get(base, ())) >= 2:
+            line["parent"] = base
+
+    fam_parts = {}
+    fam_label = {}
+    for line in detail:
+        fam = str(line.get("family") or "").strip()
+        if not fam:
+            continue
+        key = fam.lower()
+        fam_parts.setdefault(key, set()).add(line["part"])
+        fam_label[key] = fam
+    for line in detail:
+        fam = str(line.get("family") or "").strip().lower()
+        if not fam or len(fam_parts.get(fam, ())) < 2:
+            continue
+        parent = line.get("parent") or ""
+        same_parent = {l["part"] for l in detail if l.get("parent") == parent}
+        if len(same_parent) < 2:
+            line["parent"] = f"FAM:{fam_label.get(fam, fam)}"
+    return detail
+
+
+def describe_parts_transfer_gap(detail):
+    if not detail:
+        return "未解析出任何 parts 行"
+    hub = sum(1 for line in detail if line.get("bucket") in ("carbine", "walls", "chch"))
+    other = len(detail) - hub
+    empty_wh = sum(1 for line in detail if not str(line.get("warehouse") or "").strip())
+    parts_per_parent = {}
+    for line in detail:
+        parts_per_parent.setdefault(line["parent"], set()).add(line["part"])
+    multi = sum(1 for parts in parts_per_parent.values() if len(parts) >= 2)
+    hub_parents = 0
+    for parent, parts in parts_per_parent.items():
+        if len(parts) < 2:
+            continue
+        lines = [line for line in detail if line.get("parent") == parent]
+        if any(line.get("bucket") in ("carbine", "walls", "chch") for line in lines):
+            hub_parents += 1
+    msg = (
+        f"解析 {len(detail)} 行 · 三仓 {hub} 行 / 其他仓 {other} 行 · "
+        f"多配件母件 {multi} 组（三仓有库存 {hub_parents} 组）"
+    )
+    if empty_wh:
+        msg += f" · 缺仓名列 {empty_wh} 行"
+    if other:
+        samples = Counter(
+            str(line.get("warehouse") or "（空）").strip() or "（空）"
+            for line in detail
+            if line.get("bucket") == "other"
+        ).most_common(4)
+        if samples:
+            msg += " · 未归入三仓示例：" + "；".join(f"{name}({cnt})" for name, cnt in samples)
+    return msg
+
+
+def _warehouse_stock_key(name):
+    """与 stock 多仓列 / 南北岛同一套识别逻辑。"""
+    key = _norm_col_key(name)
+    if not key:
+        return None
+    if "carbine" in key or "carbin" in key or key.startswith("cbn"):
+        return "carbine"
+    if "walls" in key or key.startswith("wall"):
+        return "walls"
+    if (
+        "geraldconnelly" in key
+        or ("gerald" in key and "connelly" in key)
+        or key.startswith("gc")
+        or "chch" in key
+        or "christchurch" in key
+        or "connelly" in key
+        or "southisland" in key
+    ):
+        return "geraldconnelly"
+    return None
+
+
+def _transfer_bucket_from_stock_key(stock_key):
+    if stock_key == "geraldconnelly":
+        return "chch"
+    if stock_key in ("carbine", "walls"):
+        return stock_key
+    return None
+
+
+def _warehouse_hints_from_stock_rows(stock_raw_rows):
+    """从 stock.csv 表头学习仓名列名片段（如 CarbineSt → carbine）。"""
+    hints = {"carbine": set(), "walls": set(), "chch": set()}
+    if not stock_raw_rows:
+        return {}
+    for col in stock_raw_rows[0].keys():
+        stock_key = _classify_warehouse_column(col)
+        bucket = _transfer_bucket_from_stock_key(stock_key)
+        if not bucket:
+            continue
+        label = str(col).strip().lower()
+        if label:
+            hints[bucket].add(label)
+        nk = _norm_col_key(col)
+        if nk:
+            hints[bucket].add(nk)
+    return {bucket: tuple(sorted(values)) for bucket, values in hints.items() if values}
+
+
+def _load_warehouse_bucket_overrides(data_dir):
+    """Data-NZ/warehouse_buckets.csv：warehouse_name,bucket（carbine/walls/chch）。"""
+    if not data_dir:
+        return {}
+    path = _find_region_data_file(data_dir, WAREHOUSE_BUCKET_FILE_STEMS)
+    if not path:
+        return {}
+    overrides = {}
+    try:
+        for row in _read_table(path):
+            name = str(_pick_fuzzy(row, STORE_KEYS + ["warehousename", "name", "alias"]) or "").strip()
+            bucket = str(_pick(row, ["bucket", "hub", "type"]) or _pick_fuzzy(row, ["bucket", "hub"]) or "").strip().lower()
+            if not name or not bucket:
+                continue
+            if bucket in ("gc", "gerald", "geraldconnelly", "south"):
+                bucket = "chch"
+            if bucket not in ("carbine", "walls", "chch"):
+                continue
+            overrides[name.lower()] = bucket
+    except Exception:
+        return {}
+    return overrides
+
+
+def _warehouse_transfer_bucket(warehouse_name, hints=None, overrides=None):
+    text = str(warehouse_name or "").strip()
+    if not text:
+        return "other"
+    low = text.lower()
+    if overrides and low in overrides:
+        return overrides[low]
+    stock_key = _warehouse_stock_key(text)
+    bucket = _transfer_bucket_from_stock_key(stock_key)
+    if bucket:
+        return bucket
+    for bucket, tokens in TRANSFER_WAREHOUSE_BUCKETS:
+        if any(token in low for token in tokens):
+            return bucket
+    if hints:
+        for bucket, fragments in hints.items():
+            for frag in fragments:
+                frag = str(frag or "").lower()
+                if frag and (frag in low or _norm_col_key(frag) in _norm_col_key(text)):
+                    return bucket
+    return "other"
+
+
+def _apply_warehouse_buckets(detail, hints=None, overrides=None):
+    for line in detail or []:
+        line["bucket"] = _warehouse_transfer_bucket(
+            line.get("warehouse"), hints=hints, overrides=overrides,
+        )
+    return detail
+
+
+def _classify_parts_hub_column(col_name):
+    """宽表列名：Carbin 库存 / Walls 库存 / CHCH 库存 → 借调三仓。"""
+    key = _norm_col_key(col_name)
+    if not key:
+        return None
+    if "carbin" in key or "carbine" in key or key.startswith("cbn"):
+        return "carbine"
+    if "walls" in key or key.startswith("wall"):
+        return "walls"
+    if "chch" in key or key == "gc" or key.startswith("gc") or "gerald" in key:
+        return "chch"
+    return None
+
+
+def _hub_qty_columns_from_row(sample_row):
+    cols = []
+    for key in sample_row.keys():
+        bucket = _classify_parts_hub_column(key)
+        if bucket:
+            cols.append((key, bucket))
+    return cols
+
+
+def _parse_parts_wide_hub_rows(rows):
+    """
+    Excel 宽表：每行一个子件，Carbin/Walls/CHCH 库存分列（如「Carbin 库存」）。
+    """
+    if not rows:
+        return []
+    hub_cols = _hub_qty_columns_from_row(rows[0])
+    if len(hub_cols) < 2:
+        return []
+    detail = []
+    for row in rows:
+        parent = str(
+            _pick_fuzzy(row, PARTS_PARENT_KEYS) or _pick(row, CODE_KEYS) or ""
+        ).strip()
+        if not parent:
+            parent = str(_mining_code_from_row(row) or "").strip()
+        if not parent:
+            continue
+        part_label = str(
+            _pick_fuzzy(row, WIDE_PART_NAME_KEYS + PARTS_COMPONENT_KEYS) or ""
+        ).strip()
+        part = f"{parent}::{part_label}" if part_label else parent
+        name = str(
+            _pick(row, NAME_KEYS) or _pick_fuzzy(row, NAME_KEYS + ["productna", "productname"]) or ""
+        ).strip()
+        need = _to_float(_pick_fuzzy(row, PARTS_PER_SET_KEYS)) or 1.0
+        if need <= 0:
+            need = 1.0
+        for col_name, bucket in hub_cols:
+            qty = _to_float(row.get(col_name))
+            if qty is None or qty <= 0:
+                continue
+            detail.append({
+                "parent": parent,
+                "part": part,
+                "name": name,
+                "family": str(_pick(row, FAMILY_KEYS) or "").strip(),
+                "warehouse": str(col_name).strip(),
+                "bucket": bucket,
+                "qty": float(qty),
+                "need_per_set": need,
+            })
+    return detail
+
+
+def _parse_parts_detail_rows(rows):
+    """解析 parts.csv：支持宽表三仓列，或长表 WarehouseName + Sku。"""
+    wide = _parse_parts_wide_hub_rows(rows)
+    if wide:
+        return wide
+    detail = []
+    for row in rows:
+        code = str(_mining_code_from_row(row) or "").strip()
+        if not code:
+            continue
+        parent = str(_pick_fuzzy(row, PARTS_PARENT_KEYS) or "").strip()
+        comp = str(_pick_fuzzy(row, PARTS_COMPONENT_KEYS) or "").strip()
+        if parent:
+            part = comp or code
+        else:
+            parent = _infer_kit_parent_sku(code)
+            part = comp or code
+        warehouse = str(
+            _pick(row, STORE_KEYS + ["warehousename"]) or _pick_fuzzy(row, STORE_KEYS + ["warehousename"]) or ""
+        ).strip()
+        qty = _mining_qty_from_row(row, PARTS_QTY_KEYS)
+        need = _to_float(_pick_fuzzy(row, PARTS_PER_SET_KEYS)) or 1.0
+        if need <= 0:
+            need = 1.0
+        detail.append({
+            "parent": parent,
+            "part": part,
+            "name": str(_pick(row, NAME_KEYS) or _pick_fuzzy(row, NAME_KEYS) or "").strip(),
+            "family": str(_pick(row, FAMILY_KEYS) or "").strip(),
+            "warehouse": warehouse,
+            "bucket": _warehouse_transfer_bucket(warehouse),
+            "qty": qty,
+            "need_per_set": need,
+        })
+    return detail
+
+
+def _load_parts_inventory_wide(rows):
+    """宽表 parts：按母件 SKU 汇总三仓数量（供库存清单）。"""
+    detail = _parse_parts_wide_hub_rows(rows)
+    if not detail:
+        return None
+    by_code = {}
+    for line in detail:
+        parent = line["parent"]
+        norm = _norm_code(parent)
+        bucket = by_code.setdefault(norm, {
+            "code": parent,
+            "name": line.get("name") or "",
+            "family": line.get("family") or "",
+            "total_qty": 0.0,
+            "warehouses": [],
+        })
+        bucket["total_qty"] += line["qty"]
+        bucket["warehouses"].append({
+            "warehouse": line.get("warehouse") or line.get("bucket"),
+            "qty": line["qty"],
+        })
+    return by_code
+
+
+def analyze_parts_transfer(rows, parts_kit_bom=None, warehouse_hints=None, warehouse_overrides=None):
+    """
+    跨 Carbine / Walls / CHCH 借调拼凑：比较各仓独立成套数 vs 三仓合并后最多成套数。
+    可传入 parts.csv 原始行，或 bundle 内已解析的 parts_detail_rows。
+    """
+    if rows and isinstance(rows[0], dict) and rows[0].get("bucket") is not None and rows[0].get("part"):
+        detail = list(rows)
+    else:
+        detail = _parse_parts_detail_rows(rows)
+    if not detail:
+        return []
+    detail = _apply_parts_kit_bom(detail, parts_kit_bom or {})
+    detail = _reparent_parts_detail(detail)
+    detail = _apply_warehouse_buckets(detail, warehouse_hints, warehouse_overrides)
+    parts_per_parent = {}
+    for line in detail:
+        parts_per_parent.setdefault(line["parent"], set()).add(line["part"])
+    kits = {}
+    for line in detail:
+        parent = line["parent"]
+        kit = kits.setdefault(parent, {
+            "parent": parent,
+            "name": line.get("name") or "",
+            "family": line.get("family") or "",
+            "parts": {},
+            "inv": {},
+        })
+        if not kit["name"] and line.get("name"):
+            kit["name"] = line["name"]
+        part_id = line["part"]
+        kit["parts"][part_id] = max(kit["parts"].get(part_id, 0), line["need_per_set"])
+        key = (part_id, line["bucket"])
+        kit["inv"][key] = kit["inv"].get(key, 0.0) + line["qty"]
+
+    hub_buckets = ("carbine", "walls", "chch")
+    results = []
+    for parent, kit in kits.items():
+        if len(parts_per_parent.get(parent, ())) < 2:
+            continue
+        parts = kit["parts"]
+        sets_by = {}
+        for bucket in hub_buckets:
+            sets_by[bucket] = min(
+                kit["inv"].get((part_id, bucket), 0.0) / need
+                for part_id, need in parts.items()
+            )
+            sets_by[bucket] = int(sets_by[bucket])
+        current_total = sum(sets_by[bucket] for bucket in hub_buckets)
+        pooled = {}
+        for part_id, need in parts.items():
+            pooled[part_id] = sum(kit["inv"].get((part_id, b), 0.0) for b in hub_buckets)
+        after_transfer = min(pooled[part_id] / need for part_id, need in parts.items())
+        after_transfer = int(after_transfer)
+        gain = after_transfer - current_total
+        if current_total <= 0 and after_transfer <= 0:
+            continue
+        dist_parts = []
+        for part_id in sorted(parts):
+            chunks = []
+            for bucket in hub_buckets:
+                q = int(kit["inv"].get((part_id, bucket), 0))
+                if q:
+                    chunks.append(f"{bucket}:{q}")
+            if chunks:
+                dist_parts.append(f"{part_id} " + "+".join(chunks))
+        display_parent = parent[4:] if str(parent).startswith("FAM:") else parent
+        display_name = kit.get("name") or display_parent
+        results.append({
+            "parent": display_parent,
+            "name": display_name,
+            "part_count": len(parts),
+            "sets_carbine": sets_by["carbine"],
+            "sets_walls": sets_by["walls"],
+            "sets_chch": sets_by["chch"],
+            "sets_current_total": current_total,
+            "sets_after_transfer": after_transfer,
+            "transfer_gain": gain,
+            "parts_distribution": "; ".join(dist_parts[:6]),
+        })
+    results.sort(key=lambda r: (-r["transfer_gain"], -r["sets_after_transfer"], r["parent"]))
+    return results
 
 
 def list_mining_inventory(bundle, kind="all"):
@@ -1663,6 +2492,8 @@ def list_mining_inventory(bundle, kind="all"):
                 "qty": item.get("total_qty") or 0,
                 "detail": "、".join(sorted(item.get("statuses") or [])) or "-",
                 "warehouses": item.get("warehouses") or [],
+                "hold_days": item.get("max_hold_days"),
+                "hold_since": _format_hold_since(item.get("earliest_hold_at")),
             })
     if kind in ("all", "parts"):
         for item in (bundle.get("parts_by_code") or {}).values():
