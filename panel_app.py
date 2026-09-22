@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.6"
+APP_VERSION = "1.9.7"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -2015,7 +2015,7 @@ class PanelApp:
             self._island_channel_filter_var.set("全部渠道")
         self._island_selected_class = None
         self._sync_island_filter_var(None)
-        self._update_island_owner_channel_combos()
+        self._update_island_owner_channel_combos(reset_channel=True)
         self._render_island_quadrants(self._cached_summary.get("store_specific", self._is_store_selected()))
 
     def _on_island_owner_change(self):
@@ -2024,7 +2024,11 @@ class PanelApp:
         self._update_island_channel_combo(reset=True)
         self._render_island_quadrants(self._cached_summary.get("store_specific", self._is_store_selected()))
 
-    def _on_island_channel_change(self):
+    def _on_island_channel_change(self, _event=None):
+        # Windows 下等下拉框提交选中值后再刷新，避免立刻被重置
+        self.after_idle(self._apply_island_channel_filter)
+
+    def _apply_island_channel_filter(self):
         self._island_selected_class = None
         self._sync_island_filter_var(None)
         self._render_island_quadrants(self._cached_summary.get("store_specific", self._is_store_selected()))
@@ -2046,13 +2050,14 @@ class PanelApp:
         if reset or current not in channels:
             self._island_channel_filter_var.set("全部渠道")
 
-    def _update_island_owner_channel_combos(self):
+    def _update_island_owner_channel_combos(self, reset_channel=False):
         owners = ["全部负责人"] + list(panel_data.list_owner_channel_tree(self._cached_owner_config)[0])
         if self._island_owner_combo:
             self._island_owner_combo.configure(values=owners)
             if self._island_owner_filter_var.get() not in owners:
                 self._island_owner_filter_var.set("全部负责人")
-        self._update_island_channel_combo(reset=True)
+                reset_channel = True
+        self._update_island_channel_combo(reset=reset_channel)
 
     def _island_scope_filters(self):
         view_mode = self._island_view_mode_var.get()
@@ -2213,7 +2218,8 @@ class PanelApp:
             return
         region = self._cached_summary.get("region") or self._current_region()
         self._reload_owner_config(region)
-        self._update_island_owner_channel_combos()
+        # 刷新时勿 reset 渠道，否则用户刚选的 130/830 会被打回「全部渠道」
+        self._update_island_owner_channel_combos(reset_channel=False)
         supported = bool(self._cached_summary.get("island_stock_supported"))
         if self._island_unsupported_lbl:
             if supported:
