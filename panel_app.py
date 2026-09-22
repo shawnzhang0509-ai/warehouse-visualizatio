@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.5"
+APP_VERSION = "1.9.6"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -204,7 +204,6 @@ class PanelApp:
         self._island_view_mode_var = tk.StringVar(value="总览")
         self._island_owner_filter_var = tk.StringVar(value="全部负责人")
         self._island_channel_filter_var = tk.StringVar(value="全部渠道")
-        self._island_sub_channel_filter_var = tk.StringVar(value="全部二级渠道")
         self._mining_kind_var = tk.StringVar(value="全部")
         self.load_images_var = tk.BooleanVar(value=True)
         self.result_count_var = tk.StringVar(value="")
@@ -570,7 +569,7 @@ class PanelApp:
         island_inner.pack(fill=tk.BOTH, expand=True)
         tk.Label(
             island_inner,
-            text="按全国仓库存划分：北岛=Carbine+Walls，南岛=GC · 先选负责人 → 一级渠道 → 二级渠道（SKU 前三位或 channel_owners 二级渠道列）",
+            text="按全国仓库存划分：北岛=Carbine+Walls，南岛=GC · 先选负责人，再选渠道（SKU 前三位，如 130、830）",
             bg="white", fg=C_MUTED, font=("Segoe UI", 9),
         ).pack(anchor="w", padx=8, pady=(6, 4))
         island_filter_bar = tk.Frame(island_inner, bg="white")
@@ -593,24 +592,15 @@ class PanelApp:
         )
         self._island_owner_combo.pack(side=tk.LEFT, padx=(6, 12))
         self._island_owner_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_island_owner_change())
-        tk.Label(island_filter_bar, text="一级渠道", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(
+        tk.Label(island_filter_bar, text="渠道", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(
             side=tk.LEFT,
         )
         self._island_channel_combo = ttk.Combobox(
-            island_filter_bar, width=12, state="readonly", textvariable=self._island_channel_filter_var,
+            island_filter_bar, width=12, state="disabled", textvariable=self._island_channel_filter_var,
             values=["全部渠道"],
         )
         self._island_channel_combo.pack(side=tk.LEFT, padx=(6, 12))
         self._island_channel_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_island_channel_change())
-        tk.Label(island_filter_bar, text="二级渠道", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(
-            side=tk.LEFT,
-        )
-        self._island_sub_channel_combo = ttk.Combobox(
-            island_filter_bar, width=10, state="disabled", textvariable=self._island_sub_channel_filter_var,
-            values=["全部二级渠道"],
-        )
-        self._island_sub_channel_combo.pack(side=tk.LEFT, padx=(6, 12))
-        self._island_sub_channel_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_island_sub_channel_change())
         self._island_unsupported_lbl = tk.Label(
             island_inner, text="", bg="white", fg=C_CARD_GAP, font=("Segoe UI", 10),
         )
@@ -1912,8 +1902,9 @@ class PanelApp:
             bundle = panel_data.get_region_bundle(region)
         except Exception:
             bundle = {}
+        raw_parts = bundle.get("parts_rows") or []
         detail = bundle.get("parts_detail_rows") or []
-        rows = panel_data.analyze_parts_transfer(detail)
+        rows = panel_data.analyze_parts_transfer(raw_parts or detail)
         if self._mining_transfer_tree.get_children():
             self._mining_transfer_tree.delete(*self._mining_transfer_tree.get_children())
         for idx, row in enumerate(rows):
@@ -1949,7 +1940,10 @@ class PanelApp:
                     )
                 elif int(bundle.get("parts_row_count") or 0):
                     self._mining_status_lbl.configure(
-                        text="已读取 parts 行，但未解析出母件/子件/仓列，请检查 parts.csv 列名",
+                        text=(
+                            "已读取 parts 行，但未找到「同一母件下≥2 个不同配件 SKU」或三仓无库存。"
+                            "母件默认按 SKU 前两段推断（如 130-051-xxx → 130-051）"
+                        ),
                     )
                 else:
                     self._mining_status_lbl.configure(
@@ -2019,7 +2013,6 @@ class PanelApp:
         if view_mode != "总览":
             self._island_owner_filter_var.set("全部负责人")
             self._island_channel_filter_var.set("全部渠道")
-            self._island_sub_channel_filter_var.set("全部二级渠道")
         self._island_selected_class = None
         self._sync_island_filter_var(None)
         self._update_island_owner_channel_combos()
@@ -2029,16 +2022,9 @@ class PanelApp:
         self._island_selected_class = None
         self._sync_island_filter_var(None)
         self._update_island_channel_combo(reset=True)
-        self._update_island_sub_channel_combo(reset=True)
         self._render_island_quadrants(self._cached_summary.get("store_specific", self._is_store_selected()))
 
     def _on_island_channel_change(self):
-        self._island_selected_class = None
-        self._sync_island_filter_var(None)
-        self._update_island_sub_channel_combo(reset=True)
-        self._render_island_quadrants(self._cached_summary.get("store_specific", self._is_store_selected()))
-
-    def _on_island_sub_channel_change(self):
         self._island_selected_class = None
         self._sync_island_filter_var(None)
         self._render_island_quadrants(self._cached_summary.get("store_specific", self._is_store_selected()))
@@ -2049,33 +2035,16 @@ class PanelApp:
             channels = ["全部渠道"]
             channel_state = "disabled"
         else:
-            channels = ["全部渠道"] + panel_data.channels_for_owner(self._cached_owner_config, owner)
-            channel_state = "readonly"
+            opts = panel_data.list_island_channel_options(
+                self._cached_products, self._cached_owner_config, owner=owner,
+            )
+            channels = ["全部渠道"] + [str(c) for c in opts]
+            channel_state = "readonly" if opts else "disabled"
         if self._island_channel_combo:
             self._island_channel_combo.configure(values=channels, state=channel_state)
         current = self._island_channel_filter_var.get()
         if reset or current not in channels:
             self._island_channel_filter_var.set("全部渠道")
-
-    def _update_island_sub_channel_combo(self, reset=False):
-        owner = self._island_owner_filter_var.get()
-        if owner in ("", "全部负责人"):
-            values = ["全部二级渠道"]
-            sub_state = "disabled"
-        else:
-            channel = self._island_channel_filter_var.get()
-            ch = None if channel in ("", "全部渠道") else channel
-            subs = panel_data.list_secondary_channels_for_scope(
-                self._cached_products, self._cached_owner_config,
-                owner=owner, channel=ch,
-            )
-            values = ["全部二级渠道"] + subs
-            sub_state = "readonly" if subs else "disabled"
-        if self._island_sub_channel_combo:
-            self._island_sub_channel_combo.configure(values=values, state=sub_state)
-        current = self._island_sub_channel_filter_var.get()
-        if reset or current not in values:
-            self._island_sub_channel_filter_var.set("全部二级渠道")
 
     def _update_island_owner_channel_combos(self):
         owners = ["全部负责人"] + list(panel_data.list_owner_channel_tree(self._cached_owner_config)[0])
@@ -2084,22 +2053,18 @@ class PanelApp:
             if self._island_owner_filter_var.get() not in owners:
                 self._island_owner_filter_var.set("全部负责人")
         self._update_island_channel_combo(reset=True)
-        self._update_island_sub_channel_combo(reset=True)
 
     def _island_scope_filters(self):
         view_mode = self._island_view_mode_var.get()
         owner = self._island_owner_filter_var.get()
         channel = self._island_channel_filter_var.get()
-        sub_channel = self._island_sub_channel_filter_var.get()
         if view_mode != "总览":
-            return None, None, None
+            return None, None
         if owner == "全部负责人":
             owner = None
         if channel == "全部渠道":
             channel = None
-        if sub_channel == "全部二级渠道":
-            sub_channel = None
-        return owner, channel, sub_channel
+        return owner, channel
 
     def _update_main_island_quadrant(self, report):
         counts = report.get("counts") or {}
@@ -2208,7 +2173,6 @@ class PanelApp:
         self._island_selected_class = None
         self._island_owner_filter_var.set("全部负责人")
         self._island_channel_filter_var.set("全部渠道")
-        self._island_sub_channel_filter_var.set("全部二级渠道")
         self._sync_island_filter_var(None)
         self._apply_island_quadrant_styles()
         self._render_island_quadrants(self._cached_summary.get("store_specific", self._is_store_selected()))
@@ -2265,20 +2229,17 @@ class PanelApp:
             )
         if view_mode == "总览":
             self._update_island_channel_combo(reset=False)
-            self._update_island_sub_channel_combo(reset=False)
         elif self._island_channel_combo:
             self._island_channel_combo.configure(state="disabled")
-            if self._island_sub_channel_combo:
-                self._island_sub_channel_combo.configure(state="disabled")
         if view_mode == "总览":
             if self._island_single_frame:
                 self._island_single_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
             if self._island_groups_outer:
                 self._island_groups_outer.pack_forget()
-            owner, channel, sub_channel = self._island_scope_filters()
+            owner, channel = self._island_scope_filters()
             report = panel_data.aggregate_island_quadrants(
                 self._cached_products,
-                owner=owner, channel=channel, sub_channel=sub_channel,
+                owner=owner, channel=channel,
                 config_rows=self._cached_owner_config,
             )
             self._update_main_island_quadrant(report)
@@ -2288,9 +2249,7 @@ class PanelApp:
                 if owner:
                     scope.append(owner)
                 if channel:
-                    scope.append(channel)
-                if sub_channel:
-                    scope.append(sub_channel)
+                    scope.append(f"渠道 {channel}")
                 scope_text = " · ".join(scope) if scope else "全部 SKU"
                 self._island_status_lbl.configure(
                     text=f"总览 · {scope_text} · 共 {report.get('total', 0)} 条在产 SKU",
@@ -2312,10 +2271,10 @@ class PanelApp:
             if self._island_status_lbl and self._island_view_mode_var.get() == "总览":
                 self._island_status_lbl.configure(text="")
             return
-        owner, channel, sub_channel = self._island_scope_filters()
+        owner, channel = self._island_scope_filters()
         report = panel_data.aggregate_island_quadrants(
             self._cached_products,
-            owner=owner, channel=channel, sub_channel=sub_channel,
+            owner=owner, channel=channel,
             config_rows=self._cached_owner_config,
         )
         rows = []

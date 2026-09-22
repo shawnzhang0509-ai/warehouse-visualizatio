@@ -472,6 +472,46 @@ def filter_products_by_owner_channel(products, config_rows, owner=None, channel=
     return scoped
 
 
+def filter_island_scope(products, config_rows=None, owner=None, channel=None,
+                        include_discontinued=False):
+    """南北岛页：负责人（channel_owners 规则）+ 渠道（SKU 前三位，如 130、830）。"""
+    scoped = list(products)
+    if owner and owner not in ("", "全部负责人"):
+        if config_rows:
+            scoped = filter_products_by_owner_channel(
+                products, config_rows, owner=owner, channel=None, sub_channel=None,
+                include_discontinued=include_discontinued,
+            )
+        else:
+            scoped = list(products)
+    if channel and channel not in ("", "全部渠道"):
+        ch = str(channel).strip()
+        scoped = [
+            p for p in scoped
+            if product_matches_channel(p.get("code", ""), ch)
+            or sku_prefix(p.get("code", "")) == ch
+            or sku_prefix(p.get("code", "")) == ch[:SKU_PREFIX_LEN]
+        ]
+    if not include_discontinued:
+        scoped = [p for p in scoped if not p.get("discontinued")]
+    return scoped
+
+
+def list_island_channel_options(products, config_rows, owner=None, include_discontinued=False):
+    """负责人下可选渠道 = 其 SKU 的前三位汇总（与产品表「渠道」列一致）。"""
+    if not owner or owner in ("", "全部负责人"):
+        return []
+    scoped = filter_island_scope(
+        products, config_rows, owner=owner, channel=None,
+        include_discontinued=include_discontinued,
+    )
+    return sorted({
+        sku_prefix(p.get("code", ""))
+        for p in scoped
+        if p.get("code") and sku_prefix(p.get("code", "")) not in ("", "???")
+    })
+
+
 def list_secondary_channels_for_scope(products, config_rows, owner=None, channel=None,
                                       include_discontinued=False):
     """二级渠道：优先 channel_owners 的 sub_channel 列，否则用 SKU 前三位。"""
@@ -504,10 +544,11 @@ def list_secondary_channels_for_scope(products, config_rows, owner=None, channel
 def aggregate_island_quadrants(products, include_discontinued=False, owner=None, channel=None,
                                sub_channel=None, config_rows=None):
     """统计四象限 SKU 数（默认仅计在产），可按负责人/渠道筛选。"""
+    ch = channel or sub_channel
     scoped = products
-    if config_rows and (owner or channel or sub_channel):
-        scoped = filter_products_by_owner_channel(
-            products, config_rows, owner=owner, channel=channel, sub_channel=sub_channel,
+    if owner or ch:
+        scoped = filter_island_scope(
+            products, config_rows, owner=owner, channel=ch,
             include_discontinued=include_discontinued,
         )
     counts, rows = _island_counts_from_products(scoped, include_discontinued)
@@ -1336,6 +1377,7 @@ def _load_region_bundle(region, force=False):
         parts_row_count = len(parts_rows)
         parts_detail_rows = _parse_parts_detail_rows(parts_rows)
     else:
+        parts_rows = []
         parts_detail_rows = []
     blacklist = _load_blacklist(blacklist_path)
     stock_raw_rows = _read_table(stock_path)
@@ -1378,6 +1420,7 @@ def _load_region_bundle(region, force=False):
         "parts_by_code": parts_by_code,
         "parts_row_count": parts_row_count,
         "parts_detail_rows": parts_detail_rows,
+        "parts_rows": parts_rows,
         "stock_row_count": len(stock_raw_rows),
     }
     _REGION_CACHE[region_key] = bundle
@@ -1772,6 +1815,15 @@ def _load_parts_inventory(rows):
     return by_code
 
 
+def _infer_kit_parent_sku(sku):
+    """从配件 SKU 推断母件，如 130-051-LEG → 130-051。"""
+    text = str(sku or "").strip().upper()
+    match = re.match(r"^(\d+-\d+)", text)
+    if match:
+        return match.group(1)
+    return text
+
+
 def _warehouse_transfer_bucket(warehouse_name):
     text = str(warehouse_name or "").lower()
     for bucket, tokens in TRANSFER_WAREHOUSE_BUCKETS:
@@ -1781,15 +1833,19 @@ def _warehouse_transfer_bucket(warehouse_name):
 
 
 def _parse_parts_detail_rows(rows):
-    """解析 parts.csv 行：母件 + 子件 + 仓 + 数量。"""
+    """解析 parts.csv 行：母件 + 子件 + 仓 + 数量（无母件列时按 SKU 前两段推断）。"""
     detail = []
     for row in rows:
-        part = str(_pick_fuzzy(row, PARTS_COMPONENT_KEYS) or _mining_code_from_row(row) or "").strip()
-        parent = str(_pick_fuzzy(row, PARTS_PARENT_KEYS) or "").strip()
-        if not part:
+        code = str(_mining_code_from_row(row) or "").strip()
+        if not code:
             continue
-        if not parent:
-            parent = part
+        parent = str(_pick_fuzzy(row, PARTS_PARENT_KEYS) or "").strip()
+        comp = str(_pick_fuzzy(row, PARTS_COMPONENT_KEYS) or "").strip()
+        if parent:
+            part = comp or code
+        else:
+            parent = _infer_kit_parent_sku(code)
+            part = comp or code
         warehouse = str(
             _pick(row, STORE_KEYS + ["warehousename"]) or _pick_fuzzy(row, STORE_KEYS + ["warehousename"]) or ""
         ).strip()
@@ -1821,6 +1877,9 @@ def analyze_parts_transfer(rows):
         detail = _parse_parts_detail_rows(rows)
     if not detail:
         return []
+    parts_per_parent = {}
+    for line in detail:
+        parts_per_parent.setdefault(line["parent"], set()).add(line["part"])
     kits = {}
     for line in detail:
         parent = line["parent"]
@@ -1841,11 +1900,9 @@ def analyze_parts_transfer(rows):
     hub_buckets = ("carbine", "walls", "chch")
     results = []
     for parent, kit in kits.items():
+        if len(parts_per_parent.get(parent, ())) < 2:
+            continue
         parts = kit["parts"]
-        if len(parts) < 2:
-            only_part = next(iter(parts)) if parts else None
-            if only_part is None or parent == only_part:
-                continue
         sets_by = {}
         for bucket in hub_buckets:
             sets_by[bucket] = min(
