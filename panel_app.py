@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.18"
+APP_VERSION = "1.9.19"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -212,6 +212,7 @@ class PanelApp:
         self._island_channel_filter_var = tk.StringVar(value="全部渠道")
         self._mining_kind_var = tk.StringVar(value="全部")
         self._onhold_status_filter_var = tk.StringVar(value="全部状态")
+        self._filter_combos = []
         self.load_images_var = tk.BooleanVar(value=True)
         self.result_count_var = tk.StringVar(value="")
         self._status_var = tk.StringVar(value="")
@@ -309,7 +310,8 @@ class PanelApp:
                 row=0, column=col, sticky="w")
             cb = ttk.Combobox(filter_bar, width=10, state="readonly", textvariable=var, values=values)
             cb.grid(row=1, column=col, sticky="w", padx=(0, 10), pady=(2, 0))
-            cb.bind("<<ComboboxSelected>>", lambda _e: self._on_filter_combo_change())
+            self._filter_combos.append((cb, var))
+            cb.bind("<<ComboboxSelected>>", lambda _e: self.root.after_idle(self._on_filter_combo_change))
 
         ttk.Checkbutton(filter_bar, text="行内缩略图", variable=self.load_images_var,
                         command=self._on_toggle_inline_images).grid(row=1, column=6, sticky="w", padx=(4, 0))
@@ -977,8 +979,17 @@ class PanelApp:
         store = self.store_combo.get() if self.store_combo else self.store_var.get()
         return store != panel_data.ALL_STORES
 
+    def _sync_filter_combos(self):
+        for combo, var in getattr(self, "_filter_combos", ()):
+            self._sync_island_combo_to_var(combo, var)
+
+    def _discontinue_filter_value(self):
+        self._sync_filter_combos()
+        return str(self.discontinue_filter_var.get()).strip()
+
     def _on_filter_combo_change(self):
-        disc_f = self.discontinue_filter_var.get()
+        self._sync_filter_combos()
+        disc_f = self._discontinue_filter_value()
         if not panel_data.EAGER_DISCONTINUED_STOCK:
             need_full = self.discontinue_filter_var.get() in ("全部", "已停产")
             if need_full != self._loaded_full_stock:
@@ -1023,15 +1034,9 @@ class PanelApp:
         self.only_exempted_var.set(False)
         self._quick_filter = None
 
-    def _ensure_active_disc_filter(self):
-        if self.discontinue_filter_var.get() == "已停产":
-            self.discontinue_filter_var.set("在产")
-            if not panel_data.EAGER_DISCONTINUED_STOCK:
-                self.reload()
-                return True
-        return False
-
     def _on_stat_card_click(self, key):
+        self._sync_filter_combos()
+        disc_f = self._discontinue_filter_value()
         if key in ("gap", "exempted", "warehouse_only") and not self._is_store_selected():
             return
         if key == "warehouse_only" and not self._cached_summary.get("has_storage_data"):
@@ -1043,15 +1048,18 @@ class PanelApp:
             self.only_exempted_var.set(False)
             self.only_gap_var.set(turning_on)
             self._quick_filter = "gap" if turning_on else None
-            if turning_on and self._ensure_active_disc_filter():
-                return
+            if turning_on and disc_f == "已停产":
+                self.stock_filter_var.set("有货")
+                self.display_filter_var.set("未展示")
         elif key == "warehouse_only":
             turning_on = not self.only_warehouse_only_var.get()
             self.only_gap_var.set(False)
             self.only_exempted_var.set(False)
             self.only_warehouse_only_var.set(turning_on)
             if turning_on:
-                if self._ensure_active_disc_filter():
+                if disc_f == "已停产":
+                    self._status_var.set("「仓有店仓无」仅统计在产 SKU，请先将「停产」改为「在产」")
+                    self.only_warehouse_only_var.set(False)
                     return
                 self.stock_filter_var.set("有货")
                 self.display_filter_var.set("未展示")
@@ -1069,7 +1077,7 @@ class PanelApp:
             self.stock_filter_var.set("无货" if self.stock_filter_var.get() == "有货" else "有货")
         if (
             not panel_data.EAGER_DISCONTINUED_STOCK
-            and (self.discontinue_filter_var.get() in ("全部", "已停产"))
+            and (self._discontinue_filter_value() in ("全部", "已停产"))
             != self._loaded_full_stock
         ):
             self.reload()
@@ -1541,9 +1549,10 @@ class PanelApp:
     def _needs_discontinued_stock(self):
         if panel_data.EAGER_DISCONTINUED_STOCK:
             return True
-        return self.discontinue_filter_var.get() in ("全部", "已停产")
+        return self._discontinue_filter_value() in ("全部", "已停产")
 
     def reload(self, force=False):
+        self._sync_filter_combos()
         self._reload_token += 1
         token = self._reload_token
         region = self._current_region()
@@ -1596,7 +1605,7 @@ class PanelApp:
         q = self.search_var.get().strip().lower()
         stock_f = self.stock_filter_var.get()
         display_f = self.display_filter_var.get()
-        disc_f = self.discontinue_filter_var.get()
+        disc_f = self._discontinue_filter_value()
         only_gap = self.only_gap_var.get()
         only_warehouse_only = self.only_warehouse_only_var.get()
         only_exempted = self.only_exempted_var.get()
@@ -1619,8 +1628,12 @@ class PanelApp:
                 continue
             if disc_f == "已停产" and not p.get("discontinued"):
                 continue
-            if only_gap and not p.get("gap"):
-                continue
+            if only_gap:
+                if p.get("discontinued"):
+                    if not (p.get("in_stock") and not p.get("displayed") and not p.get("exempted")):
+                        continue
+                elif not p.get("gap"):
+                    continue
             if only_warehouse_only and not (p.get("warehouse_only") and not p.get("exempted")):
                 continue
             if only_exempted and not p.get("exempted"):
@@ -1686,7 +1699,8 @@ class PanelApp:
         s = self._cached_summary
 
         store_specific = s.get("store_specific", self._is_store_selected())
-        disc_f = self.discontinue_filter_var.get()
+        self._sync_filter_combos()
+        disc_f = self._discontinue_filter_value()
         has_storage = bool(s.get("has_storage_data"))
         if (not store_specific or not has_storage) and self.only_warehouse_only_var.get():
             self.only_warehouse_only_var.set(False)
@@ -3068,6 +3082,7 @@ class PanelApp:
     def _expand_all_groups(self):
         if not self._tree:
             return
+        self._sync_filter_combos()
         pending = [iid for iid in self._tree.get_children() if iid in self._lazy_groups]
         if not pending:
             return
