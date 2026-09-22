@@ -2088,7 +2088,24 @@ def diagnose_on_hold_bundle(bundle):
     return ""
 
 
-def list_on_hold_analysis(bundle, status_filter=None, catalog_by_norm=None, max_rows=None):
+def parse_on_hold_min_days(filter_label):
+    """冻结天数筛选：全部 / 30天以上 / 90天以上 / 360天以上。"""
+    text = str(filter_label or "").strip()
+    if not text or text in ("全部", "全部天数", "不限"):
+        return None
+    if "360" in text:
+        return 360
+    if "90" in text:
+        return 90
+    if "30" in text:
+        return 30
+    match = re.search(r"(\d+)", text)
+    return int(match.group(1)) if match else None
+
+
+def list_on_hold_analysis(
+    bundle, status_filter=None, catalog_by_norm=None, max_rows=None, min_hold_days=None,
+):
     """On Hold 明细：每行 CSV 一条（同 SKU 不同订单/时间分开），可按状态精确筛选。"""
     detail = list(bundle.get("on_hold_detail_rows") or [])
     if not detail and bundle.get("on_hold_rows"):
@@ -2103,6 +2120,10 @@ def list_on_hold_analysis(bundle, status_filter=None, catalog_by_norm=None, max_
         norm_tokens = [_normalize_on_hold_status(t) for t in tokens]
         if norm_filter and norm_filter not in ("", "全部状态"):
             if norm_filter not in norm_tokens:
+                continue
+        hold_days = line.get("hold_days")
+        if min_hold_days is not None and min_hold_days > 0:
+            if hold_days is None or hold_days < min_hold_days:
                 continue
         display_status = (
             status_filter
