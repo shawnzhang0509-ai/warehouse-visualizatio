@@ -2556,6 +2556,75 @@ def _load_parts_inventory_wide(rows):
     return by_code
 
 
+def _pooled_complete_sets(kit, parts, buckets):
+    if not parts:
+        return 0
+    vals = []
+    for part_id, need in parts.items():
+        if need <= 0:
+            continue
+        total = sum(kit["inv"].get((part_id, b), 0.0) for b in buckets)
+        vals.append(total / need)
+    if not vals:
+        return 0
+    return int(min(vals))
+
+
+def _north_assembly_hub(sets_by):
+    """北岛借调优先在 Carbine / Walls 间调配，缺件侧为组装仓。"""
+    sc = int(sets_by.get("carbine") or 0)
+    sw = int(sets_by.get("walls") or 0)
+    return "walls" if sw > sc else "carbine"
+
+
+def _transfer_flows_between_hubs(kit, parts, target_sets, hub, other):
+    """为在北岛凑 target_sets 套，从 other 仓调部件到 hub 仓（仅 Carbine↔Walls）。"""
+    flows = []
+    if target_sets <= 0:
+        return flows
+    for part_id, need in sorted(parts.items()):
+        if need <= 0:
+            continue
+        req = need * target_sets
+        q_hub = kit["inv"].get((part_id, hub), 0.0)
+        q_other = kit["inv"].get((part_id, other), 0.0)
+        if q_hub + q_other < req:
+            continue
+        move = req - q_hub
+        if move >= 1:
+            flows.append((other, hub, part_id, int(move)))
+    return flows
+
+
+def _transfer_flows_from_chch(kit, parts, extra_sets, hub):
+    """北岛仍凑不齐时，从 CHCH 调南岛件到北岛组装仓。"""
+    flows = []
+    if extra_sets <= 0:
+        return flows
+    for part_id, need in sorted(parts.items()):
+        if need <= 0:
+            continue
+        req = need * extra_sets
+        qh = kit["inv"].get((part_id, "chch"), 0.0)
+        qty = int(min(qh, req))
+        if qty > 0:
+            flows.append(("chch", hub, part_id, qty))
+    return flows
+
+
+def _format_transfer_flows(flows, max_lines=5):
+    if not flows:
+        return ""
+    labels = {"carbine": "Carbine", "walls": "Walls", "chch": "CHCH"}
+    chunks = []
+    for src, dst, part_id, qty in flows[:max_lines]:
+        chunks.append(f"{labels.get(src, src)}→{labels.get(dst, dst)} {part_id}×{qty}")
+    text = "; ".join(chunks)
+    if len(flows) > max_lines:
+        text += f" 等{len(flows)}项"
+    return text
+
+
 def analyze_parts_transfer(rows, parts_kit_bom=None, warehouse_hints=None, warehouse_overrides=None):
     """
     跨 Carbine / Walls / CHCH 借调拼凑：比较各仓独立成套数 vs 三仓合并后最多成套数。
@@ -2604,12 +2673,31 @@ def analyze_parts_transfer(rows, parts_kit_bom=None, warehouse_hints=None, wareh
             )
             sets_by[bucket] = int(sets_by[bucket])
         current_total = sum(sets_by[bucket] for bucket in hub_buckets)
-        pooled = {}
-        for part_id, need in parts.items():
-            pooled[part_id] = sum(kit["inv"].get((part_id, b), 0.0) for b in hub_buckets)
-        after_transfer = min(pooled[part_id] / need for part_id, need in parts.items())
-        after_transfer = int(after_transfer)
+        north_buckets = ("carbine", "walls")
+        after_north = _pooled_complete_sets(kit, parts, north_buckets)
+        after_transfer = _pooled_complete_sets(kit, parts, hub_buckets)
         gain = after_transfer - current_total
+        gain_north = after_north - current_total
+        gain_south = after_transfer - after_north
+        hub = _north_assembly_hub(sets_by)
+        other = "walls" if hub == "carbine" else "carbine"
+        if gain_north > 0 or gain_south > 0:
+            north_txt = _format_transfer_flows(
+                _transfer_flows_between_hubs(kit, parts, after_north, hub, other),
+            )
+            south_txt = _format_transfer_flows(
+                _transfer_flows_from_chch(kit, parts, gain_south, hub),
+            ) if gain_south > 0 else ""
+            if north_txt and south_txt:
+                transfer_plan = f"①北岛 {north_txt}；②南岛补位 {south_txt}"
+            elif north_txt:
+                transfer_plan = f"北岛 {north_txt}"
+            elif south_txt:
+                transfer_plan = f"南岛→北岛 {south_txt}"
+            else:
+                transfer_plan = ""
+        else:
+            transfer_plan = ""
         if current_total <= 0 and after_transfer <= 0:
             continue
         dist_parts = []
@@ -2631,8 +2719,12 @@ def analyze_parts_transfer(rows, parts_kit_bom=None, warehouse_hints=None, wareh
             "sets_walls": sets_by["walls"],
             "sets_chch": sets_by["chch"],
             "sets_current_total": current_total,
+            "sets_after_north": after_north,
             "sets_after_transfer": after_transfer,
             "transfer_gain": gain,
+            "transfer_gain_north": gain_north,
+            "transfer_gain_south": gain_south,
+            "transfer_plan": transfer_plan or "-",
             "parts_distribution": "; ".join(dist_parts[:6]),
         })
     results.sort(key=lambda r: (-r["transfer_gain"], -r["sets_after_transfer"], r["parent"]))

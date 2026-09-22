@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.17"
+APP_VERSION = "1.9.18"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -851,24 +851,25 @@ class PanelApp:
         mining_transfer_tab = self._mining_transfer_tab
         tk.Label(
             mining_transfer_tab,
-            text="母件 SKU 互不合并（267-914 与 267-914-1 为不同成品）；同一母件下按 PartName 区分子件。现有合计=三仓各自成套之和；借调收益=三仓合并后可凑套数−现有合计",
+            text="借调策略：先在 Carbine↔Walls 北岛互调凑套；仍不足再用 CHCH 南岛件补北岛。现有合计=三仓各自成套之和；北岛调后=仅 C+W 合并；调货后=三仓合并。",
             bg="white", fg=C_MUTED, font=("Segoe UI", 9), wraplength=900, justify="left",
         ).pack(anchor="w", padx=4, pady=(6, 4))
         transfer_wrap = tk.Frame(mining_transfer_tab, bg="white")
         transfer_wrap.pack(fill=tk.BOTH, expand=True, padx=0, pady=(0, 6))
         tcols = (
             "parent", "name", "part_count", "sets_carbine", "sets_walls", "sets_chch",
-            "sets_current", "sets_after", "gain", "distribution",
+            "sets_current", "sets_after_north", "sets_after", "gain", "transfer_plan", "distribution",
         )
         self._mining_transfer_tree = ttk.Treeview(
             transfer_wrap, columns=tcols, show="headings",
             selectmode="browse", style="Prefix.Treeview",
         )
         transfer_headings = {
-            "parent": ("母件 SKU", 88), "name": ("名称", 200), "part_count": ("部件数", 56),
-            "sets_carbine": ("Carbine", 64), "sets_walls": ("Walls", 56), "sets_chch": ("CHCH", 56),
-            "sets_current": ("现有合计", 72), "sets_after": ("调货后", 64), "gain": ("借调收益", 72),
-            "distribution": ("Parts 分布", 280),
+            "parent": ("母件 SKU", 88), "name": ("名称", 160), "part_count": ("部件数", 52),
+            "sets_carbine": ("Carbine", 56), "sets_walls": ("Walls", 52), "sets_chch": ("CHCH", 52),
+            "sets_current": ("现有合计", 64), "sets_after_north": ("北岛调后", 64),
+            "sets_after": ("调货后", 56), "gain": ("借调收益", 64),
+            "transfer_plan": ("借调方案", 240), "distribution": ("Parts 分布", 200),
         }
         for col, (text, width) in transfer_headings.items():
             self._mining_transfer_tree.heading(col, text=text)
@@ -2199,8 +2200,10 @@ class PanelApp:
                     row.get("sets_walls") or 0,
                     row.get("sets_chch") or 0,
                     row.get("sets_current_total") or 0,
+                    row.get("sets_after_north") or 0,
                     row.get("sets_after_transfer") or 0,
                     gain,
+                    row.get("transfer_plan") or "-",
                     row.get("parts_distribution") or "-",
                 ),
                 tags=tags,
