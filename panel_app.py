@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.11"
+APP_VERSION = "1.9.12"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -2150,7 +2150,12 @@ class PanelApp:
         raw_parts = bundle.get("parts_rows") or []
         detail = bundle.get("parts_detail_rows") or []
         bom = bundle.get("parts_kit_bom") or {}
-        rows = panel_data.analyze_parts_transfer(raw_parts or detail, parts_kit_bom=bom)
+        rows = panel_data.analyze_parts_transfer(
+            raw_parts or detail,
+            parts_kit_bom=bom,
+            warehouse_hints=bundle.get("warehouse_transfer_hints"),
+            warehouse_overrides=bundle.get("warehouse_bucket_overrides"),
+        )
         if self._mining_transfer_tree.get_children():
             self._mining_transfer_tree.delete(*self._mining_transfer_tree.get_children())
         for idx, row in enumerate(rows):

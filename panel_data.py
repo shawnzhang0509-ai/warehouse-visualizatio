@@ -15,7 +15,7 @@ import csv
 import json
 import os
 import re
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
@@ -77,14 +77,22 @@ PARTS_COMPONENT_KEYS = [
 ]
 PARTS_PER_SET_KEYS = ["partsperset", "parts_per_set", "qtyperset", "unitqty", "部件数", "requiredqty"]
 TRANSFER_WAREHOUSE_BUCKETS = (
-    ("carbine", ("carbine", "carbine rd", "carbin", "cbn warehouse")),
-    ("walls", ("walls", "wall rd", "walls road", "walls in transit", "wall warehouse")),
+    ("carbine", (
+        "carbine", "carbine rd", "carbin", "carbin rd", "cbn", "carbine road",
+        "carbine warehouse", "carbine wh",
+    )),
+    ("walls", (
+        "walls", "wall rd", "walls road", "walls in transit", "wall warehouse",
+        "walls wh", "walls transit",
+    )),
     ("chch", (
-        "gerald", "gc", "chch", "geraldconnelly", "gerald connelly", "connelly",
-        "christchurch", "chc warehouse",
+        "gerald", "gerald connelly", "geraldconnelly", "gerald connolly",
+        "gc", "g c", "chch", "connelly", "christchurch", "chc warehouse",
+        "south island", "southisland",
     )),
 )
 PARTS_KIT_FILE_STEMS = ("parts_kits", "parts_kit", "kit_parts", "parts_bom")
+WAREHOUSE_BUCKET_FILE_STEMS = ("warehouse_buckets", "warehouse_map", "warehouse_aliases")
 LEAD_TIME_KEYS = ["lead_time", "leadtime", "leadtime_days", "lead timedays"]
 MERGE_PRODUCT_KEYS = ["merge_products", "merge", "mergeproducts", "必须合并计算的产品"]
 MERGE_REGION_KEYS = ["merge_regions", "regions", "merge_regions", "必须合并计算的地区"]
@@ -1401,6 +1409,11 @@ def _load_region_bundle(region, force=False):
         parts_kit_bom = {}
     blacklist = _load_blacklist(blacklist_path)
     stock_raw_rows = _read_table(stock_path)
+    warehouse_transfer_hints = _warehouse_hints_from_stock_rows(stock_raw_rows)
+    warehouse_bucket_overrides = _load_warehouse_bucket_overrides(data_dir)
+    parts_detail_rows = _apply_warehouse_buckets(
+        parts_detail_rows, warehouse_transfer_hints, warehouse_bucket_overrides,
+    )
     active_rows = _load_stock(stock_raw_rows, data_dir, discontinued=False)
     _enrich_catalog_metadata(active_rows)
     bundle = {
@@ -1443,6 +1456,8 @@ def _load_region_bundle(region, force=False):
         "parts_detail_rows": parts_detail_rows,
         "parts_rows": parts_rows,
         "parts_kit_bom": parts_kit_bom if parts_path and Path(parts_path).is_file() else {},
+        "warehouse_transfer_hints": warehouse_transfer_hints,
+        "warehouse_bucket_overrides": warehouse_bucket_overrides,
         "stock_row_count": len(stock_raw_rows),
     }
     _REGION_CACHE[region_key] = bundle
@@ -2068,6 +2083,7 @@ def describe_parts_transfer_gap(detail):
         return "未解析出任何 parts 行"
     hub = sum(1 for line in detail if line.get("bucket") in ("carbine", "walls", "chch"))
     other = len(detail) - hub
+    empty_wh = sum(1 for line in detail if not str(line.get("warehouse") or "").strip())
     parts_per_parent = {}
     for line in detail:
         parts_per_parent.setdefault(line["parent"], set()).add(line["part"])
@@ -2079,18 +2095,125 @@ def describe_parts_transfer_gap(detail):
         lines = [line for line in detail if line.get("parent") == parent]
         if any(line.get("bucket") in ("carbine", "walls", "chch") for line in lines):
             hub_parents += 1
-    return (
+    msg = (
         f"解析 {len(detail)} 行 · 三仓 {hub} 行 / 其他仓 {other} 行 · "
         f"多配件母件 {multi} 组（三仓有库存 {hub_parents} 组）"
     )
+    if empty_wh:
+        msg += f" · 缺仓名列 {empty_wh} 行"
+    if other:
+        samples = Counter(
+            str(line.get("warehouse") or "（空）").strip() or "（空）"
+            for line in detail
+            if line.get("bucket") == "other"
+        ).most_common(4)
+        if samples:
+            msg += " · 未归入三仓示例：" + "；".join(f"{name}({cnt})" for name, cnt in samples)
+    return msg
 
 
-def _warehouse_transfer_bucket(warehouse_name):
-    text = str(warehouse_name or "").lower()
+def _warehouse_stock_key(name):
+    """与 stock 多仓列 / 南北岛同一套识别逻辑。"""
+    key = _norm_col_key(name)
+    if not key:
+        return None
+    if "carbine" in key or "carbin" in key or key.startswith("cbn"):
+        return "carbine"
+    if "walls" in key or key.startswith("wall"):
+        return "walls"
+    if (
+        "geraldconnelly" in key
+        or ("gerald" in key and "connelly" in key)
+        or key.startswith("gc")
+        or "chch" in key
+        or "christchurch" in key
+        or "connelly" in key
+        or "southisland" in key
+    ):
+        return "geraldconnelly"
+    return None
+
+
+def _transfer_bucket_from_stock_key(stock_key):
+    if stock_key == "geraldconnelly":
+        return "chch"
+    if stock_key in ("carbine", "walls"):
+        return stock_key
+    return None
+
+
+def _warehouse_hints_from_stock_rows(stock_raw_rows):
+    """从 stock.csv 表头学习仓名列名片段（如 CarbineSt → carbine）。"""
+    hints = {"carbine": set(), "walls": set(), "chch": set()}
+    if not stock_raw_rows:
+        return {}
+    for col in stock_raw_rows[0].keys():
+        stock_key = _classify_warehouse_column(col)
+        bucket = _transfer_bucket_from_stock_key(stock_key)
+        if not bucket:
+            continue
+        label = str(col).strip().lower()
+        if label:
+            hints[bucket].add(label)
+        nk = _norm_col_key(col)
+        if nk:
+            hints[bucket].add(nk)
+    return {bucket: tuple(sorted(values)) for bucket, values in hints.items() if values}
+
+
+def _load_warehouse_bucket_overrides(data_dir):
+    """Data-NZ/warehouse_buckets.csv：warehouse_name,bucket（carbine/walls/chch）。"""
+    if not data_dir:
+        return {}
+    path = _find_region_data_file(data_dir, WAREHOUSE_BUCKET_FILE_STEMS)
+    if not path:
+        return {}
+    overrides = {}
+    try:
+        for row in _read_table(path):
+            name = str(_pick_fuzzy(row, STORE_KEYS + ["warehousename", "name", "alias"]) or "").strip()
+            bucket = str(_pick(row, ["bucket", "hub", "type"]) or _pick_fuzzy(row, ["bucket", "hub"]) or "").strip().lower()
+            if not name or not bucket:
+                continue
+            if bucket in ("gc", "gerald", "geraldconnelly", "south"):
+                bucket = "chch"
+            if bucket not in ("carbine", "walls", "chch"):
+                continue
+            overrides[name.lower()] = bucket
+    except Exception:
+        return {}
+    return overrides
+
+
+def _warehouse_transfer_bucket(warehouse_name, hints=None, overrides=None):
+    text = str(warehouse_name or "").strip()
+    if not text:
+        return "other"
+    low = text.lower()
+    if overrides and low in overrides:
+        return overrides[low]
+    stock_key = _warehouse_stock_key(text)
+    bucket = _transfer_bucket_from_stock_key(stock_key)
+    if bucket:
+        return bucket
     for bucket, tokens in TRANSFER_WAREHOUSE_BUCKETS:
-        if any(token in text for token in tokens):
+        if any(token in low for token in tokens):
             return bucket
+    if hints:
+        for bucket, fragments in hints.items():
+            for frag in fragments:
+                frag = str(frag or "").lower()
+                if frag and (frag in low or _norm_col_key(frag) in _norm_col_key(text)):
+                    return bucket
     return "other"
+
+
+def _apply_warehouse_buckets(detail, hints=None, overrides=None):
+    for line in detail or []:
+        line["bucket"] = _warehouse_transfer_bucket(
+            line.get("warehouse"), hints=hints, overrides=overrides,
+        )
+    return detail
 
 
 def _parse_parts_detail_rows(rows):
@@ -2127,7 +2250,7 @@ def _parse_parts_detail_rows(rows):
     return detail
 
 
-def analyze_parts_transfer(rows, parts_kit_bom=None):
+def analyze_parts_transfer(rows, parts_kit_bom=None, warehouse_hints=None, warehouse_overrides=None):
     """
     跨 Carbine / Walls / CHCH 借调拼凑：比较各仓独立成套数 vs 三仓合并后最多成套数。
     可传入 parts.csv 原始行，或 bundle 内已解析的 parts_detail_rows。
@@ -2140,6 +2263,7 @@ def analyze_parts_transfer(rows, parts_kit_bom=None):
         return []
     detail = _apply_parts_kit_bom(detail, parts_kit_bom or {})
     detail = _reparent_parts_detail(detail)
+    detail = _apply_warehouse_buckets(detail, warehouse_hints, warehouse_overrides)
     parts_per_parent = {}
     for line in detail:
         parts_per_parent.setdefault(line["parent"], set()).add(line["part"])

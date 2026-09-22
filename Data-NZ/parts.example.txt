@@ -1,6 +1,7 @@
 -- 配件 / Parts 库存 → Output-NZ/parts.csv
 -- 复制为 parts.txt 后按业务修改；parts.txt 不提交 Git（每人本地 SQL）
 -- 跨仓借调：无母件列时按 SKU 前两段或 ProductFamily 归组；也可放 Data-NZ/parts_kits.csv 定义母件/子件
+-- 若三仓行数为 0，看状态栏「未归入三仓示例」；可在 Data-NZ/warehouse_buckets.csv 手工映射仓名→carbine/walls/chch
 
 SELECT
     w.Name AS WarehouseName,
