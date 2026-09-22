@@ -69,13 +69,18 @@ CHANNEL_KEYS = ["channel", "渠道", "sku_prefix", "prefix", "channelcode"]
 SUB_CHANNEL_KEYS = ["sub_channel", "二级渠道", "subchannel", "channel2", "二级", "subchannelcode"]
 PARTS_PARENT_KEYS = [
     "parentsku", "parent_sku", "kitsku", "kit_sku", "productsku", "product_sku",
+    "productsk", "productcc", "productcode",
     "mainsku", "main_sku", "成品sku", "母件sku", "setsku", "kitcode",
 ]
 PARTS_COMPONENT_KEYS = [
     "partsku", "part_sku", "componentsku", "component_sku", "subsku", "子件sku",
-    "componentcode", "partcode",
+    "componentcode", "partcode", "partname", "part_name",
 ]
-PARTS_PER_SET_KEYS = ["partsperset", "parts_per_set", "qtyperset", "unitqty", "部件数", "requiredqty"]
+PARTS_PER_SET_KEYS = [
+    "partsperset", "parts_per_set", "qtyperset", "unitqty", "部件数", "requiredqty",
+    "标准部件", "标准部件数",
+]
+WIDE_PART_NAME_KEYS = ["partname", "part_name", "部件名", "部件名称", "part"]
 TRANSFER_WAREHOUSE_BUCKETS = (
     ("carbine", (
         "carbine", "carbine rd", "carbin", "carbin rd", "cbn", "carbine road",
@@ -1397,7 +1402,7 @@ def _load_region_bundle(region, force=False):
     parts_row_count = 0
     if parts_path and Path(parts_path).is_file():
         parts_rows = _read_mining_table(parts_path)
-        parts_by_code = _load_parts_inventory(parts_rows)
+        parts_by_code = _load_parts_inventory_wide(parts_rows) or _load_parts_inventory(parts_rows)
         parts_row_count = len(parts_rows)
         parts_kit_bom = _load_parts_kit_bom(data_dir)
         parts_detail_rows = _parse_parts_detail_rows(parts_rows)
@@ -2262,8 +2267,79 @@ def _apply_warehouse_buckets(detail, hints=None, overrides=None):
     return detail
 
 
+def _classify_parts_hub_column(col_name):
+    """宽表列名：Carbin 库存 / Walls 库存 / CHCH 库存 → 借调三仓。"""
+    key = _norm_col_key(col_name)
+    if not key:
+        return None
+    if "carbin" in key or "carbine" in key or key.startswith("cbn"):
+        return "carbine"
+    if "walls" in key or key.startswith("wall"):
+        return "walls"
+    if "chch" in key or key == "gc" or key.startswith("gc") or "gerald" in key:
+        return "chch"
+    return None
+
+
+def _hub_qty_columns_from_row(sample_row):
+    cols = []
+    for key in sample_row.keys():
+        bucket = _classify_parts_hub_column(key)
+        if bucket:
+            cols.append((key, bucket))
+    return cols
+
+
+def _parse_parts_wide_hub_rows(rows):
+    """
+    Excel 宽表：每行一个子件，Carbin/Walls/CHCH 库存分列（如「Carbin 库存」）。
+    """
+    if not rows:
+        return []
+    hub_cols = _hub_qty_columns_from_row(rows[0])
+    if len(hub_cols) < 2:
+        return []
+    detail = []
+    for row in rows:
+        parent = str(
+            _pick_fuzzy(row, PARTS_PARENT_KEYS) or _pick(row, CODE_KEYS) or ""
+        ).strip()
+        if not parent:
+            parent = str(_mining_code_from_row(row) or "").strip()
+        if not parent:
+            continue
+        part_label = str(
+            _pick_fuzzy(row, WIDE_PART_NAME_KEYS + PARTS_COMPONENT_KEYS) or ""
+        ).strip()
+        part = f"{parent}::{part_label}" if part_label else parent
+        name = str(
+            _pick(row, NAME_KEYS) or _pick_fuzzy(row, NAME_KEYS + ["productna", "productname"]) or ""
+        ).strip()
+        need = _to_float(_pick_fuzzy(row, PARTS_PER_SET_KEYS)) or 1.0
+        if need <= 0:
+            need = 1.0
+        for col_name, bucket in hub_cols:
+            qty = _to_float(row.get(col_name))
+            if qty is None or qty <= 0:
+                continue
+            detail.append({
+                "parent": parent,
+                "part": part,
+                "name": name,
+                "family": str(_pick(row, FAMILY_KEYS) or "").strip(),
+                "warehouse": str(col_name).strip(),
+                "bucket": bucket,
+                "qty": float(qty),
+                "need_per_set": need,
+            })
+    return detail
+
+
 def _parse_parts_detail_rows(rows):
-    """解析 parts.csv 行：母件 + 子件 + 仓 + 数量（无母件列时按 SKU 前两段推断）。"""
+    """解析 parts.csv：支持宽表三仓列，或长表 WarehouseName + Sku。"""
+    wide = _parse_parts_wide_hub_rows(rows)
+    if wide:
+        return wide
     detail = []
     for row in rows:
         code = str(_mining_code_from_row(row) or "").strip()
@@ -2294,6 +2370,30 @@ def _parse_parts_detail_rows(rows):
             "need_per_set": need,
         })
     return detail
+
+
+def _load_parts_inventory_wide(rows):
+    """宽表 parts：按母件 SKU 汇总三仓数量（供库存清单）。"""
+    detail = _parse_parts_wide_hub_rows(rows)
+    if not detail:
+        return None
+    by_code = {}
+    for line in detail:
+        parent = line["parent"]
+        norm = _norm_code(parent)
+        bucket = by_code.setdefault(norm, {
+            "code": parent,
+            "name": line.get("name") or "",
+            "family": line.get("family") or "",
+            "total_qty": 0.0,
+            "warehouses": [],
+        })
+        bucket["total_qty"] += line["qty"]
+        bucket["warehouses"].append({
+            "warehouse": line.get("warehouse") or line.get("bucket"),
+            "qty": line["qty"],
+        })
+    return by_code
 
 
 def analyze_parts_transfer(rows, parts_kit_bom=None, warehouse_hints=None, warehouse_overrides=None):
