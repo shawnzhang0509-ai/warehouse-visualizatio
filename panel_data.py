@@ -75,10 +75,14 @@ PARTS_COMPONENT_KEYS = [
 ]
 PARTS_PER_SET_KEYS = ["partsperset", "parts_per_set", "qtyperset", "unitqty", "部件数", "requiredqty"]
 TRANSFER_WAREHOUSE_BUCKETS = (
-    ("carbine", ("carbine", "carbine rd")),
-    ("walls", ("walls", "walls road", "walls in transit")),
-    ("chch", ("gerald", "gc", "chch", "geraldconnelly", "gerald connelly")),
+    ("carbine", ("carbine", "carbine rd", "carbin", "cbn warehouse")),
+    ("walls", ("walls", "wall rd", "walls road", "walls in transit", "wall warehouse")),
+    ("chch", (
+        "gerald", "gc", "chch", "geraldconnelly", "gerald connelly", "connelly",
+        "christchurch", "chc warehouse",
+    )),
 )
+PARTS_KIT_FILE_STEMS = ("parts_kits", "parts_kit", "kit_parts", "parts_bom")
 LEAD_TIME_KEYS = ["lead_time", "leadtime", "leadtime_days", "lead timedays"]
 MERGE_PRODUCT_KEYS = ["merge_products", "merge", "mergeproducts", "必须合并计算的产品"]
 MERGE_REGION_KEYS = ["merge_regions", "regions", "merge_regions", "必须合并计算的地区"]
@@ -1375,10 +1379,14 @@ def _load_region_bundle(region, force=False):
         parts_rows = _read_mining_table(parts_path)
         parts_by_code = _load_parts_inventory(parts_rows)
         parts_row_count = len(parts_rows)
+        parts_kit_bom = _load_parts_kit_bom(data_dir)
         parts_detail_rows = _parse_parts_detail_rows(parts_rows)
+        parts_detail_rows = _apply_parts_kit_bom(parts_detail_rows, parts_kit_bom)
+        parts_detail_rows = _reparent_parts_detail(parts_detail_rows)
     else:
         parts_rows = []
         parts_detail_rows = []
+        parts_kit_bom = {}
     blacklist = _load_blacklist(blacklist_path)
     stock_raw_rows = _read_table(stock_path)
     active_rows = _load_stock(stock_raw_rows, data_dir, discontinued=False)
@@ -1421,6 +1429,7 @@ def _load_region_bundle(region, force=False):
         "parts_row_count": parts_row_count,
         "parts_detail_rows": parts_detail_rows,
         "parts_rows": parts_rows,
+        "parts_kit_bom": parts_kit_bom if parts_path and Path(parts_path).is_file() else {},
         "stock_row_count": len(stock_raw_rows),
     }
     _REGION_CACHE[region_key] = bundle
@@ -1818,10 +1827,119 @@ def _load_parts_inventory(rows):
 def _infer_kit_parent_sku(sku):
     """从配件 SKU 推断母件，如 130-051-LEG → 130-051。"""
     text = str(sku or "").strip().upper()
+    text = text.replace(".", "-").replace("_", "-")
+    match = re.match(r"^(\d+-\d+)(?:-.+)?$", text)
+    if match:
+        return match.group(1)
+    for pat in (
+        r"^(.+)-(?:PART|PKT|PK|LEG|ARM|BASE|TOP|BTM|LHS|RHS|L|R|A|B|C|D)(?:\d*)$",
+        r"^(.+)-(\d+)$",
+    ):
+        m = re.match(pat, text, re.I)
+        if m and len(m.group(1)) >= 5:
+            return m.group(1).upper()
     match = re.match(r"^(\d+-\d+)", text)
     if match:
         return match.group(1)
     return text
+
+
+def _load_parts_kit_bom(data_dir):
+    """可选 parts_kits.csv：parent_sku, part_sku, qty_per_set。"""
+    if not data_dir:
+        return {}
+    path = _find_region_data_file(data_dir, PARTS_KIT_FILE_STEMS)
+    if not path:
+        return {}
+    by_part = {}
+    try:
+        rows = _read_table(path)
+    except Exception:
+        return {}
+    for row in rows:
+        parent = str(
+            _pick_fuzzy(row, PARTS_PARENT_KEYS + ["parent", "kit", "setsku"]) or ""
+        ).strip()
+        part = str(
+            _pick_fuzzy(row, PARTS_COMPONENT_KEYS + ["part", "child", "sku", "partsku"]) or ""
+        ).strip()
+        if not parent or not part:
+            continue
+        qty = _to_float(_pick_fuzzy(row, PARTS_PER_SET_KEYS)) or 1.0
+        if qty <= 0:
+            qty = 1.0
+        by_part[_norm_code(part)] = (parent, qty)
+    return {"by_part": by_part, "path": str(path)}
+
+
+def _apply_parts_kit_bom(detail, bom):
+    if not detail or not bom:
+        return detail
+    by_part = bom.get("by_part") or {}
+    if not by_part:
+        return detail
+    for line in detail:
+        key = _norm_code(line.get("part") or "")
+        hit = by_part.get(key)
+        if hit:
+            line["parent"] = hit[0]
+            line["need_per_set"] = hit[1]
+    return detail
+
+
+def _reparent_parts_detail(detail):
+    """同一母件下凑不出多配件时，按 SKU 前缀 / ProductFamily 再归组。"""
+    if not detail:
+        return detail
+    base_parts = {}
+    for line in detail:
+        base = _infer_kit_parent_sku(line.get("part") or "")
+        base_parts.setdefault(base, set()).add(line["part"])
+    for line in detail:
+        base = _infer_kit_parent_sku(line.get("part") or "")
+        if len(base_parts.get(base, ())) >= 2:
+            line["parent"] = base
+
+    fam_parts = {}
+    fam_label = {}
+    for line in detail:
+        fam = str(line.get("family") or "").strip()
+        if not fam:
+            continue
+        key = fam.lower()
+        fam_parts.setdefault(key, set()).add(line["part"])
+        fam_label[key] = fam
+    for line in detail:
+        fam = str(line.get("family") or "").strip().lower()
+        if not fam or len(fam_parts.get(fam, ())) < 2:
+            continue
+        parent = line.get("parent") or ""
+        same_parent = {l["part"] for l in detail if l.get("parent") == parent}
+        if len(same_parent) < 2:
+            line["parent"] = f"FAM:{fam_label.get(fam, fam)}"
+    return detail
+
+
+def describe_parts_transfer_gap(detail):
+    if not detail:
+        return "未解析出任何 parts 行"
+    hub = sum(1 for line in detail if line.get("bucket") in ("carbine", "walls", "chch"))
+    other = len(detail) - hub
+    parts_per_parent = {}
+    for line in detail:
+        parts_per_parent.setdefault(line["parent"], set()).add(line["part"])
+    multi = sum(1 for parts in parts_per_parent.values() if len(parts) >= 2)
+    hub_parents = 0
+    for parent, parts in parts_per_parent.items():
+        if len(parts) < 2:
+            continue
+        lines = [line for line in detail if line.get("parent") == parent]
+        if any(line.get("bucket") in ("carbine", "walls", "chch") for line in lines):
+            hub_parents += 1
+    return (
+        f"解析 {len(detail)} 行 · 三仓 {hub} 行 / 其他仓 {other} 行 · "
+        f"多配件母件 {multi} 组（三仓有库存 {hub_parents} 组）"
+    )
 
 
 def _warehouse_transfer_bucket(warehouse_name):
@@ -1866,17 +1984,19 @@ def _parse_parts_detail_rows(rows):
     return detail
 
 
-def analyze_parts_transfer(rows):
+def analyze_parts_transfer(rows, parts_kit_bom=None):
     """
     跨 Carbine / Walls / CHCH 借调拼凑：比较各仓独立成套数 vs 三仓合并后最多成套数。
     可传入 parts.csv 原始行，或 bundle 内已解析的 parts_detail_rows。
     """
     if rows and isinstance(rows[0], dict) and rows[0].get("bucket") is not None and rows[0].get("part"):
-        detail = rows
+        detail = list(rows)
     else:
         detail = _parse_parts_detail_rows(rows)
     if not detail:
         return []
+    detail = _apply_parts_kit_bom(detail, parts_kit_bom or {})
+    detail = _reparent_parts_detail(detail)
     parts_per_parent = {}
     for line in detail:
         parts_per_parent.setdefault(line["parent"], set()).add(line["part"])
@@ -1928,9 +2048,11 @@ def analyze_parts_transfer(rows):
                     chunks.append(f"{bucket}:{q}")
             if chunks:
                 dist_parts.append(f"{part_id} " + "+".join(chunks))
+        display_parent = parent[4:] if str(parent).startswith("FAM:") else parent
+        display_name = kit.get("name") or display_parent
         results.append({
-            "parent": parent,
-            "name": kit.get("name") or "",
+            "parent": display_parent,
+            "name": display_name,
             "part_count": len(parts),
             "sets_carbine": sets_by["carbine"],
             "sets_walls": sets_by["walls"],

@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.9"
+APP_VERSION = "1.9.10"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -1907,7 +1907,8 @@ class PanelApp:
             bundle = {}
         raw_parts = bundle.get("parts_rows") or []
         detail = bundle.get("parts_detail_rows") or []
-        rows = panel_data.analyze_parts_transfer(raw_parts or detail)
+        bom = bundle.get("parts_kit_bom") or {}
+        rows = panel_data.analyze_parts_transfer(raw_parts or detail, parts_kit_bom=bom)
         if self._mining_transfer_tree.get_children():
             self._mining_transfer_tree.delete(*self._mining_transfer_tree.get_children())
         for idx, row in enumerate(rows):
@@ -1942,10 +1943,11 @@ class PanelApp:
                         text=f"借调可增收 {gain_n} 个母件 · 共 {len(rows)} 条（按借调收益排序）",
                     )
                 elif int(bundle.get("parts_row_count") or 0):
+                    hint = panel_data.describe_parts_transfer_gap(detail or [])
                     self._mining_status_lbl.configure(
                         text=(
-                            "已读取 parts 行，但未找到「同一母件下≥2 个不同配件 SKU」或三仓无库存。"
-                            "母件默认按 SKU 前两段推断（如 130-051-xxx → 130-051）"
+                            f"{hint}。"
+                            "可配置 Data-NZ/parts_kits.csv（母件+子件 SKU）或让配件 SKU 共享前两段（130-051-xx）。"
                         ),
                     )
                 else:
