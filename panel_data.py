@@ -616,7 +616,20 @@ def _region_storage_stems(region_key):
     return ["storage", "shop_storage", f"{rk}_storage", "store_storage"]
 
 
+def _region_on_hold_stems(region_key):
+    rk = region_key.upper()
+    return ["on_hold", "onhold", f"{rk}_on_hold", "stock_on_hold"]
+
+
+def _region_parts_stems(region_key):
+    rk = region_key.upper()
+    return ["parts", "spare_parts", f"{rk}_parts", "part_stock"]
+
+
 STORAGE_QTY_KEYS = ["storageqty", "storage_qty", "qty", "quantity", "displayqty"]
+ON_HOLD_QTY_KEYS = ["onholdqty", "on_hold_qty", "holdqty", "hold_qty", "qty", "quantity"]
+ON_HOLD_STATUS_KEYS = ["stockonholdstatus", "onholdstatus", "holdstatus", "status"]
+PARTS_QTY_KEYS = ["partsqty", "parts_qty", "partqty", "qty", "quantity"]
 
 
 def _load_runner_regions():
@@ -1195,6 +1208,10 @@ def _load_region_bundle(region, force=False):
     disc_mtime = _file_mtime(disc_path) if disc_path else None
     storage_path = _find_region_data_file(data_dir, _region_storage_stems(region_key))
     storage_mtime = _file_mtime(storage_path) if storage_path else None
+    on_hold_path = _find_region_data_file(data_dir, _region_on_hold_stems(region_key))
+    on_hold_mtime = _file_mtime(on_hold_path) if on_hold_path else None
+    parts_path = _find_region_data_file(data_dir, _region_parts_stems(region_key))
+    parts_mtime = _file_mtime(parts_path) if parts_path else None
 
     cached = _REGION_CACHE.get(region_key)
     if (
@@ -1205,6 +1222,8 @@ def _load_region_bundle(region, force=False):
         and cached.get("blacklist_mtime") == blacklist_mtime
         and cached.get("stock_discontinued_mtime") == disc_mtime
         and cached.get("storage_mtime") == storage_mtime
+        and cached.get("on_hold_mtime") == on_hold_mtime
+        and cached.get("parts_mtime") == parts_mtime
     ):
         return cached
 
@@ -1225,6 +1244,18 @@ def _load_region_bundle(region, force=False):
         storage_row_count = len(storage_rows)
     else:
         storage_map, storage_unmapped = {}, []
+    on_hold_by_code = {}
+    on_hold_row_count = 0
+    if on_hold_path and Path(on_hold_path).is_file():
+        on_hold_rows = _read_table(on_hold_path)
+        on_hold_by_code = _load_on_hold_inventory(on_hold_rows)
+        on_hold_row_count = len(on_hold_rows)
+    parts_by_code = {}
+    parts_row_count = 0
+    if parts_path and Path(parts_path).is_file():
+        parts_rows = _read_table(parts_path)
+        parts_by_code = _load_parts_inventory(parts_rows)
+        parts_row_count = len(parts_rows)
     blacklist = _load_blacklist(blacklist_path)
     stock_raw_rows = _read_table(stock_path)
     active_rows = _load_stock(stock_raw_rows, data_dir, discontinued=False)
@@ -1257,6 +1288,14 @@ def _load_region_bundle(region, force=False):
         "storage_unmapped": storage_unmapped,
         "display_row_count": len(display_rows),
         "storage_row_count": storage_row_count,
+        "on_hold_path": str(on_hold_path) if on_hold_path else None,
+        "on_hold_mtime": on_hold_mtime,
+        "on_hold_by_code": on_hold_by_code,
+        "on_hold_row_count": on_hold_row_count,
+        "parts_path": str(parts_path) if parts_path else None,
+        "parts_mtime": parts_mtime,
+        "parts_by_code": parts_by_code,
+        "parts_row_count": parts_row_count,
         "stock_row_count": len(stock_raw_rows),
     }
     _REGION_CACHE[region_key] = bundle
@@ -1294,7 +1333,19 @@ def _panel_data_files_label(bundle):
     storage_path = bundle.get("storage_path")
     if storage_path and Path(storage_path).is_file():
         parts.append(f"{Path(storage_path).name}（店后仓）")
+    on_hold_path = bundle.get("on_hold_path")
+    if on_hold_path and Path(on_hold_path).is_file():
+        parts.append(Path(on_hold_path).name)
+    parts_path = bundle.get("parts_path")
+    if parts_path and Path(parts_path).is_file():
+        parts.append(Path(parts_path).name)
     return " + ".join(parts)
+
+
+def get_region_bundle(region=None, force=False):
+    """供看板读取 on_hold / parts 等扩展数据。"""
+    region_key = str(region or default_region() or "NZ").strip().upper()
+    return _load_region_bundle(region_key, force=force)
 
 
 def _region_from_data_dir(data_dir, region=None):
@@ -1541,6 +1592,91 @@ def _load_storage(rows, display_store_keys=()):
                 "qty": qty,
             }
     return by_store, storage_details, storage_map, unmapped
+
+
+def _load_on_hold_inventory(rows):
+    """on_hold.csv → {norm_code: {code, name, family, total_qty, statuses, warehouses}}"""
+    by_code = {}
+    for row in rows:
+        code = _pick(row, CODE_KEYS)
+        if not code:
+            continue
+        norm = _norm_code(code)
+        qty = _to_float(_pick(row, ON_HOLD_QTY_KEYS)) or 0.0
+        if qty <= 0:
+            continue
+        status = str(_pick(row, ON_HOLD_STATUS_KEYS) or "").strip()
+        warehouse = str(_pick(row, STORE_KEYS + ["warehousename"]) or "").strip()
+        bucket = by_code.setdefault(norm, {
+            "code": str(code).strip(),
+            "name": str(_pick(row, NAME_KEYS) or "").strip(),
+            "family": str(_pick(row, FAMILY_KEYS) or "").strip(),
+            "total_qty": 0.0,
+            "statuses": set(),
+            "warehouses": [],
+        })
+        bucket["total_qty"] += qty
+        if status:
+            bucket["statuses"].add(status)
+        if warehouse:
+            bucket["warehouses"].append({
+                "warehouse": warehouse, "qty": qty, "status": status,
+            })
+    return by_code
+
+
+def _load_parts_inventory(rows):
+    """parts.csv → {norm_code: {code, name, family, total_qty, warehouses}}"""
+    by_code = {}
+    for row in rows:
+        code = _pick(row, CODE_KEYS)
+        if not code:
+            continue
+        norm = _norm_code(code)
+        qty = _to_float(_pick(row, PARTS_QTY_KEYS)) or 0.0
+        if qty <= 0:
+            continue
+        warehouse = str(_pick(row, STORE_KEYS + ["warehousename"]) or "").strip()
+        bucket = by_code.setdefault(norm, {
+            "code": str(code).strip(),
+            "name": str(_pick(row, NAME_KEYS) or "").strip(),
+            "family": str(_pick(row, FAMILY_KEYS) or "").strip(),
+            "total_qty": 0.0,
+            "warehouses": [],
+        })
+        bucket["total_qty"] += qty
+        if warehouse:
+            bucket["warehouses"].append({"warehouse": warehouse, "qty": qty})
+    return by_code
+
+
+def list_mining_inventory(bundle, kind="all"):
+    """返回 On Hold / 配件挖掘列表（用于独立标签页表格）。"""
+    rows = []
+    if kind in ("all", "on_hold"):
+        for item in (bundle.get("on_hold_by_code") or {}).values():
+            rows.append({
+                "kind": "On Hold",
+                "code": item["code"],
+                "name": item.get("name") or "",
+                "family": item.get("family") or "",
+                "qty": item.get("total_qty") or 0,
+                "detail": "、".join(sorted(item.get("statuses") or [])) or "-",
+                "warehouses": item.get("warehouses") or [],
+            })
+    if kind in ("all", "parts"):
+        for item in (bundle.get("parts_by_code") or {}).values():
+            rows.append({
+                "kind": "配件",
+                "code": item["code"],
+                "name": item.get("name") or "",
+                "family": item.get("family") or "",
+                "qty": item.get("total_qty") or 0,
+                "detail": "-",
+                "warehouses": item.get("warehouses") or [],
+            })
+    rows.sort(key=lambda r: (-float(r.get("qty") or 0), r.get("kind", ""), r.get("code", "")))
+    return rows
 
 
 def _load_display(rows):
@@ -1815,6 +1951,8 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         bundle.get("blacklist_mtime"),
         bundle.get("stock_discontinued_mtime"),
         bundle.get("storage_mtime"),
+        bundle.get("on_hold_mtime"),
+        bundle.get("parts_mtime"),
     )
     if not force_refresh and view_key in _STORE_VIEW_CACHE:
         cached = _STORE_VIEW_CACHE[view_key]
@@ -1857,6 +1995,10 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
     all_storage_skus = len(set().union(*by_storage.values())) if by_storage else 0
     storage_codes = by_storage.get(store, set()) if store_specific else set()
     store_storage_details = storage_details.get(store, {}) if store_specific else {}
+    on_hold_by_code = bundle.get("on_hold_by_code") or {}
+    parts_by_code = bundle.get("parts_by_code") or {}
+    has_on_hold_data = bool(bundle.get("on_hold_path")) and Path(bundle["on_hold_path"]).is_file()
+    has_parts_data = bool(bundle.get("parts_path")) and Path(bundle["parts_path"]).is_file()
 
     products = []
     for p in iter_rows:
@@ -1892,6 +2034,16 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         item["ready_not_displayed"] = ready_not_displayed
         if island_stock_supported(region_key):
             _enrich_island_stock(item, region_key)
+        norm = item.get("norm_code")
+        oh = on_hold_by_code.get(norm) if norm else None
+        item["on_hold"] = bool(oh)
+        item["on_hold_qty"] = float(oh.get("total_qty") or 0) if oh else 0.0
+        item["on_hold_status"] = (
+            "、".join(sorted(oh.get("statuses") or [])) if oh else ""
+        )
+        pt = parts_by_code.get(norm) if norm else None
+        item["is_part"] = bool(pt)
+        item["parts_qty"] = float(pt.get("total_qty") or 0) if pt else 0.0
         products.append(item)
 
     if store_specific:
@@ -1989,6 +2141,12 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         "includes_discontinued": bool(full_stock),
         "island_stock_supported": island_stock_supported(region_key),
         "island_quadrant_counts": island_quadrant_counts if island_stock_supported(region_key) else None,
+        "has_on_hold_data": has_on_hold_data,
+        "has_parts_data": has_parts_data,
+        "on_hold_sku_count": len(on_hold_by_code),
+        "parts_sku_count": len(parts_by_code),
+        "on_hold_path": bundle.get("on_hold_path"),
+        "parts_path": bundle.get("parts_path"),
     }
 
     products.sort(key=lambda p: (
@@ -2038,6 +2196,22 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         diagnostics.append({
             "level": "info",
             "message": f"店后仓已映射：{mapped}",
+        })
+    if not has_on_hold_data:
+        diagnostics.append({
+            "level": "info",
+            "message": (
+                "未找到 on_hold.csv：可在 Data-NZ 放置 on_hold.txt 并执行 SQL 导出，"
+                "用于 On Hold 挖掘。"
+            ),
+        })
+    if not has_parts_data:
+        diagnostics.append({
+            "level": "info",
+            "message": (
+                "未找到 parts.csv：可在 Data-NZ 放置 parts.txt 并执行 SQL 导出，"
+                "用于配件挖掘。"
+            ),
         })
 
     result = {

@@ -1,0 +1,29 @@
+-- 配件 / Parts 库存 → Output-NZ/parts.csv
+-- 请按你们业务调整 WHERE（下方为常见示例：系列名含 Part）
+-- 若你本地已有专用 SQL，可直接覆盖本文件
+
+SELECT
+    w.Name AS WarehouseName,
+    p.Sku,
+    p.Name AS ProductName,
+    ISNULL(p.ProductFamily, '') AS ProductFamily,
+    SUM(s.Quantity) AS PartsQty
+FROM [dbo].[Stocks] s
+INNER JOIN [dbo].[Warehouses] w
+    ON s.WarehouseId = w.Id
+INNER JOIN [dbo].[Products] p
+    ON s.ProductId = p.Id
+WHERE s.StockStatus = 'Normal'
+  AND s.StockOnHoldStatus IS NULL
+  AND (
+        p.ProductFamily LIKE '%Part%'
+     OR p.ProductFamily LIKE '%配件%'
+     OR p.Sku LIKE '%-PART%'
+  )
+GROUP BY
+    w.Name,
+    p.Sku,
+    p.Name,
+    p.ProductFamily
+HAVING SUM(s.Quantity) > 0
+ORDER BY w.Name, PartsQty DESC, p.Sku;

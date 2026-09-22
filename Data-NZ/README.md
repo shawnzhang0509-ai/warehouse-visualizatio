@@ -10,6 +10,8 @@
 | **stock_discontinued.sql** | **stock_discontinued.csv**（仅停产，`IsDiscontinued = 1`） |
 | display_with_families.sql / display.sql | display.csv（**陈列区** `%Display%`） |
 | **storage.sql** | **storage.csv**（**店面后仓** `%Storage%`，勿覆盖 display） |
+| **on_hold.txt** / on_hold.sql | **on_hold.csv**（`StockOnHoldStatus` 冻结库存） |
+| **parts.txt** / parts.sql | **parts.csv**（配件库存，可按业务改 WHERE） |
 | weekly_sales.sql | weekly_sales.csv |
 
 **两个 stock 模板请一起执行（两库）。** 看板启动时会读 `stock.csv` + `stock_discontinued.csv`，状态栏会显示 `stock.csv + stock_discontinued.csv（两库）`。只导出一个文件时，停产=「全部」会缺数据。
@@ -28,6 +30,8 @@
 | `storage.csv` | ✅ 推荐（店面后仓 `%Storage%`，看板「仓有·店仓无 / 双有未陈列」） |
 | `blacklist.csv` | 可选（见 `blacklist.example.csv` 模板） |
 | `weekly_sales.csv` | 看板不需要 |
+| `on_hold.csv` | 可选（看板「On Hold/配件」标签 + 产品状态 ⏸） |
+| `parts.csv` | 可选（配件挖掘） |
 
 ## 看板默认行为（v1.5.5+）
 

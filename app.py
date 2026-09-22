@@ -28,6 +28,12 @@ STANDARD_OUTPUT_NAMES = {
     "storage": "storage",
     "shop_storage": "storage",
     "store_storage": "storage",
+    "on_hold": "on_hold",
+    "onhold": "on_hold",
+    "stock_on_hold": "on_hold",
+    "parts": "parts",
+    "spare_parts": "parts",
+    "part_stock": "parts",
 }
 
 try:
