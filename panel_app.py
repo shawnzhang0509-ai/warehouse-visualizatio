@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.12"
+APP_VERSION = "1.9.13"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -1929,20 +1929,21 @@ class PanelApp:
         oh_rows = int(bundle.get("on_hold_row_count") or 0)
         pt_rows = int(bundle.get("parts_row_count") or 0)
         if self._mining_status_lbl:
+            oh_diag = panel_data.diagnose_on_hold_bundle(bundle)
             if oh_n or pt_n:
                 self._mining_status_lbl.configure(
                     text=f"On Hold {oh_n} SKU · 配件 {pt_n} SKU · 当前显示 {len(rows)} 条",
                 )
             elif oh_rows or pt_rows:
-                self._mining_status_lbl.configure(
-                    text=(
-                        f"已读取 on_hold {oh_rows} 行 / parts {pt_rows} 行，但未识别 SKU。"
-                        f"请确认 CSV 含 Sku 或 ProductCode 列，然后点「刷新数据」"
-                    ),
+                parts_hint = (
+                    f"parts {pt_rows} 行未识别 SKU"
+                    if pt_rows and not pt_n else f"parts {pt_rows} 行"
                 )
+                oh_hint = oh_diag or f"on_hold {oh_rows} 行未识别 SKU"
+                self._mining_status_lbl.configure(text=f"{oh_hint} · {parts_hint} · 请点「刷新数据」")
             else:
                 self._mining_status_lbl.configure(
-                    text="请执行 on_hold.txt / parts.txt 导出到 Output-NZ 后点「刷新数据」",
+                    text=oh_diag or "请执行 on_hold.txt / parts.txt 导出到 Output-NZ 后点「刷新数据」",
                 )
 
     def _render_mining_panels(self):
@@ -1978,9 +1979,16 @@ class PanelApp:
         if not self._onhold_summary_frame:
             return
         if not status_rows:
+            try:
+                bundle = panel_data.get_region_bundle(
+                    self._cached_summary.get("region") or self._current_region(),
+                )
+            except Exception:
+                bundle = {}
+            diag = panel_data.diagnose_on_hold_bundle(bundle) or "暂无 On Hold 数据"
             tk.Label(
-                self._onhold_summary_frame, text="暂无 On Hold 数据", bg="white", fg=C_MUTED,
-                font=("Segoe UI", 9),
+                self._onhold_summary_frame, text=diag, bg="white", fg="#b45309",
+                font=("Segoe UI", 9), wraplength=920, justify="left",
             ).pack(anchor="w")
             return
         for row in status_rows[:8]:
@@ -2105,13 +2113,19 @@ class PanelApp:
                 and str(self._mining_notebook.select()) == str(self._mining_onhold_tab)
             )
             if on_tab:
-                no_date = sum(1 for r in rows if r.get("hold_days") is None)
-                hint = f"On Hold {len(rows)} SKU"
-                if status_rows:
-                    hint += f" · {len(status_rows)} 种状态"
-                if no_date and rows:
-                    hint += f" · {no_date} 个无冻结日期（请在 on_hold SQL 导出 OnHoldDate）"
-                self._mining_status_lbl.configure(text=hint)
+                if not rows:
+                    diag = panel_data.diagnose_on_hold_bundle(bundle)
+                    self._mining_status_lbl.configure(
+                        text=diag or "On Hold 0 SKU",
+                    )
+                else:
+                    no_date = sum(1 for r in rows if r.get("hold_days") is None)
+                    hint = f"On Hold {len(rows)} SKU"
+                    if status_rows:
+                        hint += f" · {len(status_rows)} 种状态"
+                    if no_date:
+                        hint += f" · {no_date} 个无冻结日期（请在 on_hold SQL 导出 OnHoldDate）"
+                    self._mining_status_lbl.configure(text=hint)
 
     def _open_onhold_selected_image(self):
         sel = self._mining_onhold_tree.selection() if self._mining_onhold_tree else ()

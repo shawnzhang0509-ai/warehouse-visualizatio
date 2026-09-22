@@ -1774,9 +1774,26 @@ def _pick_fuzzy(row, keys):
     return None
 
 
+def _looks_like_product_sku(text):
+    text = str(text or "").strip().upper()
+    if not text or len(text) < 4:
+        return False
+    if re.fullmatch(r"\d{3}-\d{2,}([-.][A-Z0-9]+)?", text):
+        return True
+    if re.fullmatch(r"[A-Z0-9]{2,}-\d{2,}", text):
+        return True
+    return False
+
+
 def _mining_code_from_row(row):
     code = _pick(row, CODE_KEYS) or _pick_fuzzy(row, MINING_CODE_KEYS)
-    return str(code).strip() if code else ""
+    if code:
+        return str(code).strip()
+    for val in row.values():
+        text = str(val or "").strip()
+        if _looks_like_product_sku(text):
+            return text
+    return ""
 
 
 def _mining_qty_from_row(row, qty_keys):
@@ -1920,9 +1937,38 @@ def list_on_hold_status_options(bundle):
     return [r["status"] for r in rows]
 
 
+def diagnose_on_hold_bundle(bundle):
+    """说明 On Hold 为 0 的常见原因（文件缺失 / 空文件 / 列名不匹配）。"""
+    path = bundle.get("on_hold_path")
+    row_count = int(bundle.get("on_hold_row_count") or 0)
+    sku_count = len(bundle.get("on_hold_by_code") or {})
+    if not path or not Path(path).is_file():
+        return (
+            "未找到 on_hold.csv：请在 Data-NZ 放置 on_hold.txt，执行 SQL 导出到 Output-NZ/on_hold.csv，"
+            "然后点「刷新数据」。"
+        )
+    name = Path(path).name
+    if row_count <= 0:
+        return (
+            f"已找到 {name}，但没有数据行（0 行）。请运行 on_hold.txt 导出；"
+            "仅有表头或空文件时看板会显示 On Hold 0。"
+        )
+    if sku_count <= 0:
+        sample = (bundle.get("on_hold_rows") or [])[:1]
+        cols = list(sample[0].keys()) if sample else []
+        col_text = "、".join(str(c) for c in cols[:10]) if cols else "（无表头）"
+        return (
+            f"已读取 {row_count} 行，但未识别 SKU（当前 0 个）。表头：{col_text}。"
+            "请确认含 Sku / ProductCode 列，或 SKU 形如 130-051。"
+        )
+    return ""
+
+
 def list_on_hold_analysis(bundle, status_filter=None, catalog_by_norm=None):
     """On Hold 分析明细（含冻结天数、状态、图片字段来自 stock 目录）。"""
-    by_code = bundle.get("on_hold_by_code") or {}
+    by_code = dict(bundle.get("on_hold_by_code") or {})
+    if not by_code and bundle.get("on_hold_rows"):
+        by_code = _load_on_hold_inventory(bundle.get("on_hold_rows"))
     catalog_by_norm = catalog_by_norm or {}
     out = []
     status_filter = str(status_filter or "").strip()
