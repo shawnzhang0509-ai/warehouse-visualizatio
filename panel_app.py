@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.8"
+APP_VERSION = "1.9.9"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -601,6 +601,9 @@ class PanelApp:
         )
         self._island_channel_combo.pack(side=tk.LEFT, padx=(6, 12))
         self._island_channel_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_island_channel_change())
+        self._island_channel_combo.bind(
+            "<FocusOut>", lambda _e: self.root.after_idle(self._on_island_channel_change),
+        )
         self._island_unsupported_lbl = tk.Label(
             island_inner, text="", bg="white", fg=C_CARD_GAP, font=("Segoe UI", 10),
         )
@@ -2026,7 +2029,7 @@ class PanelApp:
 
     def _on_island_channel_change(self, _event=None):
         # Windows 下等下拉框提交选中值后再刷新，避免立刻被重置
-        self.after_idle(self._apply_island_channel_filter)
+        self.root.after_idle(self._apply_island_channel_filter)
 
     def _apply_island_channel_filter(self):
         self._sync_island_combo_to_var(self._island_channel_combo, self._island_channel_filter_var)
