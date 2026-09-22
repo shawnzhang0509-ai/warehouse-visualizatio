@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.7"
+APP_VERSION = "1.9.8"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -2029,9 +2029,36 @@ class PanelApp:
         self.after_idle(self._apply_island_channel_filter)
 
     def _apply_island_channel_filter(self):
+        self._sync_island_combo_to_var(self._island_channel_combo, self._island_channel_filter_var)
         self._island_selected_class = None
         self._sync_island_filter_var(None)
         self._render_island_quadrants(self._cached_summary.get("store_specific", self._is_store_selected()))
+
+    @staticmethod
+    def _sync_island_combo_to_var(combo, var):
+        """ttk Combobox 在 Windows 上常只改显示、不写 StringVar，筛选前强制同步。"""
+        if not combo or not var:
+            return
+        try:
+            shown = str(combo.get()).strip()
+        except tk.TclError:
+            return
+        if shown:
+            var.set(shown)
+
+    def _island_owner_filter_value(self):
+        self._sync_island_combo_to_var(self._island_owner_combo, self._island_owner_filter_var)
+        owner = str(self._island_owner_filter_var.get()).strip()
+        if owner in ("", "全部负责人"):
+            return None
+        return owner
+
+    def _island_channel_filter_value(self):
+        self._sync_island_combo_to_var(self._island_channel_combo, self._island_channel_filter_var)
+        channel = str(self._island_channel_filter_var.get()).strip()
+        if channel in ("", "全部渠道"):
+            return None
+        return channel
 
     def _update_island_channel_combo(self, reset=False):
         owner = self._island_owner_filter_var.get()
@@ -2061,15 +2088,9 @@ class PanelApp:
 
     def _island_scope_filters(self):
         view_mode = self._island_view_mode_var.get()
-        owner = self._island_owner_filter_var.get()
-        channel = self._island_channel_filter_var.get()
         if view_mode != "总览":
             return None, None
-        if owner == "全部负责人":
-            owner = None
-        if channel == "全部渠道":
-            channel = None
-        return owner, channel
+        return self._island_owner_filter_value(), self._island_channel_filter_value()
 
     def _update_main_island_quadrant(self, report):
         counts = report.get("counts") or {}
@@ -2299,16 +2320,17 @@ class PanelApp:
             self._island_tree.delete(*self._island_tree.get_children())
         for idx, item in enumerate(rows):
             stock = int(item.get("stock_qty") or 0) if item.get("in_stock") else 0
-            owner_name, channel_name = panel_data.resolve_product_owner_channel(
+            owner_name, _cfg_channel = panel_data.resolve_product_owner_channel(
                 item, self._cached_owner_config,
             )
+            channel_label = panel_data.sku_prefix(item.get("code", "")) or _cfg_channel or "-"
             self._island_tree.insert(
                 "", tk.END,
                 values=(
                     item.get("code") or "",
                     item.get("name") or "",
                     owner_name or "-",
-                    channel_name or "-",
+                    channel_label,
                     item.get("north_stock_qty", 0),
                     item.get("south_stock_qty", 0),
                     item.get("island_stock_label") or "-",
@@ -2322,7 +2344,15 @@ class PanelApp:
                 panel_data.ISLAND_STOCK_CLASSES[self._island_selected_class]
                 if self._island_selected_class else "全部象限"
             )
-            self._island_status_lbl.configure(text=f"{label} · 显示 {len(rows)} 条在产 SKU")
+            scope_bits = []
+            if owner:
+                scope_bits.append(owner)
+            if channel:
+                scope_bits.append(f"渠道 {channel}")
+            scope_text = " · ".join(scope_bits) if scope_bits else "全部 SKU"
+            self._island_status_lbl.configure(
+                text=f"{label} · {scope_text} · 显示 {len(rows)} 条在产 SKU",
+            )
 
     def _scroll_island(self, direction):
         if self._island_tree:
