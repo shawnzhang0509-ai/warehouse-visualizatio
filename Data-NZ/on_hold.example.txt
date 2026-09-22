@@ -11,10 +11,10 @@ SELECT
     p.Name AS ProductName,
     ISNULL(p.ProductFamily, '') AS ProductFamily,
     s.StockOnHoldStatus,
-    o.OrderNo AS OrderNo,          -- 按库表字段调整
-    t.TicketNo AS TicketNo,        -- 无工单可删
-    s.OnHoldDate AS OnHoldDate,
-    s.Quantity AS OnHoldQty
+    o.OrderCode AS OrderCode,      -- 或 OrderNo；看板识别 ordercode / orderno
+    t.TicketNo AS TicketNo,        -- 无工单可删；也可从 OrderCode 后缀解析
+    s.OnHoldDate AS OnHoldDate,    -- 勿只导出 Excel 时间片段；用完整日期或序列值
+    s.Quantity AS Quantity         -- Quantity=0 的行不会进入分析表
 FROM [dbo].[Stocks] s
 INNER JOIN [dbo].[Warehouses] w
     ON s.WarehouseId = w.Id

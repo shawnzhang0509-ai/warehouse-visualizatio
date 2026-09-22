@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.16"
+APP_VERSION = "1.9.17"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -812,7 +812,7 @@ class PanelApp:
             values=["全部状态"],
         )
         self._onhold_status_combo.pack(side=tk.LEFT, padx=(6, 12))
-        self._onhold_status_combo.bind("<<ComboboxSelected>>", lambda _e: self._render_on_hold_analysis())
+        self._onhold_status_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_onhold_status_change())
         ttk.Button(
             onhold_toolbar, text="查看图片", style="Tool.TButton",
             command=self._open_onhold_selected_image,
@@ -2054,6 +2054,17 @@ class PanelApp:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _on_onhold_status_change(self, _event=None):
+        self.root.after_idle(self._apply_on_hold_status_filter)
+
+    def _apply_on_hold_status_filter(self):
+        self._sync_island_combo_to_var(self._onhold_status_combo, self._onhold_status_filter_var)
+        self._render_on_hold_analysis()
+
+    def _onhold_status_filter_value(self):
+        self._sync_island_combo_to_var(self._onhold_status_combo, self._onhold_status_filter_var)
+        return str(self._onhold_status_filter_var.get()).strip()
+
     def _render_on_hold_analysis(self):
         if not self._mining_onhold_tree:
             return
@@ -2072,7 +2083,7 @@ class PanelApp:
             self._onhold_status_combo.configure(values=options)
             if self._onhold_status_filter_var.get() not in options:
                 self._onhold_status_filter_var.set("全部状态")
-        status_f = self._onhold_status_filter_var.get()
+        status_f = self._onhold_status_filter_value()
         rows, total_matched = panel_data.list_on_hold_analysis(
             bundle, status_filter=status_f, catalog_by_norm=self._catalog_by_norm(),
         )

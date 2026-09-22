@@ -769,15 +769,17 @@ ON_HOLD_DAYS_KEYS = [
     "holddays", "on_hold_days", "daysonhold", "hold_days", "dayonhold", "冻结天数",
 ]
 ON_HOLD_ORDER_KEYS = [
-    "orderno", "order_no", "ordernumber", "order_number", "salesorder", "sales_order",
-    "sonumber", "so_number", "orderid", "order_id", "documentno", "document_no",
-    "订单号", "销售订单", "salesorderno",
+    "orderno", "order_no", "ordercode", "order_code", "ordernumber", "order_number",
+    "salesorder", "sales_order", "sonumber", "so_number", "orderid", "order_id",
+    "documentno", "document_no", "salesorderno", "weborder", "web_order", "confirmationno",
+    "订单号", "销售订单", "订单编号",
 ]
 ON_HOLD_TICKET_KEYS = [
     "ticket", "ticketno", "ticket_no", "ticketnumber", "ticket_number", "ticketid",
     "ticket_id", "serviceticket", "service_ticket", "caseno", "case_no", "工单号",
-    "工单", "ticketref",
+    "工单", "ticketref", "notes",
 ]
+ON_HOLD_STOCK_ID_KEYS = ["stockid", "stock_id", "lineid", "line_id", "inventoryid"]
 ON_HOLD_ANALYSIS_MAX_ROWS = 15000
 PARTS_QTY_KEYS = [
     "partsqty", "parts_qty", "partqty", "quantity", "qty", "sum", "total", "amount",
@@ -1824,6 +1826,50 @@ def _mining_qty_from_row(row, qty_keys):
     return qty
 
 
+def _on_hold_qty_from_row(row):
+    """On Hold 行级数量：Quantity=0 的行保留为 0（不当作 1），分析页会跳过。"""
+    raw = _pick(row, ON_HOLD_QTY_KEYS) or _pick_fuzzy(row, ON_HOLD_QTY_KEYS)
+    qty = _to_float(raw)
+    if qty is None:
+        return 1.0
+    return max(0.0, qty)
+
+
+def _normalize_on_hold_status(status):
+    return re.sub(r"\s+", " ", str(status or "").strip())
+
+
+def _pick_on_hold_order_no(row):
+    val = _pick_fuzzy(row, ON_HOLD_ORDER_KEYS)
+    if val is not None and str(val).strip():
+        return str(val).strip()
+    lower = _column_key_map(row)
+    for col_norm, cell in lower.items():
+        if "order" not in col_norm or "hold" in col_norm:
+            continue
+        text = str(cell or "").strip()
+        if not text:
+            continue
+        if _looks_like_product_sku(text):
+            continue
+        return text
+    return ""
+
+
+def _pick_on_hold_ticket_no(row, order_no=""):
+    val = _pick_fuzzy(row, ON_HOLD_TICKET_KEYS)
+    if val is not None and str(val).strip():
+        text = str(val).strip()
+        if text.lower() not in ("notes", "note", "备注"):
+            return text
+    order_no = str(order_no or "").strip()
+    if "." in order_no:
+        suffix = order_no.rsplit(".", 1)[-1].strip()
+        if suffix and len(suffix) <= 12:
+            return suffix
+    return ""
+
+
 def _read_mining_table(path):
     """on_hold / parts 可能是 Excel 分号或 Tab 导出。"""
     path = Path(path)
@@ -1835,6 +1881,16 @@ def _read_mining_table(path):
 def _parse_hold_datetime(raw):
     text = str(raw or "").strip()
     if not text:
+        return None
+    serial = _to_float(text)
+    if serial is not None and 20000 < serial < 80000:
+        try:
+            from datetime import timedelta
+            base = date(1899, 12, 30)
+            return base + timedelta(days=int(serial))
+        except (ValueError, OverflowError):
+            pass
+    if re.fullmatch(r"\d{1,2}:\d{2}(:\d+)?(\.\d+)?", text):
         return None
     for fmt in (
         "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
@@ -1869,10 +1925,10 @@ def _format_hold_since(hold_at):
 
 def _on_hold_status_tokens(status):
     """一行里可能用逗号拼接多种 On Hold 类型（旧版汇总导出）；筛选时按子类型匹配。"""
-    text = str(status or "").strip()
+    text = _normalize_on_hold_status(status)
     if not text:
         return ["（未标注状态）"]
-    parts = [p.strip() for p in re.split(r"[,;|/]", text) if p.strip()]
+    parts = [_normalize_on_hold_status(p) for p in re.split(r"[,;|/]", text) if p.strip()]
     return parts if parts else [text]
 
 
@@ -1883,17 +1939,19 @@ def _parse_on_hold_detail_rows(rows):
         code = _mining_code_from_row(row)
         if not code:
             continue
-        status = str(
+        status = _normalize_on_hold_status(
             _pick(row, ON_HOLD_STATUS_KEYS) or _pick_fuzzy(row, ON_HOLD_STATUS_KEYS) or ""
-        ).strip() or "（未标注状态）"
+        ) or "（未标注状态）"
         warehouse = str(
             _pick(row, STORE_KEYS + ["warehousename"]) or _pick_fuzzy(row, STORE_KEYS + ["warehousename"]) or ""
         ).strip()
-        order_no = str(_pick_fuzzy(row, ON_HOLD_ORDER_KEYS) or "").strip()
-        ticket_no = str(_pick_fuzzy(row, ON_HOLD_TICKET_KEYS) or "").strip()
+        order_no = _pick_on_hold_order_no(row)
+        ticket_no = _pick_on_hold_ticket_no(row, order_no=order_no)
         hold_at = _parse_hold_datetime(_pick_fuzzy(row, ON_HOLD_DATE_KEYS))
         hold_days = _hold_days_from_row(row, hold_at)
-        qty = _mining_qty_from_row(row, ON_HOLD_QTY_KEYS)
+        qty = _on_hold_qty_from_row(row)
+        if qty <= 0:
+            continue
         norm = _norm_code(code)
         detail.append({
             "norm_code": norm,
@@ -1966,10 +2024,12 @@ def aggregate_on_hold_by_status(on_hold_rows=None, on_hold_by_code=None):
             code = _mining_code_from_row(row)
             if not code:
                 continue
-            status = str(
+            status = _normalize_on_hold_status(
                 _pick(row, ON_HOLD_STATUS_KEYS) or _pick_fuzzy(row, ON_HOLD_STATUS_KEYS) or ""
-            ).strip() or "（未标注状态）"
-            qty = _mining_qty_from_row(row, ON_HOLD_QTY_KEYS)
+            ) or "（未标注状态）"
+            qty = _on_hold_qty_from_row(row)
+            if qty <= 0:
+                continue
             slot = by_status[status]
             slot["row_count"] += 1
             slot["sku_codes"].add(_norm_code(code))
@@ -2039,12 +2099,14 @@ def list_on_hold_analysis(bundle, status_filter=None, catalog_by_norm=None, max_
     for line in detail:
         status_raw = line.get("status") or "（未标注状态）"
         tokens = _on_hold_status_tokens(status_raw)
-        if status_filter and status_filter not in ("", "全部状态"):
-            if status_filter not in tokens:
+        norm_filter = _normalize_on_hold_status(status_filter)
+        norm_tokens = [_normalize_on_hold_status(t) for t in tokens]
+        if norm_filter and norm_filter not in ("", "全部状态"):
+            if norm_filter not in norm_tokens:
                 continue
         display_status = (
             status_filter
-            if status_filter and status_filter not in ("", "全部状态") and status_filter in tokens
+            if norm_filter and norm_filter not in ("", "全部状态") and norm_filter in norm_tokens
             else status_raw
         )
         norm = line.get("norm_code") or ""
@@ -2059,17 +2121,22 @@ def list_on_hold_analysis(bundle, status_filter=None, catalog_by_norm=None, max_
             "ticket_no": line.get("ticket_no") or "",
             "hold_days": line.get("hold_days"),
             "hold_since": line.get("hold_since") or "",
+            "hold_at": line.get("hold_at"),
             "qty": line.get("qty") or 0,
             "warehouse": line.get("warehouse") or "",
             "image_raw": cat.get("image_raw"),
             "image": cat.get("image"),
         })
-    out.sort(key=lambda r: (
-        -(r.get("hold_days") if r.get("hold_days") is not None else -1),
-        -(float(r.get("qty") or 0)),
-        r.get("order_no") or r.get("ticket_no") or "",
-        r.get("code") or "",
-    ))
+    def _sort_hold_key(r):
+        hold_at = r.get("hold_at")
+        hold_ord = hold_at.toordinal() if hold_at else 0
+        return (
+            hold_ord,
+            str(r.get("order_no") or r.get("ticket_no") or ""),
+            str(r.get("code") or ""),
+        )
+
+    out.sort(key=_sort_hold_key, reverse=True)
     cap = max_rows if max_rows is not None else ON_HOLD_ANALYSIS_MAX_ROWS
     if cap and len(out) > cap:
         return out[:cap], len(out)
