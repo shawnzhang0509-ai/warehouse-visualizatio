@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.3"
+APP_VERSION = "1.9.4"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -1784,7 +1784,7 @@ class PanelApp:
             return
         region = self._cached_summary.get("region") or self._current_region()
         try:
-            bundle = panel_data.get_region_bundle(region)
+            bundle = panel_data.get_region_bundle(region, force=True)
         except Exception:
             bundle = {}
         kind = self._mining_kind_key()
@@ -1816,10 +1816,19 @@ class PanelApp:
             )
         oh_n = len(bundle.get("on_hold_by_code") or {})
         pt_n = len(bundle.get("parts_by_code") or {})
+        oh_rows = int(bundle.get("on_hold_row_count") or 0)
+        pt_rows = int(bundle.get("parts_row_count") or 0)
         if self._mining_status_lbl:
             if oh_n or pt_n:
                 self._mining_status_lbl.configure(
                     text=f"On Hold {oh_n} SKU · 配件 {pt_n} SKU · 当前显示 {len(rows)} 条",
+                )
+            elif oh_rows or pt_rows:
+                self._mining_status_lbl.configure(
+                    text=(
+                        f"已读取 on_hold {oh_rows} 行 / parts {pt_rows} 行，但未识别 SKU。"
+                        f"请确认 CSV 含 Sku 或 ProductCode 列，然后点「刷新数据」"
+                    ),
                 )
             else:
                 self._mining_status_lbl.configure(

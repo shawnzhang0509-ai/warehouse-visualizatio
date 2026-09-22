@@ -627,9 +627,17 @@ def _region_parts_stems(region_key):
 
 
 STORAGE_QTY_KEYS = ["storageqty", "storage_qty", "qty", "quantity", "displayqty"]
-ON_HOLD_QTY_KEYS = ["onholdqty", "on_hold_qty", "holdqty", "hold_qty", "qty", "quantity"]
+ON_HOLD_QTY_KEYS = [
+    "onholdqty", "on_hold_qty", "holdqty", "hold_qty", "quantity", "qty",
+    "onholdquantity", "sum", "total", "amount",
+]
 ON_HOLD_STATUS_KEYS = ["stockonholdstatus", "onholdstatus", "holdstatus", "status"]
-PARTS_QTY_KEYS = ["partsqty", "parts_qty", "partqty", "qty", "quantity"]
+PARTS_QTY_KEYS = [
+    "partsqty", "parts_qty", "partqty", "quantity", "qty", "sum", "total", "amount",
+]
+MINING_CODE_KEYS = CODE_KEYS + [
+    "serialnumber", "serial_number", "serial", "materialcode", "material", "barcode",
+]
 
 
 def _load_runner_regions():
@@ -1247,13 +1255,13 @@ def _load_region_bundle(region, force=False):
     on_hold_by_code = {}
     on_hold_row_count = 0
     if on_hold_path and Path(on_hold_path).is_file():
-        on_hold_rows = _read_table(on_hold_path)
+        on_hold_rows = _read_mining_table(on_hold_path)
         on_hold_by_code = _load_on_hold_inventory(on_hold_rows)
         on_hold_row_count = len(on_hold_rows)
     parts_by_code = {}
     parts_row_count = 0
     if parts_path and Path(parts_path).is_file():
-        parts_rows = _read_table(parts_path)
+        parts_rows = _read_mining_table(parts_path)
         parts_by_code = _load_parts_inventory(parts_rows)
         parts_row_count = len(parts_rows)
     blacklist = _load_blacklist(blacklist_path)
@@ -1594,19 +1602,59 @@ def _load_storage(rows, display_store_keys=()):
     return by_store, storage_details, storage_map, unmapped
 
 
+def _column_key_map(row):
+    return {
+        re.sub(r"[\s_\-]+", "", _strip_cell_bom(k).lower()): v
+        for k, v in row.items() if k is not None
+    }
+
+
+def _pick_fuzzy(row, keys):
+    lower = _column_key_map(row)
+    for key in keys:
+        nk = re.sub(r"[\s_\-]+", "", str(key).lower())
+        if nk in lower:
+            val = lower[nk]
+            if val is not None and str(val).strip() != "":
+                return val
+    return None
+
+
+def _mining_code_from_row(row):
+    code = _pick(row, CODE_KEYS) or _pick_fuzzy(row, MINING_CODE_KEYS)
+    return str(code).strip() if code else ""
+
+
+def _mining_qty_from_row(row, qty_keys):
+    """无数量列时按 1 计（序列号级导出每行=1 件）。"""
+    raw = _pick(row, qty_keys) or _pick_fuzzy(row, qty_keys)
+    qty = _to_float(raw)
+    if qty is None or qty <= 0:
+        return 1.0
+    return qty
+
+
+def _read_mining_table(path):
+    """on_hold / parts 可能是 Excel 分号或 Tab 导出。"""
+    path = Path(path)
+    raw_text, _ = _read_channel_owner_text(path)
+    delimiter = _detect_channel_owner_delimiter(raw_text[:8192])
+    return list(csv.DictReader(raw_text.splitlines(), delimiter=delimiter))
+
+
 def _load_on_hold_inventory(rows):
     """on_hold.csv → {norm_code: {code, name, family, total_qty, statuses, warehouses}}"""
     by_code = {}
     for row in rows:
-        code = _pick(row, CODE_KEYS)
+        code = _mining_code_from_row(row)
         if not code:
             continue
         norm = _norm_code(code)
-        qty = _to_float(_pick(row, ON_HOLD_QTY_KEYS)) or 0.0
-        if qty <= 0:
-            continue
-        status = str(_pick(row, ON_HOLD_STATUS_KEYS) or "").strip()
-        warehouse = str(_pick(row, STORE_KEYS + ["warehousename"]) or "").strip()
+        qty = _mining_qty_from_row(row, ON_HOLD_QTY_KEYS)
+        status = str(_pick(row, ON_HOLD_STATUS_KEYS) or _pick_fuzzy(row, ON_HOLD_STATUS_KEYS) or "").strip()
+        warehouse = str(
+            _pick(row, STORE_KEYS + ["warehousename"]) or _pick_fuzzy(row, STORE_KEYS + ["warehousename"]) or ""
+        ).strip()
         bucket = by_code.setdefault(norm, {
             "code": str(code).strip(),
             "name": str(_pick(row, NAME_KEYS) or "").strip(),
@@ -1629,14 +1677,14 @@ def _load_parts_inventory(rows):
     """parts.csv → {norm_code: {code, name, family, total_qty, warehouses}}"""
     by_code = {}
     for row in rows:
-        code = _pick(row, CODE_KEYS)
+        code = _mining_code_from_row(row)
         if not code:
             continue
         norm = _norm_code(code)
-        qty = _to_float(_pick(row, PARTS_QTY_KEYS)) or 0.0
-        if qty <= 0:
-            continue
-        warehouse = str(_pick(row, STORE_KEYS + ["warehousename"]) or "").strip()
+        qty = _mining_qty_from_row(row, PARTS_QTY_KEYS)
+        warehouse = str(
+            _pick(row, STORE_KEYS + ["warehousename"]) or _pick_fuzzy(row, STORE_KEYS + ["warehousename"]) or ""
+        ).strip()
         bucket = by_code.setdefault(norm, {
             "code": str(code).strip(),
             "name": str(_pick(row, NAME_KEYS) or "").strip(),
