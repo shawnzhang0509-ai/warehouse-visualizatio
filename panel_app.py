@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.21"
+APP_VERSION = "1.9.22"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -99,6 +99,21 @@ SORTABLE_COLS = {
         2 if p.get("gap") else 3 if p.get("exempted") else 4 if p.get("in_stock") else 5
     ),
 }
+
+ONHOLD_SORTABLE_COLS = {
+    "code": lambda r: (r.get("code") or "").lower(),
+    "name": lambda r: (r.get("name") or "").lower(),
+    "status": lambda r: (r.get("status") or "").lower(),
+    "order_no": lambda r: (r.get("order_no") or "").lower(),
+    "ticket_no": lambda r: (r.get("ticket_no") or "").lower(),
+    "hold_days": lambda r: (
+        r.get("hold_days") if r.get("hold_days") is not None else -1
+    ),
+    "hold_since": lambda r: (r.get("hold_since") or ""),
+    "qty": lambda r: float(r.get("qty") or 0),
+    "warehouse": lambda r: (r.get("warehouse") or "").lower(),
+}
+ONHOLD_NUMERIC_SORT_COLS = frozenset({"qty", "hold_days"})
 
 
 class PanelApp:
@@ -850,7 +865,9 @@ class PanelApp:
             "warehouse": ("仓", 120),
         }
         for col, (text, width) in onhold_headings.items():
-            self._mining_onhold_tree.heading(col, text=text)
+            self._mining_onhold_tree.heading(
+                col, text=text, command=lambda c=col: self._on_onhold_sort_column(c),
+            )
             self._mining_onhold_tree.column(
                 col, width=width, anchor="center" if col not in ("name", "warehouse", "status") else "w",
             )
@@ -2106,6 +2123,23 @@ class PanelApp:
         self._sync_island_combo_to_var(self._onhold_days_combo, self._onhold_days_filter_var)
         return str(self._onhold_days_filter_var.get()).strip()
 
+    def _sort_onhold_rows(self, rows):
+        col = self._onhold_sort_col
+        if col and col in ONHOLD_SORTABLE_COLS:
+            key_fn = ONHOLD_SORTABLE_COLS[col]
+            return sorted(rows, key=key_fn, reverse=self._onhold_sort_reverse)
+        return rows
+
+    def _on_onhold_sort_column(self, col):
+        if col not in ONHOLD_SORTABLE_COLS:
+            return
+        if self._onhold_sort_col == col:
+            self._onhold_sort_reverse = not self._onhold_sort_reverse
+        else:
+            self._onhold_sort_col = col
+            self._onhold_sort_reverse = col in ONHOLD_NUMERIC_SORT_COLS
+        self._render_on_hold_analysis()
+
     def _render_on_hold_analysis(self):
         if not self._mining_onhold_tree:
             return
@@ -2133,6 +2167,7 @@ class PanelApp:
             catalog_by_norm=self._catalog_by_norm(),
             min_hold_days=min_days,
         )
+        rows = self._sort_onhold_rows(rows)
         self._mining_onhold_render_token += 1
         token = self._mining_onhold_render_token
         self._mining_onhold_row_data = {}
@@ -2172,6 +2207,9 @@ class PanelApp:
                     hint += f"（{status_f}）"
                 if min_days:
                     hint += f" · 冻结≥{min_days}天"
+                if self._onhold_sort_col:
+                    order = "降序" if self._onhold_sort_reverse else "升序"
+                    hint += f" · 按{self._onhold_sort_col} {order}"
                 if total_matched > len(rows):
                     hint += f" · 已截断至 {panel_data.ON_HOLD_ANALYSIS_MAX_ROWS} 条"
                 if no_date and rows and min_days:
