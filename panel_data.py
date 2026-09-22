@@ -768,6 +768,17 @@ ON_HOLD_DATE_KEYS = [
 ON_HOLD_DAYS_KEYS = [
     "holddays", "on_hold_days", "daysonhold", "hold_days", "dayonhold", "冻结天数",
 ]
+ON_HOLD_ORDER_KEYS = [
+    "orderno", "order_no", "ordernumber", "order_number", "salesorder", "sales_order",
+    "sonumber", "so_number", "orderid", "order_id", "documentno", "document_no",
+    "订单号", "销售订单", "salesorderno",
+]
+ON_HOLD_TICKET_KEYS = [
+    "ticket", "ticketno", "ticket_no", "ticketnumber", "ticket_number", "ticketid",
+    "ticket_id", "serviceticket", "service_ticket", "caseno", "case_no", "工单号",
+    "工单", "ticketref",
+]
+ON_HOLD_ANALYSIS_MAX_ROWS = 15000
 PARTS_QTY_KEYS = [
     "partsqty", "parts_qty", "partqty", "quantity", "qty", "sum", "total", "amount",
 ]
@@ -1394,10 +1405,12 @@ def _load_region_bundle(region, force=False):
     on_hold_row_count = 0
     if on_hold_path and Path(on_hold_path).is_file():
         on_hold_rows = _read_mining_table(on_hold_path)
+        on_hold_detail_rows = _parse_on_hold_detail_rows(on_hold_rows)
         on_hold_by_code = _load_on_hold_inventory(on_hold_rows)
         on_hold_row_count = len(on_hold_rows)
     else:
         on_hold_rows = []
+        on_hold_detail_rows = []
     parts_by_code = {}
     parts_row_count = 0
     if parts_path and Path(parts_path).is_file():
@@ -1453,6 +1466,7 @@ def _load_region_bundle(region, force=False):
         "on_hold_mtime": on_hold_mtime,
         "on_hold_by_code": on_hold_by_code,
         "on_hold_rows": on_hold_rows,
+        "on_hold_detail_rows": on_hold_detail_rows,
         "on_hold_row_count": on_hold_row_count,
         "parts_path": str(parts_path) if parts_path else None,
         "parts_mtime": parts_mtime,
@@ -1853,6 +1867,51 @@ def _format_hold_since(hold_at):
     return hold_at.isoformat()
 
 
+def _on_hold_status_tokens(status):
+    """一行里可能用逗号拼接多种 On Hold 类型（旧版汇总导出）；筛选时按子类型匹配。"""
+    text = str(status or "").strip()
+    if not text:
+        return ["（未标注状态）"]
+    parts = [p.strip() for p in re.split(r"[,;|/]", text) if p.strip()]
+    return parts if parts else [text]
+
+
+def _parse_on_hold_detail_rows(rows):
+    """按 CSV 原始行保留 On Hold（不合并 SKU），每行含状态/数量/仓/订单或工单。"""
+    detail = []
+    for row in rows:
+        code = _mining_code_from_row(row)
+        if not code:
+            continue
+        status = str(
+            _pick(row, ON_HOLD_STATUS_KEYS) or _pick_fuzzy(row, ON_HOLD_STATUS_KEYS) or ""
+        ).strip() or "（未标注状态）"
+        warehouse = str(
+            _pick(row, STORE_KEYS + ["warehousename"]) or _pick_fuzzy(row, STORE_KEYS + ["warehousename"]) or ""
+        ).strip()
+        order_no = str(_pick_fuzzy(row, ON_HOLD_ORDER_KEYS) or "").strip()
+        ticket_no = str(_pick_fuzzy(row, ON_HOLD_TICKET_KEYS) or "").strip()
+        hold_at = _parse_hold_datetime(_pick_fuzzy(row, ON_HOLD_DATE_KEYS))
+        hold_days = _hold_days_from_row(row, hold_at)
+        qty = _mining_qty_from_row(row, ON_HOLD_QTY_KEYS)
+        norm = _norm_code(code)
+        detail.append({
+            "norm_code": norm,
+            "code": str(code).strip(),
+            "name": str(_pick(row, NAME_KEYS) or _pick_fuzzy(row, NAME_KEYS) or "").strip(),
+            "family": str(_pick(row, FAMILY_KEYS) or "").strip(),
+            "status": status,
+            "order_no": order_no,
+            "ticket_no": ticket_no,
+            "warehouse": warehouse,
+            "qty": qty,
+            "hold_at": hold_at,
+            "hold_days": hold_days,
+            "hold_since": _format_hold_since(hold_at),
+        })
+    return detail
+
+
 def _load_on_hold_inventory(rows):
     """on_hold.csv → {norm_code: {code, name, family, total_qty, statuses, warehouses, ...}}"""
     by_code = {}
@@ -1969,43 +2028,52 @@ def diagnose_on_hold_bundle(bundle):
     return ""
 
 
-def list_on_hold_analysis(bundle, status_filter=None, catalog_by_norm=None):
-    """On Hold 分析明细（含冻结天数、状态、图片字段来自 stock 目录）。"""
-    by_code = dict(bundle.get("on_hold_by_code") or {})
-    if not by_code and bundle.get("on_hold_rows"):
-        by_code = _load_on_hold_inventory(bundle.get("on_hold_rows"))
+def list_on_hold_analysis(bundle, status_filter=None, catalog_by_norm=None, max_rows=None):
+    """On Hold 明细：每行 CSV 一条（同 SKU 不同订单/时间分开），可按状态精确筛选。"""
+    detail = list(bundle.get("on_hold_detail_rows") or [])
+    if not detail and bundle.get("on_hold_rows"):
+        detail = _parse_on_hold_detail_rows(bundle.get("on_hold_rows"))
     catalog_by_norm = catalog_by_norm or {}
-    out = []
     status_filter = str(status_filter or "").strip()
-    for norm, item in by_code.items():
-        statuses = item.get("statuses") or set()
+    out = []
+    for line in detail:
+        status_raw = line.get("status") or "（未标注状态）"
+        tokens = _on_hold_status_tokens(status_raw)
         if status_filter and status_filter not in ("", "全部状态"):
-            if status_filter not in statuses:
+            if status_filter not in tokens:
                 continue
+        display_status = (
+            status_filter
+            if status_filter and status_filter not in ("", "全部状态") and status_filter in tokens
+            else status_raw
+        )
+        norm = line.get("norm_code") or ""
         cat = catalog_by_norm.get(norm) or {}
-        status_text = "、".join(sorted(s for s in statuses if s)) or "（未标注状态）"
-        hold_days = item.get("max_hold_days")
-        hold_since = _format_hold_since(item.get("earliest_hold_at"))
         out.append({
             "norm_code": norm,
-            "code": item.get("code") or "",
-            "name": item.get("name") or cat.get("name") or "",
-            "family": item.get("family") or cat.get("family") or "",
-            "status": status_text,
-            "hold_days": hold_days,
-            "hold_since": hold_since,
-            "qty": item.get("total_qty") or 0,
-            "warehouses": item.get("warehouses") or [],
-            "status_qty": item.get("status_qty") or {},
-            "image_raw": cat.get("image_raw") or item.get("image_raw"),
+            "code": line.get("code") or "",
+            "name": line.get("name") or cat.get("name") or "",
+            "family": line.get("family") or cat.get("family") or "",
+            "status": display_status,
+            "order_no": line.get("order_no") or "",
+            "ticket_no": line.get("ticket_no") or "",
+            "hold_days": line.get("hold_days"),
+            "hold_since": line.get("hold_since") or "",
+            "qty": line.get("qty") or 0,
+            "warehouse": line.get("warehouse") or "",
+            "image_raw": cat.get("image_raw"),
             "image": cat.get("image"),
         })
     out.sort(key=lambda r: (
         -(r.get("hold_days") if r.get("hold_days") is not None else -1),
         -(float(r.get("qty") or 0)),
+        r.get("order_no") or r.get("ticket_no") or "",
         r.get("code") or "",
     ))
-    return out
+    cap = max_rows if max_rows is not None else ON_HOLD_ANALYSIS_MAX_ROWS
+    if cap and len(out) > cap:
+        return out[:cap], len(out)
+    return out, len(out)
 
 
 def _load_parts_inventory(rows):

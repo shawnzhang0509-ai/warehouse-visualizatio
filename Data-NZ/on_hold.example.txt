@@ -4,14 +4,17 @@
 -- 列名看板会自动识别：WarehouseName、Sku、OnHoldQty、StockOnHoldStatus 等
 -- 可选冻结日期列（用于「On Hold 分析」算天数）：OnHoldDate / HoldSince / ModifiedOn 等
 
+-- 分析页按「每一行」展示，请勿按 SKU 汇总；需带订单号或 Ticket、冻结日期、仓名
 SELECT
     w.Name AS WarehouseName,
     p.Sku,
     p.Name AS ProductName,
     ISNULL(p.ProductFamily, '') AS ProductFamily,
     s.StockOnHoldStatus,
-    -- MIN(s.OnHoldDate) AS OnHoldDate,  -- 有该字段时取消注释
-    SUM(s.Quantity) AS OnHoldQty
+    o.OrderNo AS OrderNo,          -- 按库表字段调整
+    t.TicketNo AS TicketNo,        -- 无工单可删
+    s.OnHoldDate AS OnHoldDate,
+    s.Quantity AS OnHoldQty
 FROM [dbo].[Stocks] s
 INNER JOIN [dbo].[Warehouses] w
     ON s.WarehouseId = w.Id
@@ -20,10 +23,5 @@ INNER JOIN [dbo].[Products] p
 WHERE s.StockStatus = 'Normal'
   AND s.StockOnHoldStatus IS NOT NULL
   AND s.Quantity > 0
-GROUP BY
-    w.Name,
-    p.Sku,
-    p.Name,
-    p.ProductFamily,
-    s.StockOnHoldStatus
-ORDER BY w.Name, OnHoldQty DESC, p.Sku;
+  -- 不要 GROUP BY SKU；每单/每 Ticket 一行
+ORDER BY s.OnHoldDate DESC, p.Sku;

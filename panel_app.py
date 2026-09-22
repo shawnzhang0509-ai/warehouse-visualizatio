@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.14"
+APP_VERSION = "1.9.15"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -799,7 +799,7 @@ class PanelApp:
         onhold_tab = self._mining_onhold_tab
         tk.Label(
             onhold_tab,
-            text="按 StockOnHoldStatus 汇总；冻结天数需 CSV 含 OnHoldDate/HoldSince 等列（否则仅显示状态与数量）",
+            text="每行 CSV 一条记录（同 SKU 不同订单/工单/时间不合并）；需导出 OrderNo、TicketNo、OnHoldDate、WarehouseName 等列",
             bg="white", fg=C_MUTED, font=("Segoe UI", 9), wraplength=920, justify="left",
         ).pack(anchor="w", padx=4, pady=(6, 4))
         self._onhold_summary_frame = tk.Frame(onhold_tab, bg="white")
@@ -819,21 +819,22 @@ class PanelApp:
         ).pack(side=tk.LEFT, padx=(0, 8))
         onhold_wrap = tk.Frame(onhold_tab, bg="white")
         onhold_wrap.pack(fill=tk.BOTH, expand=True)
-        ohcols = ("code", "name", "status", "hold_days", "hold_since", "qty", "warehouses")
+        ohcols = ("code", "name", "status", "order_no", "ticket_no", "hold_days", "hold_since", "qty", "warehouse")
         self._mining_onhold_tree = ttk.Treeview(
             onhold_wrap, columns=ohcols, show="tree headings", selectmode="browse",
         )
         self._mining_onhold_tree.heading("#0", text="图")
         self._mining_onhold_tree.column("#0", width=56, minwidth=52, stretch=False, anchor="center")
         onhold_headings = {
-            "code": ("编码", 100), "name": ("名称", 220), "status": ("On Hold 类型", 140),
-            "hold_days": ("冻结天数", 72), "hold_since": ("起始日", 88), "qty": ("数量", 56),
-            "warehouses": ("仓", 200),
+            "code": ("编码", 92), "name": ("名称", 180), "status": ("On Hold 类型", 128),
+            "order_no": ("订单号", 88), "ticket_no": ("Ticket", 72),
+            "hold_days": ("冻结天数", 64), "hold_since": ("起始日", 84), "qty": ("数量", 52),
+            "warehouse": ("仓", 120),
         }
         for col, (text, width) in onhold_headings.items():
             self._mining_onhold_tree.heading(col, text=text)
             self._mining_onhold_tree.column(
-                col, width=width, anchor="center" if col not in ("name", "warehouses", "status") else "w",
+                col, width=width, anchor="center" if col not in ("name", "warehouse", "status") else "w",
             )
         self._mining_onhold_tree.tag_configure("hold", background="#fef3c7")
         self._mining_onhold_tree.tag_configure("alt", background=C_ROW_ALT)
@@ -2072,7 +2073,7 @@ class PanelApp:
             if self._onhold_status_filter_var.get() not in options:
                 self._onhold_status_filter_var.set("全部状态")
         status_f = self._onhold_status_filter_var.get()
-        rows = panel_data.list_on_hold_analysis(
+        rows, total_matched = panel_data.list_on_hold_analysis(
             bundle, status_filter=status_f, catalog_by_norm=self._catalog_by_norm(),
         )
         self._mining_onhold_render_token += 1
@@ -2081,12 +2082,6 @@ class PanelApp:
         if self._mining_onhold_tree.get_children():
             self._mining_onhold_tree.delete(*self._mining_onhold_tree.get_children())
         for idx, row in enumerate(rows):
-            wh_text = "、".join(
-                f"{w.get('warehouse', '')} {int(w.get('qty', 0))}"
-                for w in (row.get("warehouses") or [])[:4]
-            )
-            if len(row.get("warehouses") or []) > 4:
-                wh_text += "…"
             hold_days = row.get("hold_days")
             hold_days_text = str(hold_days) if hold_days is not None else "-"
             iid = self._mining_onhold_tree.insert(
@@ -2096,10 +2091,12 @@ class PanelApp:
                     row.get("code") or "",
                     row.get("name") or "",
                     row.get("status") or "-",
+                    row.get("order_no") or "-",
+                    row.get("ticket_no") or "-",
                     hold_days_text,
                     row.get("hold_since") or "-",
                     int(row.get("qty") or 0),
-                    wh_text or "-",
+                    row.get("warehouse") or "-",
                 ),
                 tags=("hold", "alt") if idx % 2 else ("hold",),
             )
@@ -2113,18 +2110,20 @@ class PanelApp:
                 and str(self._mining_notebook.select()) == str(self._mining_onhold_tab)
             )
             if on_tab:
-                if not rows:
+                if not rows and not total_matched:
                     diag = panel_data.diagnose_on_hold_bundle(bundle)
                     self._mining_status_lbl.configure(
-                        text=diag or "On Hold 0 SKU",
+                        text=diag or "On Hold 0 条",
                     )
                 else:
                     no_date = sum(1 for r in rows if r.get("hold_days") is None)
-                    hint = f"On Hold {len(rows)} SKU"
-                    if status_rows:
-                        hint += f" · {len(status_rows)} 种状态"
-                    if no_date:
-                        hint += f" · {no_date} 个无冻结日期（请在 on_hold SQL 导出 OnHoldDate）"
+                    hint = f"显示 {len(rows)} / 共 {total_matched} 条"
+                    if status_f and status_f != "全部状态":
+                        hint += f"（{status_f}）"
+                    if total_matched > len(rows):
+                        hint += f" · 已截断至 {panel_data.ON_HOLD_ANALYSIS_MAX_ROWS} 条"
+                    if no_date and rows:
+                        hint += f" · {no_date} 条无冻结日期"
                     self._mining_status_lbl.configure(text=hint)
 
     def _open_onhold_selected_image(self):
