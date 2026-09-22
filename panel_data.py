@@ -74,7 +74,7 @@ PARTS_PARENT_KEYS = [
 ]
 PARTS_COMPONENT_KEYS = [
     "partsku", "part_sku", "componentsku", "component_sku", "subsku", "子件sku",
-    "componentcode", "partcode", "partname", "part_name",
+    "componentcode", "partcode",
 ]
 PARTS_PER_SET_KEYS = [
     "partsperset", "parts_per_set", "qtyperset", "unitqty", "部件数", "requiredqty",
@@ -2161,25 +2161,48 @@ def _apply_parts_kit_bom(detail, bom):
         if hit:
             line["parent"] = hit[0]
             line["need_per_set"] = hit[1]
+            line["parent_source"] = "bom"
     return detail
 
 
+def _parts_identity_from_row(row, code):
+    """借调成套按 PartName（Excel E 列）区分子件，不用 SKU 前缀合并不同成品。"""
+    part_name = str(_pick_fuzzy(row, WIDE_PART_NAME_KEYS) or "").strip()
+    comp_sku = str(_pick_fuzzy(row, PARTS_COMPONENT_KEYS) or "").strip()
+    if part_name:
+        return part_name
+    if comp_sku:
+        return comp_sku
+    return str(code or "").strip()
+
+
 def _reparent_parts_detail(detail):
-    """同一母件下凑不出多配件时，按 SKU 前缀 / ProductFamily 再归组。"""
+    """仅对无明确母件的长表行，按 SKU 前缀 / ProductFamily 尝试归组（宽表母件 SKU 不改动）。"""
     if not detail:
         return detail
+
+    def _locked(line):
+        return line.get("parent_source") in ("wide", "explicit", "bom")
+
     base_parts = {}
     for line in detail:
-        base = _infer_kit_parent_sku(line.get("part") or "")
+        if _locked(line):
+            continue
+        base = _infer_kit_parent_sku(line.get("part") or line.get("parent") or "")
         base_parts.setdefault(base, set()).add(line["part"])
     for line in detail:
-        base = _infer_kit_parent_sku(line.get("part") or "")
+        if _locked(line):
+            continue
+        base = _infer_kit_parent_sku(line.get("part") or line.get("parent") or "")
         if len(base_parts.get(base, ())) >= 2:
             line["parent"] = base
+            line["parent_source"] = "inferred"
 
     fam_parts = {}
     fam_label = {}
     for line in detail:
+        if _locked(line):
+            continue
         fam = str(line.get("family") or "").strip()
         if not fam:
             continue
@@ -2187,6 +2210,8 @@ def _reparent_parts_detail(detail):
         fam_parts.setdefault(key, set()).add(line["part"])
         fam_label[key] = fam
     for line in detail:
+        if _locked(line):
+            continue
         fam = str(line.get("family") or "").strip().lower()
         if not fam or len(fam_parts.get(fam, ())) < 2:
             continue
@@ -2194,6 +2219,7 @@ def _reparent_parts_detail(detail):
         same_parent = {l["part"] for l in detail if l.get("parent") == parent}
         if len(same_parent) < 2:
             line["parent"] = f"FAM:{fam_label.get(fam, fam)}"
+            line["parent_source"] = "inferred"
     return detail
 
 
@@ -2376,10 +2402,9 @@ def _parse_parts_wide_hub_rows(rows):
             parent = str(_mining_code_from_row(row) or "").strip()
         if not parent:
             continue
-        part_label = str(
-            _pick_fuzzy(row, WIDE_PART_NAME_KEYS + PARTS_COMPONENT_KEYS) or ""
-        ).strip()
-        part = f"{parent}::{part_label}" if part_label else parent
+        part = _parts_identity_from_row(row, parent)
+        if not part:
+            part = "（未标注部件）"
         name = str(
             _pick(row, NAME_KEYS) or _pick_fuzzy(row, NAME_KEYS + ["productna", "productname"]) or ""
         ).strip()
@@ -2399,6 +2424,7 @@ def _parse_parts_wide_hub_rows(rows):
                 "bucket": bucket,
                 "qty": float(qty),
                 "need_per_set": need,
+                "parent_source": "wide",
             })
     return detail
 
@@ -2414,12 +2440,10 @@ def _parse_parts_detail_rows(rows):
         if not code:
             continue
         parent = str(_pick_fuzzy(row, PARTS_PARENT_KEYS) or "").strip()
-        comp = str(_pick_fuzzy(row, PARTS_COMPONENT_KEYS) or "").strip()
-        if parent:
-            part = comp or code
-        else:
+        part = _parts_identity_from_row(row, code)
+        parent_source = "explicit" if parent else "inferred"
+        if not parent:
             parent = _infer_kit_parent_sku(code)
-            part = comp or code
         warehouse = str(
             _pick(row, STORE_KEYS + ["warehousename"]) or _pick_fuzzy(row, STORE_KEYS + ["warehousename"]) or ""
         ).strip()
@@ -2436,6 +2460,7 @@ def _parse_parts_detail_rows(rows):
             "bucket": _warehouse_transfer_bucket(warehouse),
             "qty": qty,
             "need_per_set": need,
+            "parent_source": parent_source,
         })
     return detail
 

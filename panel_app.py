@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.15"
+APP_VERSION = "1.9.16"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -745,7 +745,7 @@ class PanelApp:
         mining_inner.pack(fill=tk.BOTH, expand=True)
         tk.Label(
             mining_inner,
-            text="读取 Output 目录 on_hold.csv / parts.csv ·「跨仓借调」按 Carbine / Walls / CHCH 合并 Parts 估算可凑套数",
+            text="读取 Output 目录 on_hold.csv / parts.csv ·「跨仓借调」按母件 SKU（宽表 B 列）+ PartName（E 列）成套，三仓合并估算可凑套数",
             bg="white", fg=C_MUTED, font=("Segoe UI", 9),
         ).pack(anchor="w", padx=8, pady=(6, 4))
         self._mining_status_lbl = tk.Label(
@@ -851,7 +851,7 @@ class PanelApp:
         mining_transfer_tab = self._mining_transfer_tab
         tk.Label(
             mining_transfer_tab,
-            text="现有合计=三仓各自成套数之和；调货后=Parts 在 Carbine/Walls/CHCH 间借调后可凑的最大套数；借调收益=调货后−现有合计",
+            text="母件 SKU 互不合并（267-914 与 267-914-1 为不同成品）；同一母件下按 PartName 区分子件。现有合计=三仓各自成套之和；借调收益=三仓合并后可凑套数−现有合计",
             bg="white", fg=C_MUTED, font=("Segoe UI", 9), wraplength=900, justify="left",
         ).pack(anchor="w", padx=4, pady=(6, 4))
         transfer_wrap = tk.Frame(mining_transfer_tab, bg="white")
@@ -2207,7 +2207,7 @@ class PanelApp:
                     self._mining_status_lbl.configure(
                         text=(
                             f"{hint}。"
-                            "可配置 Data-NZ/parts_kits.csv（母件+子件 SKU）或让配件 SKU 共享前两段（130-051-xx）。"
+                            "宽表需 ProductSku + PartName + 三仓库存列；或配置 Data-NZ/parts_kits.csv。"
                         ),
                     )
                 else:
