@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.4"
+APP_VERSION = "1.9.5"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -135,6 +135,9 @@ class PanelApp:
         self._island_selected_class = None
         self._mining_tree = None
         self._mining_vscroll = None
+        self._mining_transfer_tree = None
+        self._mining_transfer_vscroll = None
+        self._mining_notebook = None
         self._mining_rendered_for = None
         self._island_groups_canvas = None
         self._island_groups_frame = None
@@ -201,6 +204,7 @@ class PanelApp:
         self._island_view_mode_var = tk.StringVar(value="总览")
         self._island_owner_filter_var = tk.StringVar(value="全部负责人")
         self._island_channel_filter_var = tk.StringVar(value="全部渠道")
+        self._island_sub_channel_filter_var = tk.StringVar(value="全部二级渠道")
         self._mining_kind_var = tk.StringVar(value="全部")
         self.load_images_var = tk.BooleanVar(value=True)
         self.result_count_var = tk.StringVar(value="")
@@ -566,7 +570,7 @@ class PanelApp:
         island_inner.pack(fill=tk.BOTH, expand=True)
         tk.Label(
             island_inner,
-            text="按全国仓库存划分：北岛=Carbine+Walls，南岛=GC · 先选负责人，再选其下属渠道",
+            text="按全国仓库存划分：北岛=Carbine+Walls，南岛=GC · 先选负责人 → 一级渠道 → 二级渠道（SKU 前三位或 channel_owners 二级渠道列）",
             bg="white", fg=C_MUTED, font=("Segoe UI", 9),
         ).pack(anchor="w", padx=8, pady=(6, 4))
         island_filter_bar = tk.Frame(island_inner, bg="white")
@@ -589,7 +593,7 @@ class PanelApp:
         )
         self._island_owner_combo.pack(side=tk.LEFT, padx=(6, 12))
         self._island_owner_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_island_owner_change())
-        tk.Label(island_filter_bar, text="渠道", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(
+        tk.Label(island_filter_bar, text="一级渠道", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(
             side=tk.LEFT,
         )
         self._island_channel_combo = ttk.Combobox(
@@ -598,6 +602,15 @@ class PanelApp:
         )
         self._island_channel_combo.pack(side=tk.LEFT, padx=(6, 12))
         self._island_channel_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_island_channel_change())
+        tk.Label(island_filter_bar, text="二级渠道", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(
+            side=tk.LEFT,
+        )
+        self._island_sub_channel_combo = ttk.Combobox(
+            island_filter_bar, width=10, state="disabled", textvariable=self._island_sub_channel_filter_var,
+            values=["全部二级渠道"],
+        )
+        self._island_sub_channel_combo.pack(side=tk.LEFT, padx=(6, 12))
+        self._island_sub_channel_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_island_sub_channel_change())
         self._island_unsupported_lbl = tk.Label(
             island_inner, text="", bg="white", fg=C_CARD_GAP, font=("Segoe UI", 10),
         )
@@ -732,11 +745,20 @@ class PanelApp:
         mining_inner.pack(fill=tk.BOTH, expand=True)
         tk.Label(
             mining_inner,
-            text="读取 Output 目录 on_hold.csv / parts.csv（由 Data-NZ 的 on_hold.txt、parts.txt 导出）",
+            text="读取 Output 目录 on_hold.csv / parts.csv ·「跨仓借调」按 Carbine / Walls / CHCH 合并 Parts 估算可凑套数",
             bg="white", fg=C_MUTED, font=("Segoe UI", 9),
         ).pack(anchor="w", padx=8, pady=(6, 4))
-        mining_toolbar = tk.Frame(mining_inner, bg="white")
-        mining_toolbar.pack(fill=tk.X, padx=8, pady=(0, 6))
+        self._mining_status_lbl = tk.Label(
+            mining_inner, text="", bg="white", fg=C_MUTED, font=("Segoe UI", 9),
+        )
+        self._mining_status_lbl.pack(anchor="e", padx=8, pady=(0, 4))
+        self._mining_notebook = ttk.Notebook(mining_inner)
+        self._mining_notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        self._mining_list_tab = ttk.Frame(self._mining_notebook)
+        self._mining_notebook.add(self._mining_list_tab, text="库存清单")
+        mining_list_tab = self._mining_list_tab
+        mining_toolbar = tk.Frame(mining_list_tab, bg="white")
+        mining_toolbar.pack(fill=tk.X, pady=(6, 6))
         tk.Label(mining_toolbar, text="类型", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(side=tk.LEFT)
         self._mining_kind_combo = ttk.Combobox(
             mining_toolbar, width=12, state="readonly", textvariable=self._mining_kind_var,
@@ -744,12 +766,8 @@ class PanelApp:
         )
         self._mining_kind_combo.pack(side=tk.LEFT, padx=(6, 12))
         self._mining_kind_combo.bind("<<ComboboxSelected>>", lambda _e: self._render_mining_table())
-        self._mining_status_lbl = tk.Label(
-            mining_toolbar, text="", bg="white", fg=C_MUTED, font=("Segoe UI", 9),
-        )
-        self._mining_status_lbl.pack(side=tk.RIGHT)
-        mining_table_wrap = tk.Frame(mining_inner, bg="white")
-        mining_table_wrap.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        mining_table_wrap = tk.Frame(mining_list_tab, bg="white")
+        mining_table_wrap.pack(fill=tk.BOTH, expand=True)
         mcols = ("kind", "code", "name", "family", "qty", "detail", "warehouses")
         self._mining_tree = ttk.Treeview(
             mining_table_wrap, columns=mcols, show="headings",
@@ -775,7 +793,48 @@ class PanelApp:
         self._mining_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._mining_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._mining_tree.bind("<Double-1>", self._on_mining_double_click)
-        for widget in (mining_inner, self._tab_mining, self._mining_tree):
+
+        self._mining_transfer_tab = ttk.Frame(self._mining_notebook)
+        self._mining_notebook.add(self._mining_transfer_tab, text="跨仓借调")
+        mining_transfer_tab = self._mining_transfer_tab
+        tk.Label(
+            mining_transfer_tab,
+            text="现有合计=三仓各自成套数之和；调货后=Parts 在 Carbine/Walls/CHCH 间借调后可凑的最大套数；借调收益=调货后−现有合计",
+            bg="white", fg=C_MUTED, font=("Segoe UI", 9), wraplength=900, justify="left",
+        ).pack(anchor="w", padx=4, pady=(6, 4))
+        transfer_wrap = tk.Frame(mining_transfer_tab, bg="white")
+        transfer_wrap.pack(fill=tk.BOTH, expand=True, padx=0, pady=(0, 6))
+        tcols = (
+            "parent", "name", "part_count", "sets_carbine", "sets_walls", "sets_chch",
+            "sets_current", "sets_after", "gain", "distribution",
+        )
+        self._mining_transfer_tree = ttk.Treeview(
+            transfer_wrap, columns=tcols, show="headings",
+            selectmode="browse", style="Prefix.Treeview",
+        )
+        transfer_headings = {
+            "parent": ("母件 SKU", 88), "name": ("名称", 200), "part_count": ("部件数", 56),
+            "sets_carbine": ("Carbine", 64), "sets_walls": ("Walls", 56), "sets_chch": ("CHCH", 56),
+            "sets_current": ("现有合计", 72), "sets_after": ("调货后", 64), "gain": ("借调收益", 72),
+            "distribution": ("Parts 分布", 280),
+        }
+        for col, (text, width) in transfer_headings.items():
+            self._mining_transfer_tree.heading(col, text=text)
+            self._mining_transfer_tree.column(
+                col, width=width, anchor="center" if col not in ("name", "distribution") else "w",
+            )
+        self._mining_transfer_tree.tag_configure("gain", background="#dcfce7")
+        self._mining_transfer_tree.tag_configure("alt", background=C_ROW_ALT)
+        self._mining_transfer_vscroll = ttk.Scrollbar(
+            transfer_wrap, orient="vertical", command=self._mining_transfer_tree.yview,
+        )
+        self._mining_transfer_tree.configure(yscrollcommand=self._mining_transfer_vscroll.set)
+        self._mining_transfer_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._mining_transfer_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._mining_transfer_tree.bind("<Double-1>", self._on_mining_transfer_double_click)
+        self._mining_notebook.bind("<<NotebookTabChanged>>", self._on_mining_tab_changed)
+
+        for widget in (mining_inner, self._tab_mining, self._mining_tree, self._mining_transfer_tree):
             widget.bind("<MouseWheel>", self._on_mining_wheel)
             widget.bind("<Button-4>", lambda _e: self._scroll_mining(-1))
             widget.bind("<Button-5>", lambda _e: self._scroll_mining(1))
@@ -1691,7 +1750,7 @@ class PanelApp:
         self._render_prefix_table(store_specific)
         self._render_owner_table(store_specific)
         self._render_island_quadrants(store_specific)
-        self._render_mining_table()
+        self._render_mining_panels()
         self._prefix_rendered_for = prefix_key
         self._owner_rendered_for = prefix_key
         self._island_rendered_for = prefix_key
@@ -1769,7 +1828,7 @@ class PanelApp:
         elif selected == str(self._tab_island):
             self._render_island_quadrants(store_specific)
         elif selected == str(self._tab_mining):
-            self._render_mining_table()
+            self._render_mining_panels()
 
     def _mining_kind_key(self):
         kind = self._mining_kind_var.get()
@@ -1784,7 +1843,7 @@ class PanelApp:
             return
         region = self._cached_summary.get("region") or self._current_region()
         try:
-            bundle = panel_data.get_region_bundle(region, force=True)
+            bundle = panel_data.get_region_bundle(region)
         except Exception:
             bundle = {}
         kind = self._mining_kind_key()
@@ -1835,9 +1894,90 @@ class PanelApp:
                     text="请执行 on_hold.txt / parts.txt 导出到 Output-NZ 后点「刷新数据」",
                 )
 
+    def _render_mining_panels(self):
+        self._render_mining_table()
+        self._render_mining_transfer_table()
+
+    def _on_mining_tab_changed(self, _event=None):
+        if not self._mining_notebook or not self._mining_transfer_tab:
+            return
+        if str(self._mining_notebook.select()) == str(self._mining_transfer_tab):
+            self._render_mining_transfer_table()
+
+    def _render_mining_transfer_table(self):
+        if not self._mining_transfer_tree:
+            return
+        region = self._cached_summary.get("region") or self._current_region()
+        try:
+            bundle = panel_data.get_region_bundle(region)
+        except Exception:
+            bundle = {}
+        detail = bundle.get("parts_detail_rows") or []
+        rows = panel_data.analyze_parts_transfer(detail)
+        if self._mining_transfer_tree.get_children():
+            self._mining_transfer_tree.delete(*self._mining_transfer_tree.get_children())
+        for idx, row in enumerate(rows):
+            gain = int(row.get("transfer_gain") or 0)
+            tags = ("gain",) if gain > 0 else ()
+            if idx % 2 == 1 and not tags:
+                tags = ("alt",)
+            elif idx % 2 == 1 and tags:
+                tags = ("gain",)
+            self._mining_transfer_tree.insert(
+                "", tk.END,
+                values=(
+                    row.get("parent") or "",
+                    row.get("name") or "",
+                    row.get("part_count") or 0,
+                    row.get("sets_carbine") or 0,
+                    row.get("sets_walls") or 0,
+                    row.get("sets_chch") or 0,
+                    row.get("sets_current_total") or 0,
+                    row.get("sets_after_transfer") or 0,
+                    gain,
+                    row.get("parts_distribution") or "-",
+                ),
+                tags=tags,
+            )
+        gain_n = sum(1 for r in rows if (r.get("transfer_gain") or 0) > 0)
+        if self._mining_status_lbl and self._mining_notebook:
+            on_transfer = str(self._mining_notebook.select()) == str(self._mining_transfer_tab)
+            if on_transfer:
+                if rows:
+                    self._mining_status_lbl.configure(
+                        text=f"借调可增收 {gain_n} 个母件 · 共 {len(rows)} 条（按借调收益排序）",
+                    )
+                elif int(bundle.get("parts_row_count") or 0):
+                    self._mining_status_lbl.configure(
+                        text="已读取 parts 行，但未解析出母件/子件/仓列，请检查 parts.csv 列名",
+                    )
+                else:
+                    self._mining_status_lbl.configure(
+                        text="请导出 parts.csv 后点「刷新数据」",
+                    )
+
+    def _on_mining_transfer_double_click(self, _event=None):
+        sel = self._mining_transfer_tree.selection() if self._mining_transfer_tree else ()
+        if not sel:
+            return
+        values = self._mining_transfer_tree.item(sel[0], "values")
+        if not values:
+            return
+        self.search_var.set(str(values[0]))
+        if self._notebook:
+            self._notebook.select(self._tab_products)
+        self._refresh_view()
+
     def _scroll_mining(self, direction):
-        if self._mining_tree:
-            self._mining_tree.yview_scroll(direction * SCROLL_UNITS, "units")
+        tree = self._mining_tree
+        if self._mining_notebook and self._mining_transfer_tab:
+            try:
+                if str(self._mining_notebook.select()) == str(self._mining_transfer_tab):
+                    tree = self._mining_transfer_tree
+            except tk.TclError:
+                pass
+        if tree:
+            tree.yview_scroll(direction * SCROLL_UNITS, "units")
 
     def _on_mining_wheel(self, event):
         step = -1 if event.delta > 0 else 1
@@ -1879,6 +2019,7 @@ class PanelApp:
         if view_mode != "总览":
             self._island_owner_filter_var.set("全部负责人")
             self._island_channel_filter_var.set("全部渠道")
+            self._island_sub_channel_filter_var.set("全部二级渠道")
         self._island_selected_class = None
         self._sync_island_filter_var(None)
         self._update_island_owner_channel_combos()
@@ -1888,9 +2029,16 @@ class PanelApp:
         self._island_selected_class = None
         self._sync_island_filter_var(None)
         self._update_island_channel_combo(reset=True)
+        self._update_island_sub_channel_combo(reset=True)
         self._render_island_quadrants(self._cached_summary.get("store_specific", self._is_store_selected()))
 
     def _on_island_channel_change(self):
+        self._island_selected_class = None
+        self._sync_island_filter_var(None)
+        self._update_island_sub_channel_combo(reset=True)
+        self._render_island_quadrants(self._cached_summary.get("store_specific", self._is_store_selected()))
+
+    def _on_island_sub_channel_change(self):
         self._island_selected_class = None
         self._sync_island_filter_var(None)
         self._render_island_quadrants(self._cached_summary.get("store_specific", self._is_store_selected()))
@@ -1909,6 +2057,26 @@ class PanelApp:
         if reset or current not in channels:
             self._island_channel_filter_var.set("全部渠道")
 
+    def _update_island_sub_channel_combo(self, reset=False):
+        owner = self._island_owner_filter_var.get()
+        if owner in ("", "全部负责人"):
+            values = ["全部二级渠道"]
+            sub_state = "disabled"
+        else:
+            channel = self._island_channel_filter_var.get()
+            ch = None if channel in ("", "全部渠道") else channel
+            subs = panel_data.list_secondary_channels_for_scope(
+                self._cached_products, self._cached_owner_config,
+                owner=owner, channel=ch,
+            )
+            values = ["全部二级渠道"] + subs
+            sub_state = "readonly" if subs else "disabled"
+        if self._island_sub_channel_combo:
+            self._island_sub_channel_combo.configure(values=values, state=sub_state)
+        current = self._island_sub_channel_filter_var.get()
+        if reset or current not in values:
+            self._island_sub_channel_filter_var.set("全部二级渠道")
+
     def _update_island_owner_channel_combos(self):
         owners = ["全部负责人"] + list(panel_data.list_owner_channel_tree(self._cached_owner_config)[0])
         if self._island_owner_combo:
@@ -1916,18 +2084,22 @@ class PanelApp:
             if self._island_owner_filter_var.get() not in owners:
                 self._island_owner_filter_var.set("全部负责人")
         self._update_island_channel_combo(reset=True)
+        self._update_island_sub_channel_combo(reset=True)
 
     def _island_scope_filters(self):
         view_mode = self._island_view_mode_var.get()
         owner = self._island_owner_filter_var.get()
         channel = self._island_channel_filter_var.get()
+        sub_channel = self._island_sub_channel_filter_var.get()
         if view_mode != "总览":
-            return None, None
+            return None, None, None
         if owner == "全部负责人":
             owner = None
         if channel == "全部渠道":
             channel = None
-        return owner, channel
+        if sub_channel == "全部二级渠道":
+            sub_channel = None
+        return owner, channel, sub_channel
 
     def _update_main_island_quadrant(self, report):
         counts = report.get("counts") or {}
@@ -2036,6 +2208,7 @@ class PanelApp:
         self._island_selected_class = None
         self._island_owner_filter_var.set("全部负责人")
         self._island_channel_filter_var.set("全部渠道")
+        self._island_sub_channel_filter_var.set("全部二级渠道")
         self._sync_island_filter_var(None)
         self._apply_island_quadrant_styles()
         self._render_island_quadrants(self._cached_summary.get("store_specific", self._is_store_selected()))
@@ -2092,17 +2265,21 @@ class PanelApp:
             )
         if view_mode == "总览":
             self._update_island_channel_combo(reset=False)
+            self._update_island_sub_channel_combo(reset=False)
         elif self._island_channel_combo:
             self._island_channel_combo.configure(state="disabled")
+            if self._island_sub_channel_combo:
+                self._island_sub_channel_combo.configure(state="disabled")
         if view_mode == "总览":
             if self._island_single_frame:
                 self._island_single_frame.pack(fill=tk.X, padx=8, pady=(0, 8))
             if self._island_groups_outer:
                 self._island_groups_outer.pack_forget()
-            owner, channel = self._island_scope_filters()
+            owner, channel, sub_channel = self._island_scope_filters()
             report = panel_data.aggregate_island_quadrants(
                 self._cached_products,
-                owner=owner, channel=channel, config_rows=self._cached_owner_config,
+                owner=owner, channel=channel, sub_channel=sub_channel,
+                config_rows=self._cached_owner_config,
             )
             self._update_main_island_quadrant(report)
             self._apply_island_quadrant_styles()
@@ -2112,6 +2289,8 @@ class PanelApp:
                     scope.append(owner)
                 if channel:
                     scope.append(channel)
+                if sub_channel:
+                    scope.append(sub_channel)
                 scope_text = " · ".join(scope) if scope else "全部 SKU"
                 self._island_status_lbl.configure(
                     text=f"总览 · {scope_text} · 共 {report.get('total', 0)} 条在产 SKU",
@@ -2133,10 +2312,11 @@ class PanelApp:
             if self._island_status_lbl and self._island_view_mode_var.get() == "总览":
                 self._island_status_lbl.configure(text="")
             return
-        owner, channel = self._island_scope_filters()
+        owner, channel, sub_channel = self._island_scope_filters()
         report = panel_data.aggregate_island_quadrants(
             self._cached_products,
-            owner=owner, channel=channel, config_rows=self._cached_owner_config,
+            owner=owner, channel=channel, sub_channel=sub_channel,
+            config_rows=self._cached_owner_config,
         )
         rows = []
         if self._island_selected_class:

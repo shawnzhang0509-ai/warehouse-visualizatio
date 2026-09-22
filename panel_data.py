@@ -64,6 +64,21 @@ CHANNEL_OWNER_HEADER_PAIRS = (
 )
 OWNER_KEYS = ["owner", "负责人", "person", "personincharge"]
 CHANNEL_KEYS = ["channel", "渠道", "sku_prefix", "prefix", "channelcode"]
+SUB_CHANNEL_KEYS = ["sub_channel", "二级渠道", "subchannel", "channel2", "二级", "subchannelcode"]
+PARTS_PARENT_KEYS = [
+    "parentsku", "parent_sku", "kitsku", "kit_sku", "productsku", "product_sku",
+    "mainsku", "main_sku", "成品sku", "母件sku", "setsku", "kitcode",
+]
+PARTS_COMPONENT_KEYS = [
+    "partsku", "part_sku", "componentsku", "component_sku", "subsku", "子件sku",
+    "componentcode", "partcode",
+]
+PARTS_PER_SET_KEYS = ["partsperset", "parts_per_set", "qtyperset", "unitqty", "部件数", "requiredqty"]
+TRANSFER_WAREHOUSE_BUCKETS = (
+    ("carbine", ("carbine", "carbine rd")),
+    ("walls", ("walls", "walls road", "walls in transit")),
+    ("chch", ("gerald", "gc", "chch", "geraldconnelly", "gerald connelly")),
+)
 LEAD_TIME_KEYS = ["lead_time", "leadtime", "leadtime_days", "lead timedays"]
 MERGE_PRODUCT_KEYS = ["merge_products", "merge", "mergeproducts", "必须合并计算的产品"]
 MERGE_REGION_KEYS = ["merge_regions", "regions", "merge_regions", "必须合并计算的地区"]
@@ -372,6 +387,11 @@ def products_for_channel_config(products, cfg, include_discontinued=False):
     matched = [p for p in active if product_matches_channel(p.get("code", ""), cfg["channel"])]
     if not matched:
         return []
+    sub = str(cfg.get("sub_channel") or "").strip()
+    if sub:
+        matched = [p for p in matched if product_matches_channel(p.get("code", ""), sub)]
+    if not matched:
+        return []
     if not _is_merge_all(cfg["merge_products"]):
         tokens = [t.strip() for t in cfg["merge_products"].split("+") if t.strip()]
         matched = [p for p in matched if any(_token_in_product(t, p) for t in tokens)]
@@ -411,35 +431,83 @@ def channels_for_owner(config_rows, owner=None):
 
 
 def filter_products_by_owner_channel(products, config_rows, owner=None, channel=None,
-                                     include_discontinued=False):
-    """按负责人/渠道筛选 SKU（与 channel_owners 规则一致）。"""
+                                     sub_channel=None, include_discontinued=False):
+    """按负责人 / 一级渠道 / 二级渠道筛选 SKU。"""
     if not config_rows:
-        return products
+        scoped = list(products)
+    else:
+        owner = str(owner or "").strip()
+        channel = str(channel or "").strip()
+        sub_channel = str(sub_channel or "").strip()
+        if (
+            owner in ("", "全部负责人")
+            and channel in ("", "全部渠道")
+            and sub_channel in ("", "全部二级渠道")
+        ):
+            scoped = list(products)
+        else:
+            codes = set()
+            for cfg in config_rows:
+                if owner and owner not in ("全部负责人",) and cfg["owner"] != owner:
+                    continue
+                if channel and channel not in ("全部渠道",) and cfg["channel"] != channel:
+                    continue
+                if sub_channel and sub_channel not in ("全部二级渠道",):
+                    cfg_sub = str(cfg.get("sub_channel") or "").strip()
+                    if cfg_sub and cfg_sub != sub_channel:
+                        continue
+                for product in products_for_channel_config(products, cfg, include_discontinued):
+                    codes.add(product.get("norm_code") or product.get("code"))
+            scoped = [
+                p for p in products
+                if (p.get("norm_code") or p.get("code")) in codes
+            ]
+    sub_channel = str(sub_channel or "").strip()
+    if sub_channel and sub_channel not in ("", "全部二级渠道"):
+        scoped = [
+            p for p in scoped
+            if product_matches_channel(p.get("code", ""), sub_channel)
+            or sku_prefix(p.get("code", "")) == sub_channel
+        ]
+    return scoped
+
+
+def list_secondary_channels_for_scope(products, config_rows, owner=None, channel=None,
+                                      include_discontinued=False):
+    """二级渠道：优先 channel_owners 的 sub_channel 列，否则用 SKU 前三位。"""
     owner = str(owner or "").strip()
     channel = str(channel or "").strip()
-    if owner in ("", "全部负责人") and channel in ("", "全部渠道"):
-        return products
-    codes = set()
-    for cfg in config_rows:
-        if owner and owner not in ("全部负责人",) and cfg["owner"] != owner:
+    if owner in ("", "全部负责人"):
+        return []
+    subs = set()
+    for cfg in config_rows or []:
+        if cfg.get("owner") != owner:
             continue
-        if channel and channel not in ("全部渠道",) and cfg["channel"] != channel:
+        if channel and channel not in ("", "全部渠道") and cfg.get("channel") != channel:
             continue
-        for product in products_for_channel_config(products, cfg, include_discontinued):
-            codes.add(product.get("norm_code") or product.get("code"))
-    return [
-        p for p in products
-        if (p.get("norm_code") or p.get("code")) in codes
-    ]
+        sc = str(cfg.get("sub_channel") or "").strip()
+        if sc:
+            subs.add(sc)
+    if subs:
+        return sorted(subs, key=str)
+    scoped = filter_products_by_owner_channel(
+        products, config_rows, owner=owner, channel=channel or None,
+        include_discontinued=include_discontinued,
+    )
+    return sorted({
+        sku_prefix(p.get("code", ""))
+        for p in scoped
+        if p.get("code") and sku_prefix(p.get("code", ""))
+    })
 
 
 def aggregate_island_quadrants(products, include_discontinued=False, owner=None, channel=None,
-                               config_rows=None):
+                               sub_channel=None, config_rows=None):
     """统计四象限 SKU 数（默认仅计在产），可按负责人/渠道筛选。"""
     scoped = products
-    if config_rows and (owner or channel):
+    if config_rows and (owner or channel or sub_channel):
         scoped = filter_products_by_owner_channel(
-            products, config_rows, owner=owner, channel=channel,
+            products, config_rows, owner=owner, channel=channel, sub_channel=sub_channel,
             include_discontinued=include_discontinued,
         )
     counts, rows = _island_counts_from_products(scoped, include_discontinued)
@@ -840,6 +908,7 @@ def _channel_owner_row_dict(owner, channel, extra=None):
     data = {
         "owner": str(owner or "").strip(),
         "channel": str(channel or "").strip(),
+        "sub_channel": "",
         "lead_time": None,
         "merge_products": "所有",
         "merge_regions": "",
@@ -863,6 +932,7 @@ def _parse_channel_owner_dict_row(row):
         except ValueError:
             lead_time = str(lead_raw).strip()
     return _channel_owner_row_dict(owner, channel, {
+        "sub_channel": _normalize_channel_code(_pick(row, SUB_CHANNEL_KEYS) or ""),
         "lead_time": lead_time,
         "merge_products": str(_pick(row, MERGE_PRODUCT_KEYS) or "所有").strip() or "所有",
         "merge_regions": str(_pick(row, MERGE_REGION_KEYS) or "").strip(),
@@ -1264,6 +1334,9 @@ def _load_region_bundle(region, force=False):
         parts_rows = _read_mining_table(parts_path)
         parts_by_code = _load_parts_inventory(parts_rows)
         parts_row_count = len(parts_rows)
+        parts_detail_rows = _parse_parts_detail_rows(parts_rows)
+    else:
+        parts_detail_rows = []
     blacklist = _load_blacklist(blacklist_path)
     stock_raw_rows = _read_table(stock_path)
     active_rows = _load_stock(stock_raw_rows, data_dir, discontinued=False)
@@ -1304,6 +1377,7 @@ def _load_region_bundle(region, force=False):
         "parts_mtime": parts_mtime,
         "parts_by_code": parts_by_code,
         "parts_row_count": parts_row_count,
+        "parts_detail_rows": parts_detail_rows,
         "stock_row_count": len(stock_raw_rows),
     }
     _REGION_CACHE[region_key] = bundle
@@ -1696,6 +1770,121 @@ def _load_parts_inventory(rows):
         if warehouse:
             bucket["warehouses"].append({"warehouse": warehouse, "qty": qty})
     return by_code
+
+
+def _warehouse_transfer_bucket(warehouse_name):
+    text = str(warehouse_name or "").lower()
+    for bucket, tokens in TRANSFER_WAREHOUSE_BUCKETS:
+        if any(token in text for token in tokens):
+            return bucket
+    return "other"
+
+
+def _parse_parts_detail_rows(rows):
+    """解析 parts.csv 行：母件 + 子件 + 仓 + 数量。"""
+    detail = []
+    for row in rows:
+        part = str(_pick_fuzzy(row, PARTS_COMPONENT_KEYS) or _mining_code_from_row(row) or "").strip()
+        parent = str(_pick_fuzzy(row, PARTS_PARENT_KEYS) or "").strip()
+        if not part:
+            continue
+        if not parent:
+            parent = part
+        warehouse = str(
+            _pick(row, STORE_KEYS + ["warehousename"]) or _pick_fuzzy(row, STORE_KEYS + ["warehousename"]) or ""
+        ).strip()
+        qty = _mining_qty_from_row(row, PARTS_QTY_KEYS)
+        need = _to_float(_pick_fuzzy(row, PARTS_PER_SET_KEYS)) or 1.0
+        if need <= 0:
+            need = 1.0
+        detail.append({
+            "parent": parent,
+            "part": part,
+            "name": str(_pick(row, NAME_KEYS) or _pick_fuzzy(row, NAME_KEYS) or "").strip(),
+            "family": str(_pick(row, FAMILY_KEYS) or "").strip(),
+            "warehouse": warehouse,
+            "bucket": _warehouse_transfer_bucket(warehouse),
+            "qty": qty,
+            "need_per_set": need,
+        })
+    return detail
+
+
+def analyze_parts_transfer(rows):
+    """
+    跨 Carbine / Walls / CHCH 借调拼凑：比较各仓独立成套数 vs 三仓合并后最多成套数。
+    可传入 parts.csv 原始行，或 bundle 内已解析的 parts_detail_rows。
+    """
+    if rows and isinstance(rows[0], dict) and rows[0].get("bucket") is not None and rows[0].get("part"):
+        detail = rows
+    else:
+        detail = _parse_parts_detail_rows(rows)
+    if not detail:
+        return []
+    kits = {}
+    for line in detail:
+        parent = line["parent"]
+        kit = kits.setdefault(parent, {
+            "parent": parent,
+            "name": line.get("name") or "",
+            "family": line.get("family") or "",
+            "parts": {},
+            "inv": {},
+        })
+        if not kit["name"] and line.get("name"):
+            kit["name"] = line["name"]
+        part_id = line["part"]
+        kit["parts"][part_id] = max(kit["parts"].get(part_id, 0), line["need_per_set"])
+        key = (part_id, line["bucket"])
+        kit["inv"][key] = kit["inv"].get(key, 0.0) + line["qty"]
+
+    hub_buckets = ("carbine", "walls", "chch")
+    results = []
+    for parent, kit in kits.items():
+        parts = kit["parts"]
+        if len(parts) < 2:
+            only_part = next(iter(parts)) if parts else None
+            if only_part is None or parent == only_part:
+                continue
+        sets_by = {}
+        for bucket in hub_buckets:
+            sets_by[bucket] = min(
+                kit["inv"].get((part_id, bucket), 0.0) / need
+                for part_id, need in parts.items()
+            )
+            sets_by[bucket] = int(sets_by[bucket])
+        current_total = sum(sets_by[bucket] for bucket in hub_buckets)
+        pooled = {}
+        for part_id, need in parts.items():
+            pooled[part_id] = sum(kit["inv"].get((part_id, b), 0.0) for b in hub_buckets)
+        after_transfer = min(pooled[part_id] / need for part_id, need in parts.items())
+        after_transfer = int(after_transfer)
+        gain = after_transfer - current_total
+        if current_total <= 0 and after_transfer <= 0:
+            continue
+        dist_parts = []
+        for part_id in sorted(parts):
+            chunks = []
+            for bucket in hub_buckets:
+                q = int(kit["inv"].get((part_id, bucket), 0))
+                if q:
+                    chunks.append(f"{bucket}:{q}")
+            if chunks:
+                dist_parts.append(f"{part_id} " + "+".join(chunks))
+        results.append({
+            "parent": parent,
+            "name": kit.get("name") or "",
+            "part_count": len(parts),
+            "sets_carbine": sets_by["carbine"],
+            "sets_walls": sets_by["walls"],
+            "sets_chch": sets_by["chch"],
+            "sets_current_total": current_total,
+            "sets_after_transfer": after_transfer,
+            "transfer_gain": gain,
+            "parts_distribution": "; ".join(dist_parts[:6]),
+        })
+    results.sort(key=lambda r: (-r["transfer_gain"], -r["sets_after_transfer"], r["parent"]))
+    return results
 
 
 def list_mining_inventory(bundle, kind="all"):
