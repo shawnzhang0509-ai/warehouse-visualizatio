@@ -2,7 +2,9 @@
 -- 复制为 parts.txt 后按业务修改；parts.txt 不提交 Git（每人本地 SQL）
 -- 跨仓借调支持两种 parts.csv：
 -- 1) SQL 长表：WarehouseName + Sku + PartsQty
--- 2) Excel 宽表：ProductSku + PartName +「Carbin 库存」「Walls 库存」「CHCH 库存」分列（另存 CSV UTF-8）
+-- 2) Excel 宽表（推荐）：A 品名、B ProductSku（母件，一行一个成品 SKU）、E PartName（子件名，借调成套按此列）、
+--    「标准部件」每套用量 +「Carbin 库存」「Walls 库存」「CHCH 库存」分列（另存 CSV UTF-8）
+--    注意：267-914 与 267-914-1 是不同母件，不会按 SKU 前缀合并。
 -- 也可放 Data-NZ/parts_kits.csv 定义母件/子件
 
 SELECT
