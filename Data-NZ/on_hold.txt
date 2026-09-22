@@ -1,0 +1,27 @@
+-- On Hold / 冻结库存 → Output-NZ/on_hold.csv
+-- 与 stock.csv（StockOnHoldStatus IS NULL）互补，用于挖掘被冻结的库存
+--
+-- 列名看板会自动识别：WarehouseName、Sku、OnHoldQty、StockOnHoldStatus 等
+
+SELECT
+    w.Name AS WarehouseName,
+    p.Sku,
+    p.Name AS ProductName,
+    ISNULL(p.ProductFamily, '') AS ProductFamily,
+    s.StockOnHoldStatus,
+    SUM(s.Quantity) AS OnHoldQty
+FROM [dbo].[Stocks] s
+INNER JOIN [dbo].[Warehouses] w
+    ON s.WarehouseId = w.Id
+INNER JOIN [dbo].[Products] p
+    ON s.ProductId = p.Id
+WHERE s.StockStatus = 'Normal'
+  AND s.StockOnHoldStatus IS NOT NULL
+  AND s.Quantity > 0
+GROUP BY
+    w.Name,
+    p.Sku,
+    p.Name,
+    p.ProductFamily,
+    s.StockOnHoldStatus
+ORDER BY w.Name, OnHoldQty DESC, p.Sku;

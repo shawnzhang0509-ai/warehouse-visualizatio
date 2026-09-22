@@ -1,4 +1,13 @@
+region_runner_config.local.json
 __pycache__/
 *.pyc
 data/daily_snapshots.json
 Output-NZ/latest/
+Output-NZ/*.csv
+Output-NZ/*.xlsx
+Output-AU/latest/
+Output-AU/*.csv
+Output-AU/*.xlsx
+Output-CA/latest/
+Output-CA/*.csv
+Output-CA/*.xlsx
