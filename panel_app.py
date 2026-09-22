@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.10"
+APP_VERSION = "1.9.11"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -137,6 +137,12 @@ class PanelApp:
         self._mining_vscroll = None
         self._mining_transfer_tree = None
         self._mining_transfer_vscroll = None
+        self._mining_onhold_tree = None
+        self._mining_onhold_vscroll = None
+        self._onhold_summary_frame = None
+        self._onhold_status_combo = None
+        self._mining_onhold_render_token = 0
+        self._mining_onhold_row_data = {}
         self._mining_notebook = None
         self._mining_rendered_for = None
         self._island_groups_canvas = None
@@ -205,6 +211,7 @@ class PanelApp:
         self._island_owner_filter_var = tk.StringVar(value="全部负责人")
         self._island_channel_filter_var = tk.StringVar(value="全部渠道")
         self._mining_kind_var = tk.StringVar(value="全部")
+        self._onhold_status_filter_var = tk.StringVar(value="全部状态")
         self.load_images_var = tk.BooleanVar(value=True)
         self.result_count_var = tk.StringVar(value="")
         self._status_var = tk.StringVar(value="")
@@ -787,6 +794,57 @@ class PanelApp:
         self._mining_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._mining_tree.bind("<Double-1>", self._on_mining_double_click)
 
+        self._mining_onhold_tab = ttk.Frame(self._mining_notebook)
+        self._mining_notebook.add(self._mining_onhold_tab, text="On Hold 分析")
+        onhold_tab = self._mining_onhold_tab
+        tk.Label(
+            onhold_tab,
+            text="按 StockOnHoldStatus 汇总；冻结天数需 CSV 含 OnHoldDate/HoldSince 等列（否则仅显示状态与数量）",
+            bg="white", fg=C_MUTED, font=("Segoe UI", 9), wraplength=920, justify="left",
+        ).pack(anchor="w", padx=4, pady=(6, 4))
+        self._onhold_summary_frame = tk.Frame(onhold_tab, bg="white")
+        self._onhold_summary_frame.pack(fill=tk.X, padx=4, pady=(0, 6))
+        onhold_toolbar = tk.Frame(onhold_tab, bg="white")
+        onhold_toolbar.pack(fill=tk.X, padx=4, pady=(0, 6))
+        tk.Label(onhold_toolbar, text="状态", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        self._onhold_status_combo = ttk.Combobox(
+            onhold_toolbar, width=28, state="readonly", textvariable=self._onhold_status_filter_var,
+            values=["全部状态"],
+        )
+        self._onhold_status_combo.pack(side=tk.LEFT, padx=(6, 12))
+        self._onhold_status_combo.bind("<<ComboboxSelected>>", lambda _e: self._render_on_hold_analysis())
+        ttk.Button(
+            onhold_toolbar, text="查看图片", style="Tool.TButton",
+            command=self._open_onhold_selected_image,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        onhold_wrap = tk.Frame(onhold_tab, bg="white")
+        onhold_wrap.pack(fill=tk.BOTH, expand=True)
+        ohcols = ("code", "name", "status", "hold_days", "hold_since", "qty", "warehouses")
+        self._mining_onhold_tree = ttk.Treeview(
+            onhold_wrap, columns=ohcols, show="tree headings", selectmode="browse",
+        )
+        self._mining_onhold_tree.heading("#0", text="图")
+        self._mining_onhold_tree.column("#0", width=56, minwidth=52, stretch=False, anchor="center")
+        onhold_headings = {
+            "code": ("编码", 100), "name": ("名称", 220), "status": ("On Hold 类型", 140),
+            "hold_days": ("冻结天数", 72), "hold_since": ("起始日", 88), "qty": ("数量", 56),
+            "warehouses": ("仓", 200),
+        }
+        for col, (text, width) in onhold_headings.items():
+            self._mining_onhold_tree.heading(col, text=text)
+            self._mining_onhold_tree.column(
+                col, width=width, anchor="center" if col not in ("name", "warehouses", "status") else "w",
+            )
+        self._mining_onhold_tree.tag_configure("hold", background="#fef3c7")
+        self._mining_onhold_tree.tag_configure("alt", background=C_ROW_ALT)
+        self._mining_onhold_vscroll = ttk.Scrollbar(
+            onhold_wrap, orient="vertical", command=self._mining_onhold_tree.yview,
+        )
+        self._mining_onhold_tree.configure(yscrollcommand=self._mining_onhold_vscroll.set)
+        self._mining_onhold_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self._mining_onhold_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._mining_onhold_tree.bind("<Double-1>", self._on_mining_onhold_double_click)
+
         self._mining_transfer_tab = ttk.Frame(self._mining_notebook)
         self._mining_notebook.add(self._mining_transfer_tab, text="跨仓借调")
         mining_transfer_tab = self._mining_transfer_tab
@@ -827,7 +885,7 @@ class PanelApp:
         self._mining_transfer_tree.bind("<Double-1>", self._on_mining_transfer_double_click)
         self._mining_notebook.bind("<<NotebookTabChanged>>", self._on_mining_tab_changed)
 
-        for widget in (mining_inner, self._tab_mining, self._mining_tree, self._mining_transfer_tree):
+        for widget in (mining_inner, self._tab_mining, self._mining_tree, self._mining_onhold_tree, self._mining_transfer_tree):
             widget.bind("<MouseWheel>", self._on_mining_wheel)
             widget.bind("<Button-4>", lambda _e: self._scroll_mining(-1))
             widget.bind("<Button-5>", lambda _e: self._scroll_mining(1))
@@ -1889,13 +1947,197 @@ class PanelApp:
 
     def _render_mining_panels(self):
         self._render_mining_table()
+        self._render_on_hold_analysis()
         self._render_mining_transfer_table()
 
     def _on_mining_tab_changed(self, _event=None):
-        if not self._mining_notebook or not self._mining_transfer_tab:
+        if not self._mining_notebook:
             return
-        if str(self._mining_notebook.select()) == str(self._mining_transfer_tab):
+        selected = str(self._mining_notebook.select())
+        if self._mining_onhold_tab and selected == str(self._mining_onhold_tab):
+            self._render_on_hold_analysis()
+        elif self._mining_transfer_tab and selected == str(self._mining_transfer_tab):
             self._render_mining_transfer_table()
+
+    def _catalog_by_norm(self):
+        out = {}
+        for product in self._cached_products or []:
+            norm = product.get("norm_code") or panel_data._norm_code(product.get("code"))
+            if norm:
+                out[norm] = product
+        return out
+
+    def _clear_onhold_summary_cards(self):
+        if not self._onhold_summary_frame:
+            return
+        for child in self._onhold_summary_frame.winfo_children():
+            child.destroy()
+
+    def _render_on_hold_summary(self, status_rows):
+        self._clear_onhold_summary_cards()
+        if not self._onhold_summary_frame:
+            return
+        if not status_rows:
+            tk.Label(
+                self._onhold_summary_frame, text="暂无 On Hold 数据", bg="white", fg=C_MUTED,
+                font=("Segoe UI", 9),
+            ).pack(anchor="w")
+            return
+        for row in status_rows[:8]:
+            text = (
+                f"{row.get('status')}：{row.get('sku_count', 0)} SKU · "
+                f"{row.get('total_qty', 0)} 件 · {row.get('row_count', 0)} 行"
+            )
+            tk.Label(
+                self._onhold_summary_frame, text=text, bg="#fef3c7", fg="#92400e",
+                font=("Segoe UI", 9), padx=8, pady=4,
+            ).pack(side=tk.LEFT, padx=(0, 8), pady=2)
+
+    def _apply_onhold_row_image(self, iid, photo, cache_key):
+        if photo:
+            self._img_cache[cache_key] = photo
+        if self._mining_onhold_tree and self._mining_onhold_tree.exists(iid):
+            self._mining_onhold_tree.item(iid, image=photo or self._placeholder_photo)
+
+    def _schedule_onhold_row_image(self, iid, raw, render_token):
+        if not raw or not self._images_enabled():
+            return
+        cache_key = f"{raw}@{THUMB[0]}x{THUMB[1]}"
+        if cache_key in self._img_cache:
+            self._apply_onhold_row_image(iid, self._img_cache[cache_key], cache_key)
+            return
+        waiters = self._pending_urls.setdefault(raw, set())
+        waiters.add((f"onhold:{iid}", render_token))
+        if raw in self._loading_urls:
+            return
+        self._loading_urls.add(raw)
+
+        def worker():
+            photo = None
+            try:
+                with self._image_semaphore:
+                    if str(raw).lower().startswith(("http://", "https://")):
+                        data = self._fetch_image_bytes(raw)
+                        if Image is not None:
+                            photo = self._pil_to_photo(Image.open(io.BytesIO(data)))
+                    else:
+                        path = Path(raw)
+                        if not path.is_absolute():
+                            path = Path(panel_data.ROOT_DIR) / path
+                        if path.is_file() and Image is not None:
+                            photo = self._pil_to_photo(Image.open(path))
+            except Exception:
+                photo = None
+
+            def apply():
+                self._loading_urls.discard(raw)
+                targets = list(self._pending_urls.pop(raw, set()))
+                if photo:
+                    self._img_cache[cache_key] = photo
+                for target, token in targets:
+                    if not str(target).startswith("onhold:") or token != self._mining_onhold_render_token:
+                        continue
+                    oid = str(target).split(":", 1)[1]
+                    self._apply_onhold_row_image(oid, photo, cache_key)
+
+            if self.root.winfo_exists():
+                self.root.after(0, apply)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _render_on_hold_analysis(self):
+        if not self._mining_onhold_tree:
+            return
+        region = self._cached_summary.get("region") or self._current_region()
+        try:
+            bundle = panel_data.get_region_bundle(region)
+        except Exception:
+            bundle = {}
+        status_rows = panel_data.aggregate_on_hold_by_status(
+            on_hold_rows=bundle.get("on_hold_rows"),
+            on_hold_by_code=bundle.get("on_hold_by_code"),
+        )
+        self._render_on_hold_summary(status_rows)
+        options = ["全部状态"] + [r["status"] for r in status_rows]
+        if self._onhold_status_combo:
+            self._onhold_status_combo.configure(values=options)
+            if self._onhold_status_filter_var.get() not in options:
+                self._onhold_status_filter_var.set("全部状态")
+        status_f = self._onhold_status_filter_var.get()
+        rows = panel_data.list_on_hold_analysis(
+            bundle, status_filter=status_f, catalog_by_norm=self._catalog_by_norm(),
+        )
+        self._mining_onhold_render_token += 1
+        token = self._mining_onhold_render_token
+        self._mining_onhold_row_data = {}
+        if self._mining_onhold_tree.get_children():
+            self._mining_onhold_tree.delete(*self._mining_onhold_tree.get_children())
+        for idx, row in enumerate(rows):
+            wh_text = "、".join(
+                f"{w.get('warehouse', '')} {int(w.get('qty', 0))}"
+                for w in (row.get("warehouses") or [])[:4]
+            )
+            if len(row.get("warehouses") or []) > 4:
+                wh_text += "…"
+            hold_days = row.get("hold_days")
+            hold_days_text = str(hold_days) if hold_days is not None else "-"
+            iid = self._mining_onhold_tree.insert(
+                "", tk.END,
+                image=self._placeholder_photo,
+                values=(
+                    row.get("code") or "",
+                    row.get("name") or "",
+                    row.get("status") or "-",
+                    hold_days_text,
+                    row.get("hold_since") or "-",
+                    int(row.get("qty") or 0),
+                    wh_text or "-",
+                ),
+                tags=("hold", "alt") if idx % 2 else ("hold",),
+            )
+            self._mining_onhold_row_data[iid] = row
+            raw = self._image_url_for_item(row)
+            if raw:
+                self._schedule_onhold_row_image(iid, raw, token)
+        if self._mining_status_lbl and self._mining_notebook:
+            on_tab = (
+                self._mining_onhold_tab
+                and str(self._mining_notebook.select()) == str(self._mining_onhold_tab)
+            )
+            if on_tab:
+                no_date = sum(1 for r in rows if r.get("hold_days") is None)
+                hint = f"On Hold {len(rows)} SKU"
+                if status_rows:
+                    hint += f" · {len(status_rows)} 种状态"
+                if no_date and rows:
+                    hint += f" · {no_date} 个无冻结日期（请在 on_hold SQL 导出 OnHoldDate）"
+                self._mining_status_lbl.configure(text=hint)
+
+    def _open_onhold_selected_image(self):
+        sel = self._mining_onhold_tree.selection() if self._mining_onhold_tree else ()
+        if not sel:
+            if messagebox:
+                messagebox.showinfo("查看图片", "请先选中一行 On Hold 产品。")
+            return
+        item = (self._mining_onhold_row_data or {}).get(sel[0])
+        if not item:
+            return
+        self._open_image_for_item(item)
+
+    def _on_mining_onhold_double_click(self, _event=None):
+        sel = self._mining_onhold_tree.selection() if self._mining_onhold_tree else ()
+        if not sel:
+            return
+        item = (self._mining_onhold_row_data or {}).get(sel[0])
+        if not item:
+            return
+        if self._images_enabled():
+            self._open_image_for_item(item)
+            return
+        self.search_var.set(str(item.get("code") or ""))
+        if self._notebook:
+            self._notebook.select(self._tab_products)
+        self._refresh_view()
 
     def _render_mining_transfer_table(self):
         if not self._mining_transfer_tree:
@@ -1969,9 +2211,12 @@ class PanelApp:
 
     def _scroll_mining(self, direction):
         tree = self._mining_tree
-        if self._mining_notebook and self._mining_transfer_tab:
+        if self._mining_notebook:
             try:
-                if str(self._mining_notebook.select()) == str(self._mining_transfer_tab):
+                selected = str(self._mining_notebook.select())
+                if self._mining_onhold_tab and selected == str(self._mining_onhold_tab):
+                    tree = self._mining_onhold_tree
+                elif self._mining_transfer_tab and selected == str(self._mining_transfer_tab):
                     tree = self._mining_transfer_tree
             except tk.TclError:
                 pass

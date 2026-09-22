@@ -15,6 +15,8 @@ import csv
 import json
 import os
 import re
+from collections import defaultdict
+from datetime import date, datetime
 from pathlib import Path
 from urllib.parse import quote, urlsplit, urlunsplit
 
@@ -745,6 +747,14 @@ ON_HOLD_QTY_KEYS = [
     "onholdquantity", "sum", "total", "amount",
 ]
 ON_HOLD_STATUS_KEYS = ["stockonholdstatus", "onholdstatus", "holdstatus", "status"]
+ON_HOLD_DATE_KEYS = [
+    "onholddate", "on_hold_date", "holddate", "hold_since", "holdstart", "hold_start",
+    "stockonholddate", "onholdsince", "onholdtime", "startdate", "createdon", "modifiedon",
+    "冻结日期", "冻结时间", "holdtime",
+]
+ON_HOLD_DAYS_KEYS = [
+    "holddays", "on_hold_days", "daysonhold", "hold_days", "dayonhold", "冻结天数",
+]
 PARTS_QTY_KEYS = [
     "partsqty", "parts_qty", "partqty", "quantity", "qty", "sum", "total", "amount",
 ]
@@ -1373,6 +1383,8 @@ def _load_region_bundle(region, force=False):
         on_hold_rows = _read_mining_table(on_hold_path)
         on_hold_by_code = _load_on_hold_inventory(on_hold_rows)
         on_hold_row_count = len(on_hold_rows)
+    else:
+        on_hold_rows = []
     parts_by_code = {}
     parts_row_count = 0
     if parts_path and Path(parts_path).is_file():
@@ -1422,6 +1434,7 @@ def _load_region_bundle(region, force=False):
         "on_hold_path": str(on_hold_path) if on_hold_path else None,
         "on_hold_mtime": on_hold_mtime,
         "on_hold_by_code": on_hold_by_code,
+        "on_hold_rows": on_hold_rows,
         "on_hold_row_count": on_hold_row_count,
         "parts_path": str(parts_path) if parts_path else None,
         "parts_mtime": parts_mtime,
@@ -1768,8 +1781,43 @@ def _read_mining_table(path):
     return list(csv.DictReader(raw_text.splitlines(), delimiter=delimiter))
 
 
+def _parse_hold_datetime(raw):
+    text = str(raw or "").strip()
+    if not text:
+        return None
+    for fmt in (
+        "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+        "%d/%m/%Y %H:%M:%S", "%d/%m/%Y", "%m/%d/%Y",
+        "%Y/%m/%d", "%d-%m-%Y", "%Y%m%d",
+    ):
+        try:
+            chunk = text[:19] if len(text) > 10 and " " in text else text[:10]
+            return datetime.strptime(chunk, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _hold_days_from_row(row, hold_at=None):
+    raw = _pick_fuzzy(row, ON_HOLD_DAYS_KEYS)
+    days = _to_float(raw)
+    if days is not None and days >= 0:
+        return int(days)
+    if hold_at:
+        return max(0, (date.today() - hold_at).days)
+    return None
+
+
+def _format_hold_since(hold_at):
+    if not hold_at:
+        return ""
+    if isinstance(hold_at, datetime):
+        hold_at = hold_at.date()
+    return hold_at.isoformat()
+
+
 def _load_on_hold_inventory(rows):
-    """on_hold.csv → {norm_code: {code, name, family, total_qty, statuses, warehouses}}"""
+    """on_hold.csv → {norm_code: {code, name, family, total_qty, statuses, warehouses, ...}}"""
     by_code = {}
     for row in rows:
         code = _mining_code_from_row(row)
@@ -1778,25 +1826,120 @@ def _load_on_hold_inventory(rows):
         norm = _norm_code(code)
         qty = _mining_qty_from_row(row, ON_HOLD_QTY_KEYS)
         status = str(_pick(row, ON_HOLD_STATUS_KEYS) or _pick_fuzzy(row, ON_HOLD_STATUS_KEYS) or "").strip()
+        if not status:
+            status = "（未标注状态）"
         warehouse = str(
             _pick(row, STORE_KEYS + ["warehousename"]) or _pick_fuzzy(row, STORE_KEYS + ["warehousename"]) or ""
         ).strip()
+        hold_at = _parse_hold_datetime(_pick_fuzzy(row, ON_HOLD_DATE_KEYS))
+        hold_days = _hold_days_from_row(row, hold_at)
         bucket = by_code.setdefault(norm, {
             "code": str(code).strip(),
-            "name": str(_pick(row, NAME_KEYS) or "").strip(),
+            "name": str(_pick(row, NAME_KEYS) or _pick_fuzzy(row, NAME_KEYS) or "").strip(),
             "family": str(_pick(row, FAMILY_KEYS) or "").strip(),
             "total_qty": 0.0,
             "statuses": set(),
+            "status_qty": {},
             "warehouses": [],
+            "earliest_hold_at": None,
+            "max_hold_days": None,
         })
         bucket["total_qty"] += qty
-        if status:
-            bucket["statuses"].add(status)
+        bucket["statuses"].add(status)
+        bucket["status_qty"][status] = bucket["status_qty"].get(status, 0.0) + qty
+        if hold_at:
+            prev = bucket.get("earliest_hold_at")
+            if not prev or hold_at < prev:
+                bucket["earliest_hold_at"] = hold_at
+        if hold_days is not None:
+            prev_days = bucket.get("max_hold_days")
+            bucket["max_hold_days"] = max(prev_days if prev_days is not None else 0, hold_days)
         if warehouse:
             bucket["warehouses"].append({
                 "warehouse": warehouse, "qty": qty, "status": status,
+                "hold_at": hold_at, "hold_days": hold_days,
             })
     return by_code
+
+
+def aggregate_on_hold_by_status(on_hold_rows=None, on_hold_by_code=None):
+    """按 StockOnHoldStatus 汇总行数 / SKU 数 / 数量。"""
+    by_status = defaultdict(lambda: {"row_count": 0, "sku_codes": set(), "total_qty": 0.0})
+    if on_hold_rows:
+        for row in on_hold_rows:
+            code = _mining_code_from_row(row)
+            if not code:
+                continue
+            status = str(
+                _pick(row, ON_HOLD_STATUS_KEYS) or _pick_fuzzy(row, ON_HOLD_STATUS_KEYS) or ""
+            ).strip() or "（未标注状态）"
+            qty = _mining_qty_from_row(row, ON_HOLD_QTY_KEYS)
+            slot = by_status[status]
+            slot["row_count"] += 1
+            slot["sku_codes"].add(_norm_code(code))
+            slot["total_qty"] += qty
+    elif on_hold_by_code:
+        for item in on_hold_by_code.values():
+            for status, qty in (item.get("status_qty") or {}).items():
+                slot = by_status[status or "（未标注状态）"]
+                slot["row_count"] += 1
+                slot["sku_codes"].add(_norm_code(item.get("code")))
+                slot["total_qty"] += float(qty or 0)
+    rows = []
+    for status, slot in by_status.items():
+        rows.append({
+            "status": status,
+            "row_count": slot["row_count"],
+            "sku_count": len(slot["sku_codes"]),
+            "total_qty": int(slot["total_qty"]) if slot["total_qty"] == int(slot["total_qty"]) else slot["total_qty"],
+        })
+    rows.sort(key=lambda r: (-r["total_qty"], r["status"]))
+    return rows
+
+
+def list_on_hold_status_options(bundle):
+    rows = aggregate_on_hold_by_status(
+        on_hold_rows=bundle.get("on_hold_rows"),
+        on_hold_by_code=bundle.get("on_hold_by_code"),
+    )
+    return [r["status"] for r in rows]
+
+
+def list_on_hold_analysis(bundle, status_filter=None, catalog_by_norm=None):
+    """On Hold 分析明细（含冻结天数、状态、图片字段来自 stock 目录）。"""
+    by_code = bundle.get("on_hold_by_code") or {}
+    catalog_by_norm = catalog_by_norm or {}
+    out = []
+    status_filter = str(status_filter or "").strip()
+    for norm, item in by_code.items():
+        statuses = item.get("statuses") or set()
+        if status_filter and status_filter not in ("", "全部状态"):
+            if status_filter not in statuses:
+                continue
+        cat = catalog_by_norm.get(norm) or {}
+        status_text = "、".join(sorted(s for s in statuses if s)) or "（未标注状态）"
+        hold_days = item.get("max_hold_days")
+        hold_since = _format_hold_since(item.get("earliest_hold_at"))
+        out.append({
+            "norm_code": norm,
+            "code": item.get("code") or "",
+            "name": item.get("name") or cat.get("name") or "",
+            "family": item.get("family") or cat.get("family") or "",
+            "status": status_text,
+            "hold_days": hold_days,
+            "hold_since": hold_since,
+            "qty": item.get("total_qty") or 0,
+            "warehouses": item.get("warehouses") or [],
+            "status_qty": item.get("status_qty") or {},
+            "image_raw": cat.get("image_raw") or item.get("image_raw"),
+            "image": cat.get("image"),
+        })
+    out.sort(key=lambda r: (
+        -(r.get("hold_days") if r.get("hold_days") is not None else -1),
+        -(float(r.get("qty") or 0)),
+        r.get("code") or "",
+    ))
+    return out
 
 
 def _load_parts_inventory(rows):
@@ -2079,6 +2222,8 @@ def list_mining_inventory(bundle, kind="all"):
                 "qty": item.get("total_qty") or 0,
                 "detail": "、".join(sorted(item.get("statuses") or [])) or "-",
                 "warehouses": item.get("warehouses") or [],
+                "hold_days": item.get("max_hold_days"),
+                "hold_since": _format_hold_since(item.get("earliest_hold_at")),
             })
     if kind in ("all", "parts"):
         for item in (bundle.get("parts_by_code") or {}).values():
