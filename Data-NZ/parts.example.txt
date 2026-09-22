@@ -1,6 +1,5 @@
 -- 配件 / Parts 库存 → Output-NZ/parts.csv
--- 请按你们业务调整 WHERE（下方为常见示例：系列名含 Part）
--- 若你本地已有专用 SQL，可直接覆盖本文件
+-- 复制为 parts.txt 后按业务修改；parts.txt 不提交 Git（每人本地 SQL）
 
 SELECT
     w.Name AS WarehouseName,

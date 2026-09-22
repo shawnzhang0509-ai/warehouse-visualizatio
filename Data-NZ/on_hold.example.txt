@@ -1,5 +1,5 @@
 -- On Hold / 冻结库存 → Output-NZ/on_hold.csv
--- 与 stock.csv（StockOnHoldStatus IS NULL）互补，用于挖掘被冻结的库存
+-- 复制为 on_hold.txt 后按业务修改；on_hold.txt 不提交 Git（每人本地 SQL）
 --
 -- 列名看板会自动识别：WarehouseName、Sku、OnHoldQty、StockOnHoldStatus 等
 
