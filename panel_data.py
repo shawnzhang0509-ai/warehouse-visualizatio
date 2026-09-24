@@ -2177,24 +2177,39 @@ def parse_on_hold_min_days(filter_label):
     return int(match.group(1)) if match else None
 
 
+def _on_hold_status_matches(filter_status, line_status):
+    """状态筛选：精确 + 子串（兼容 Paid Order / Paid Orders 等导出差异）。"""
+    norm_filter = _normalize_on_hold_status(filter_status)
+    if not norm_filter or norm_filter in ("", "全部状态"):
+        return True
+    for tok in _on_hold_status_tokens(line_status):
+        norm_tok = _normalize_on_hold_status(tok)
+        if norm_tok == norm_filter:
+            return True
+        if norm_filter in norm_tok or norm_tok in norm_filter:
+            return True
+    return False
+
+
 def list_on_hold_analysis(
     bundle, status_filter=None, catalog_by_norm=None, max_rows=None, min_hold_days=None,
 ):
     """On Hold 明细：每行 CSV 一条（同 SKU 不同订单/时间分开），可按状态精确筛选。"""
-    detail = list(bundle.get("on_hold_detail_rows") or [])
-    if not detail and bundle.get("on_hold_rows"):
-        detail = _parse_on_hold_detail_rows(bundle.get("on_hold_rows"))
+    raw_rows = bundle.get("on_hold_rows") or []
+    if raw_rows:
+        detail = _parse_on_hold_detail_rows(raw_rows)
+    else:
+        detail = list(bundle.get("on_hold_detail_rows") or [])
     catalog_by_norm = catalog_by_norm or {}
     status_filter = str(status_filter or "").strip()
     out = []
     for line in detail:
         status_raw = line.get("status") or "（未标注状态）"
         tokens = _on_hold_status_tokens(status_raw)
+        if not _on_hold_status_matches(status_filter, status_raw):
+            continue
         norm_filter = _normalize_on_hold_status(status_filter)
         norm_tokens = [_normalize_on_hold_status(t) for t in tokens]
-        if norm_filter and norm_filter not in ("", "全部状态"):
-            if norm_filter not in norm_tokens:
-                continue
         hold_days = line.get("hold_days")
         if min_hold_days is not None and min_hold_days > 0:
             if hold_days is None or hold_days < min_hold_days:

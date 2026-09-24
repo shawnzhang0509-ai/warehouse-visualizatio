@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.22"
+APP_VERSION = "1.9.23"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -1581,6 +1581,21 @@ class PanelApp:
         self._owner_rendered_for = None
         self._loaded_full_stock = bool(data.get("summary", {}).get("includes_discontinued"))
         self._refresh_view()
+        self.root.after_idle(self._refresh_mining_tabs_if_visible)
+
+    def _refresh_mining_tabs_if_visible(self):
+        if not self._notebook:
+            return
+        try:
+            selected = str(self._notebook.select())
+        except tk.TclError:
+            return
+        if self._tab_onhold and selected == str(self._tab_onhold):
+            self._render_on_hold_analysis()
+        elif self._tab_transfer and selected == str(self._tab_transfer):
+            self._render_mining_transfer_table()
+        elif self._tab_mining and selected == str(self._tab_mining):
+            self._render_mining_table()
 
     def _cache_key(self, region, store, include_discontinued):
         if panel_data.EAGER_DISCONTINUED_STOCK:
@@ -1926,13 +1941,20 @@ class PanelApp:
         return ("low",)
 
     def _on_notebook_tab_change(self, _event=None):
-        if not self._notebook or not self._cached_products:
+        if not self._notebook:
             return
-        store_specific = self._cached_summary.get("store_specific", self._is_store_selected())
         try:
             selected = self._notebook.select()
         except Exception:
             return
+        mining_tabs = tuple(
+            str(t) for t in (
+                self._tab_mining, self._tab_onhold, self._tab_transfer,
+            ) if t
+        )
+        if not self._cached_products and selected not in mining_tabs:
+            return
+        store_specific = self._cached_summary.get("store_specific", self._is_store_selected())
         if selected == str(self._tab_owner):
             self._render_owner_table(store_specific)
         elif selected == str(self._tab_island):
@@ -2156,7 +2178,11 @@ class PanelApp:
         options = ["全部状态"] + [r["status"] for r in status_rows]
         if self._onhold_status_combo:
             self._onhold_status_combo.configure(values=options)
-            if self._onhold_status_filter_var.get() not in options:
+            self._sync_island_combo_to_var(self._onhold_status_combo, self._onhold_status_filter_var)
+            shown = str(self._onhold_status_combo.get()).strip()
+            if shown and shown in options:
+                self._onhold_status_filter_var.set(shown)
+            elif self._onhold_status_filter_var.get() not in options:
                 self._onhold_status_filter_var.set("全部状态")
         status_f = self._onhold_status_filter_value()
         days_f = self._onhold_days_filter_value()
@@ -2200,6 +2226,13 @@ class PanelApp:
             if not rows and not total_matched:
                 diag = panel_data.diagnose_on_hold_bundle(bundle)
                 self._onhold_status_lbl.configure(text=diag or "On Hold 0 条")
+            elif not rows and total_matched:
+                self._onhold_status_lbl.configure(
+                    text=(
+                        f"筛选后 0 条（原始 {total_matched} 条）· 请试「全部状态」或调整冻结天数"
+                        + (f" · 当前状态：{status_f}" if status_f else "")
+                    ),
+                )
             else:
                 no_date = sum(1 for r in rows if r.get("hold_days") is None)
                 hint = f"显示 {len(rows)} / 共 {total_matched} 条"
