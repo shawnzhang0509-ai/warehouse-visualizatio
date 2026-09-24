@@ -33,10 +33,12 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.16"
+APP_VERSION = "1.9.26"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
+ON_HOLD_TREE_BATCH = 80
+ON_HOLD_IMAGE_MAX_ROWS = 120
 PLACEHOLDER_COLOR = "#d1d5db"
 SCROLL_UNITS = 8
 AUTO_EXPAND_ALL_GROUPS = 300
@@ -100,6 +102,21 @@ SORTABLE_COLS = {
     ),
 }
 
+ONHOLD_SORTABLE_COLS = {
+    "code": lambda r: (r.get("code") or "").lower(),
+    "name": lambda r: (r.get("name") or "").lower(),
+    "status": lambda r: (r.get("status") or "").lower(),
+    "order_no": lambda r: (r.get("order_no") or "").lower(),
+    "ticket_no": lambda r: (r.get("ticket_no") or "").lower(),
+    "hold_days": lambda r: (
+        r.get("hold_days") if r.get("hold_days") is not None else -1
+    ),
+    "hold_since": lambda r: (r.get("hold_since") or ""),
+    "qty": lambda r: float(r.get("qty") or 0),
+    "warehouse": lambda r: (r.get("warehouse") or "").lower(),
+}
+ONHOLD_NUMERIC_SORT_COLS = frozenset({"qty", "hold_days"})
+
 
 class PanelApp:
     def __init__(self):
@@ -143,7 +160,12 @@ class PanelApp:
         self._onhold_status_combo = None
         self._mining_onhold_render_token = 0
         self._mining_onhold_row_data = {}
-        self._mining_notebook = None
+        self._onhold_sort_col = None
+        self._onhold_sort_reverse = False
+        self._tab_onhold = None
+        self._tab_transfer = None
+        self._onhold_status_lbl = None
+        self._transfer_status_lbl = None
         self._mining_rendered_for = None
         self._island_groups_canvas = None
         self._island_groups_frame = None
@@ -212,6 +234,11 @@ class PanelApp:
         self._island_channel_filter_var = tk.StringVar(value="全部渠道")
         self._mining_kind_var = tk.StringVar(value="全部")
         self._onhold_status_filter_var = tk.StringVar(value="全部状态")
+        self._onhold_days_filter_var = tk.StringVar(value="全部天数")
+        self._onhold_days_combo = None
+        self._onhold_sort_col = None
+        self._onhold_sort_reverse = False
+        self._filter_combos = []
         self.load_images_var = tk.BooleanVar(value=True)
         self.result_count_var = tk.StringVar(value="")
         self._status_var = tk.StringVar(value="")
@@ -309,7 +336,8 @@ class PanelApp:
                 row=0, column=col, sticky="w")
             cb = ttk.Combobox(filter_bar, width=10, state="readonly", textvariable=var, values=values)
             cb.grid(row=1, column=col, sticky="w", padx=(0, 10), pady=(2, 0))
-            cb.bind("<<ComboboxSelected>>", lambda _e: self._on_filter_combo_change())
+            self._filter_combos.append((cb, var))
+            cb.bind("<<ComboboxSelected>>", lambda _e: self.root.after_idle(self._on_filter_combo_change))
 
         ttk.Checkbutton(filter_bar, text="行内缩略图", variable=self.load_images_var,
                         command=self._on_toggle_inline_images).grid(row=1, column=6, sticky="w", padx=(4, 0))
@@ -738,25 +766,21 @@ class PanelApp:
             widget.bind("<Button-4>", lambda _e: self._scroll_island(-1))
             widget.bind("<Button-5>", lambda _e: self._scroll_island(1))
 
-        # ── On Hold / 配件挖掘 ──
+        # ── 配件库存 ──
         self._tab_mining = ttk.Frame(self._notebook)
-        self._notebook.add(self._tab_mining, text="On Hold/配件")
+        self._notebook.add(self._tab_mining, text="配件库存")
         mining_inner = tk.Frame(self._tab_mining, bg="white")
         mining_inner.pack(fill=tk.BOTH, expand=True)
         tk.Label(
             mining_inner,
-            text="读取 Output 目录 on_hold.csv / parts.csv ·「跨仓借调」按母件 SKU（宽表 B 列）+ PartName（E 列）成套，三仓合并估算可凑套数",
+            text="Output 目录 parts.csv · On Hold 见「On Hold 分析」· 跨仓借调见「跨仓借调」",
             bg="white", fg=C_MUTED, font=("Segoe UI", 9),
         ).pack(anchor="w", padx=8, pady=(6, 4))
         self._mining_status_lbl = tk.Label(
             mining_inner, text="", bg="white", fg=C_MUTED, font=("Segoe UI", 9),
         )
         self._mining_status_lbl.pack(anchor="e", padx=8, pady=(0, 4))
-        self._mining_notebook = ttk.Notebook(mining_inner)
-        self._mining_notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
-        self._mining_list_tab = ttk.Frame(self._mining_notebook)
-        self._mining_notebook.add(self._mining_list_tab, text="库存清单")
-        mining_list_tab = self._mining_list_tab
+        mining_list_tab = mining_inner
         mining_toolbar = tk.Frame(mining_list_tab, bg="white")
         mining_toolbar.pack(fill=tk.X, pady=(6, 6))
         tk.Label(mining_toolbar, text="类型", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(side=tk.LEFT)
@@ -794,9 +818,11 @@ class PanelApp:
         self._mining_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._mining_tree.bind("<Double-1>", self._on_mining_double_click)
 
-        self._mining_onhold_tab = ttk.Frame(self._mining_notebook)
-        self._mining_notebook.add(self._mining_onhold_tab, text="On Hold 分析")
-        onhold_tab = self._mining_onhold_tab
+        # ── On Hold 分析（顶级页）──
+        self._tab_onhold = ttk.Frame(self._notebook)
+        self._notebook.add(self._tab_onhold, text="On Hold 分析")
+        self._mining_onhold_tab = self._tab_onhold
+        onhold_tab = self._tab_onhold
         tk.Label(
             onhold_tab,
             text="每行 CSV 一条记录（同 SKU 不同订单/工单/时间不合并）；需导出 OrderNo、TicketNo、OnHoldDate、WarehouseName 等列",
@@ -812,11 +838,24 @@ class PanelApp:
             values=["全部状态"],
         )
         self._onhold_status_combo.pack(side=tk.LEFT, padx=(6, 12))
-        self._onhold_status_combo.bind("<<ComboboxSelected>>", lambda _e: self._render_on_hold_analysis())
+        self._onhold_status_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_onhold_status_change())
+        tk.Label(onhold_toolbar, text="冻结天数", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(
+            side=tk.LEFT, padx=(4, 0),
+        )
+        self._onhold_days_combo = ttk.Combobox(
+            onhold_toolbar, width=12, state="readonly", textvariable=self._onhold_days_filter_var,
+            values=["全部天数", "30天以上", "90天以上", "360天以上"],
+        )
+        self._onhold_days_combo.pack(side=tk.LEFT, padx=(6, 12))
+        self._onhold_days_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_onhold_status_change())
         ttk.Button(
             onhold_toolbar, text="查看图片", style="Tool.TButton",
             command=self._open_onhold_selected_image,
         ).pack(side=tk.LEFT, padx=(0, 8))
+        self._onhold_status_lbl = tk.Label(
+            onhold_tab, text="", bg="white", fg=C_MUTED, font=("Segoe UI", 9),
+        )
+        self._onhold_status_lbl.pack(anchor="e", padx=8, pady=(0, 4))
         onhold_wrap = tk.Frame(onhold_tab, bg="white")
         onhold_wrap.pack(fill=tk.BOTH, expand=True)
         ohcols = ("code", "name", "status", "order_no", "ticket_no", "hold_days", "hold_since", "qty", "warehouse")
@@ -832,7 +871,9 @@ class PanelApp:
             "warehouse": ("仓", 120),
         }
         for col, (text, width) in onhold_headings.items():
-            self._mining_onhold_tree.heading(col, text=text)
+            self._mining_onhold_tree.heading(
+                col, text=text, command=lambda c=col: self._on_onhold_sort_column(c),
+            )
             self._mining_onhold_tree.column(
                 col, width=width, anchor="center" if col not in ("name", "warehouse", "status") else "w",
             )
@@ -846,29 +887,36 @@ class PanelApp:
         self._mining_onhold_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._mining_onhold_tree.bind("<Double-1>", self._on_mining_onhold_double_click)
 
-        self._mining_transfer_tab = ttk.Frame(self._mining_notebook)
-        self._mining_notebook.add(self._mining_transfer_tab, text="跨仓借调")
-        mining_transfer_tab = self._mining_transfer_tab
+        # ── 跨仓借调（顶级页）──
+        self._tab_transfer = ttk.Frame(self._notebook)
+        self._notebook.add(self._tab_transfer, text="跨仓借调")
+        self._mining_transfer_tab = self._tab_transfer
+        mining_transfer_tab = self._tab_transfer
         tk.Label(
             mining_transfer_tab,
-            text="母件 SKU 互不合并（267-914 与 267-914-1 为不同成品）；同一母件下按 PartName 区分子件。现有合计=三仓各自成套之和；借调收益=三仓合并后可凑套数−现有合计",
+            text="借调策略：先在 Carbine↔Walls 北岛互调凑套；仍不足再用 CHCH 南岛件补北岛。现有合计=三仓各自成套之和；北岛调后=仅 C+W 合并；调货后=三仓合并。",
             bg="white", fg=C_MUTED, font=("Segoe UI", 9), wraplength=900, justify="left",
         ).pack(anchor="w", padx=4, pady=(6, 4))
+        self._transfer_status_lbl = tk.Label(
+            mining_transfer_tab, text="", bg="white", fg=C_MUTED, font=("Segoe UI", 9),
+        )
+        self._transfer_status_lbl.pack(anchor="e", padx=8, pady=(0, 4))
         transfer_wrap = tk.Frame(mining_transfer_tab, bg="white")
         transfer_wrap.pack(fill=tk.BOTH, expand=True, padx=0, pady=(0, 6))
         tcols = (
             "parent", "name", "part_count", "sets_carbine", "sets_walls", "sets_chch",
-            "sets_current", "sets_after", "gain", "distribution",
+            "sets_current", "sets_after_north", "sets_after", "gain", "transfer_plan", "distribution",
         )
         self._mining_transfer_tree = ttk.Treeview(
             transfer_wrap, columns=tcols, show="headings",
             selectmode="browse", style="Prefix.Treeview",
         )
         transfer_headings = {
-            "parent": ("母件 SKU", 88), "name": ("名称", 200), "part_count": ("部件数", 56),
-            "sets_carbine": ("Carbine", 64), "sets_walls": ("Walls", 56), "sets_chch": ("CHCH", 56),
-            "sets_current": ("现有合计", 72), "sets_after": ("调货后", 64), "gain": ("借调收益", 72),
-            "distribution": ("Parts 分布", 280),
+            "parent": ("母件 SKU", 88), "name": ("名称", 160), "part_count": ("部件数", 52),
+            "sets_carbine": ("Carbine", 56), "sets_walls": ("Walls", 52), "sets_chch": ("CHCH", 52),
+            "sets_current": ("现有合计", 64), "sets_after_north": ("北岛调后", 64),
+            "sets_after": ("调货后", 56), "gain": ("借调收益", 64),
+            "transfer_plan": ("借调方案", 240), "distribution": ("Parts 分布", 200),
         }
         for col, (text, width) in transfer_headings.items():
             self._mining_transfer_tree.heading(col, text=text)
@@ -884,9 +932,11 @@ class PanelApp:
         self._mining_transfer_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._mining_transfer_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._mining_transfer_tree.bind("<Double-1>", self._on_mining_transfer_double_click)
-        self._mining_notebook.bind("<<NotebookTabChanged>>", self._on_mining_tab_changed)
 
-        for widget in (mining_inner, self._tab_mining, self._mining_tree, self._mining_onhold_tree, self._mining_transfer_tree):
+        for widget in (
+            mining_inner, self._tab_mining, self._tab_onhold, self._tab_transfer,
+            self._mining_tree, self._mining_onhold_tree, self._mining_transfer_tree,
+        ):
             widget.bind("<MouseWheel>", self._on_mining_wheel)
             widget.bind("<Button-4>", lambda _e: self._scroll_mining(-1))
             widget.bind("<Button-5>", lambda _e: self._scroll_mining(1))
@@ -976,10 +1026,19 @@ class PanelApp:
         store = self.store_combo.get() if self.store_combo else self.store_var.get()
         return store != panel_data.ALL_STORES
 
+    def _sync_filter_combos(self):
+        for combo, var in getattr(self, "_filter_combos", ()):
+            self._sync_island_combo_to_var(combo, var)
+
+    def _discontinue_filter_value(self):
+        self._sync_filter_combos()
+        return str(self.discontinue_filter_var.get()).strip()
+
     def _on_filter_combo_change(self):
-        disc_f = self.discontinue_filter_var.get()
+        self._sync_filter_combos()
+        disc_f = self._discontinue_filter_value()
         if not panel_data.EAGER_DISCONTINUED_STOCK:
-            need_full = self.discontinue_filter_var.get() in ("全部", "已停产")
+            need_full = disc_f in ("全部", "已停产")
             if need_full != self._loaded_full_stock:
                 if need_full:
                     if self.only_gap_var.get():
@@ -1022,15 +1081,9 @@ class PanelApp:
         self.only_exempted_var.set(False)
         self._quick_filter = None
 
-    def _ensure_active_disc_filter(self):
-        if self.discontinue_filter_var.get() == "已停产":
-            self.discontinue_filter_var.set("在产")
-            if not panel_data.EAGER_DISCONTINUED_STOCK:
-                self.reload()
-                return True
-        return False
-
     def _on_stat_card_click(self, key):
+        self._sync_filter_combos()
+        disc_f = self._discontinue_filter_value()
         if key in ("gap", "exempted", "warehouse_only") and not self._is_store_selected():
             return
         if key == "warehouse_only" and not self._cached_summary.get("has_storage_data"):
@@ -1042,15 +1095,18 @@ class PanelApp:
             self.only_exempted_var.set(False)
             self.only_gap_var.set(turning_on)
             self._quick_filter = "gap" if turning_on else None
-            if turning_on and self._ensure_active_disc_filter():
-                return
+            if turning_on and disc_f == "已停产":
+                self.stock_filter_var.set("有货")
+                self.display_filter_var.set("未展示")
         elif key == "warehouse_only":
             turning_on = not self.only_warehouse_only_var.get()
             self.only_gap_var.set(False)
             self.only_exempted_var.set(False)
             self.only_warehouse_only_var.set(turning_on)
             if turning_on:
-                if self._ensure_active_disc_filter():
+                if disc_f == "已停产":
+                    self._status_var.set("「仓有店仓无」仅统计在产 SKU，请先将「停产」改为「在产」")
+                    self.only_warehouse_only_var.set(False)
                     return
                 self.stock_filter_var.set("有货")
                 self.display_filter_var.set("未展示")
@@ -1068,7 +1124,7 @@ class PanelApp:
             self.stock_filter_var.set("无货" if self.stock_filter_var.get() == "有货" else "有货")
         if (
             not panel_data.EAGER_DISCONTINUED_STOCK
-            and (self.discontinue_filter_var.get() in ("全部", "已停产"))
+            and (self._discontinue_filter_value() in ("全部", "已停产"))
             != self._loaded_full_stock
         ):
             self.reload()
@@ -1531,6 +1587,21 @@ class PanelApp:
         self._owner_rendered_for = None
         self._loaded_full_stock = bool(data.get("summary", {}).get("includes_discontinued"))
         self._refresh_view()
+        self.root.after_idle(self._refresh_mining_tabs_if_visible)
+
+    def _refresh_mining_tabs_if_visible(self):
+        if not self._notebook:
+            return
+        try:
+            selected = str(self._notebook.select())
+        except tk.TclError:
+            return
+        if self._tab_onhold and selected == str(self._tab_onhold):
+            self._render_on_hold_analysis()
+        elif self._tab_transfer and selected == str(self._tab_transfer):
+            self._render_mining_transfer_table()
+        elif self._tab_mining and selected == str(self._tab_mining):
+            self._render_mining_table()
 
     def _cache_key(self, region, store, include_discontinued):
         if panel_data.EAGER_DISCONTINUED_STOCK:
@@ -1540,9 +1611,10 @@ class PanelApp:
     def _needs_discontinued_stock(self):
         if panel_data.EAGER_DISCONTINUED_STOCK:
             return True
-        return self.discontinue_filter_var.get() in ("全部", "已停产")
+        return self._discontinue_filter_value() in ("全部", "已停产")
 
     def reload(self, force=False):
+        self._sync_filter_combos()
         self._reload_token += 1
         token = self._reload_token
         region = self._current_region()
@@ -1595,7 +1667,7 @@ class PanelApp:
         q = self.search_var.get().strip().lower()
         stock_f = self.stock_filter_var.get()
         display_f = self.display_filter_var.get()
-        disc_f = self.discontinue_filter_var.get()
+        disc_f = self._discontinue_filter_value()
         only_gap = self.only_gap_var.get()
         only_warehouse_only = self.only_warehouse_only_var.get()
         only_exempted = self.only_exempted_var.get()
@@ -1618,8 +1690,12 @@ class PanelApp:
                 continue
             if disc_f == "已停产" and not p.get("discontinued"):
                 continue
-            if only_gap and not p.get("gap"):
-                continue
+            if only_gap:
+                if p.get("discontinued"):
+                    if not (p.get("in_stock") and not p.get("displayed") and not p.get("exempted")):
+                        continue
+                elif not p.get("gap"):
+                    continue
             if only_warehouse_only and not (p.get("warehouse_only") and not p.get("exempted")):
                 continue
             if only_exempted and not p.get("exempted"):
@@ -1685,7 +1761,8 @@ class PanelApp:
         s = self._cached_summary
 
         store_specific = s.get("store_specific", self._is_store_selected())
-        disc_f = self.discontinue_filter_var.get()
+        self._sync_filter_combos()
+        disc_f = self._discontinue_filter_value()
         has_storage = bool(s.get("has_storage_data"))
         if (not store_specific or not has_storage) and self.only_warehouse_only_var.get():
             self.only_warehouse_only_var.set(False)
@@ -1769,11 +1846,13 @@ class PanelApp:
             )
         else:
             self.result_count_var.set(f"显示 {len(filtered)} 条")
-        if disc_f == "已停产" and len(filtered) == 0 and disc_total > 0:
-            if self.stock_filter_var.get() == "有货":
+        if disc_f == "已停产" and len(filtered) == 0:
+            if disc_total > 0 and self.stock_filter_var.get() == "有货":
                 self.result_count_var.set(
                     f"显示 0 / 停产 {disc_total} 条（可尝试将「库存」改为「全部」）"
                 )
+            elif disc_total == 0 and not self._loaded_full_stock:
+                self.result_count_var.set("停产数据未加载，请再次选择「停产 → 已停产」或点「刷新数据」")
         self._status_var.set(f"正在渲染 {len(filtered)} 条…")
         self.root.update_idletasks()
         self._render_tree(filtered)
@@ -1868,19 +1947,30 @@ class PanelApp:
         return ("low",)
 
     def _on_notebook_tab_change(self, _event=None):
-        if not self._notebook or not self._cached_products:
+        if not self._notebook:
             return
-        store_specific = self._cached_summary.get("store_specific", self._is_store_selected())
         try:
             selected = self._notebook.select()
         except Exception:
             return
+        mining_tabs = tuple(
+            str(t) for t in (
+                self._tab_mining, self._tab_onhold, self._tab_transfer,
+            ) if t
+        )
+        if not self._cached_products and selected not in mining_tabs:
+            return
+        store_specific = self._cached_summary.get("store_specific", self._is_store_selected())
         if selected == str(self._tab_owner):
             self._render_owner_table(store_specific)
         elif selected == str(self._tab_island):
             self._render_island_quadrants(store_specific)
         elif selected == str(self._tab_mining):
-            self._render_mining_panels()
+            self._render_mining_table()
+        elif self._tab_onhold and selected == str(self._tab_onhold):
+            self._render_on_hold_analysis()
+        elif self._tab_transfer and selected == str(self._tab_transfer):
+            self._render_mining_transfer_table()
 
     def _mining_kind_key(self):
         kind = self._mining_kind_var.get()
@@ -1949,17 +2039,18 @@ class PanelApp:
 
     def _render_mining_panels(self):
         self._render_mining_table()
-        self._render_on_hold_analysis()
-        self._render_mining_transfer_table()
-
-    def _on_mining_tab_changed(self, _event=None):
-        if not self._mining_notebook:
-            return
-        selected = str(self._mining_notebook.select())
-        if self._mining_onhold_tab and selected == str(self._mining_onhold_tab):
+        try:
             self._render_on_hold_analysis()
-        elif self._mining_transfer_tab and selected == str(self._mining_transfer_tab):
+        except Exception as exc:
+            if self._onhold_status_lbl:
+                self._onhold_status_lbl.configure(
+                    text=f"On Hold 渲染失败（v{APP_VERSION}）：{exc}",
+                )
+        try:
             self._render_mining_transfer_table()
+        except Exception as exc:
+            if self._transfer_status_lbl:
+                self._transfer_status_lbl.configure(text=f"借调渲染失败：{exc}")
 
     def _catalog_by_norm(self):
         out = {}
@@ -2054,6 +2145,41 @@ class PanelApp:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _on_onhold_status_change(self, _event=None):
+        self.root.after_idle(self._apply_on_hold_status_filter)
+
+    def _apply_on_hold_status_filter(self):
+        self._sync_island_combo_to_var(self._onhold_status_combo, self._onhold_status_filter_var)
+        self._sync_island_combo_to_var(self._onhold_days_combo, self._onhold_days_filter_var)
+        self._render_on_hold_analysis()
+
+    def _onhold_status_filter_value(self):
+        self._sync_island_combo_to_var(self._onhold_status_combo, self._onhold_status_filter_var)
+        return str(self._onhold_status_filter_var.get()).strip()
+
+    def _onhold_days_filter_value(self):
+        self._sync_island_combo_to_var(self._onhold_days_combo, self._onhold_days_filter_var)
+        return str(self._onhold_days_filter_var.get()).strip()
+
+    def _sort_onhold_rows(self, rows):
+        col = getattr(self, "_onhold_sort_col", None)
+        if col and col in ONHOLD_SORTABLE_COLS:
+            key_fn = ONHOLD_SORTABLE_COLS[col]
+            reverse = bool(getattr(self, "_onhold_sort_reverse", False))
+            return sorted(rows, key=key_fn, reverse=reverse)
+        return rows
+
+    def _on_onhold_sort_column(self, col):
+        if col not in ONHOLD_SORTABLE_COLS:
+            return
+        sort_col = getattr(self, "_onhold_sort_col", None)
+        if sort_col == col:
+            self._onhold_sort_reverse = not bool(getattr(self, "_onhold_sort_reverse", False))
+        else:
+            self._onhold_sort_col = col
+            self._onhold_sort_reverse = col in ONHOLD_NUMERIC_SORT_COLS
+        self._render_on_hold_analysis()
+
     def _render_on_hold_analysis(self):
         if not self._mining_onhold_tree:
             return
@@ -2062,69 +2188,130 @@ class PanelApp:
             bundle = panel_data.get_region_bundle(region)
         except Exception:
             bundle = {}
+        bl = bundle.get("blacklist") or set()
         status_rows = panel_data.aggregate_on_hold_by_status(
             on_hold_rows=bundle.get("on_hold_rows"),
             on_hold_by_code=bundle.get("on_hold_by_code"),
+            blacklist=bl,
         )
         self._render_on_hold_summary(status_rows)
         options = ["全部状态"] + [r["status"] for r in status_rows]
         if self._onhold_status_combo:
             self._onhold_status_combo.configure(values=options)
-            if self._onhold_status_filter_var.get() not in options:
+            self._sync_island_combo_to_var(self._onhold_status_combo, self._onhold_status_filter_var)
+            shown = str(self._onhold_status_combo.get()).strip()
+            if shown and shown in options:
+                self._onhold_status_filter_var.set(shown)
+            elif self._onhold_status_filter_var.get() not in options:
                 self._onhold_status_filter_var.set("全部状态")
-        status_f = self._onhold_status_filter_var.get()
+        status_f = self._onhold_status_filter_value()
+        days_f = self._onhold_days_filter_value()
+        min_days = panel_data.parse_on_hold_min_days(days_f)
         rows, total_matched = panel_data.list_on_hold_analysis(
-            bundle, status_filter=status_f, catalog_by_norm=self._catalog_by_norm(),
+            bundle,
+            status_filter=status_f,
+            catalog_by_norm=self._catalog_by_norm(),
+            min_hold_days=min_days,
+            blacklist=bl,
         )
+        try:
+            rows = self._sort_onhold_rows(rows)
+        except Exception:
+            pass
+        ui_cap = panel_data.ON_HOLD_UI_MAX_ROWS
+        total_sorted = len(rows)
+        if ui_cap and total_sorted > ui_cap:
+            rows = rows[:ui_cap]
         self._mining_onhold_render_token += 1
         token = self._mining_onhold_render_token
         self._mining_onhold_row_data = {}
         if self._mining_onhold_tree.get_children():
             self._mining_onhold_tree.delete(*self._mining_onhold_tree.get_children())
-        for idx, row in enumerate(rows):
-            hold_days = row.get("hold_days")
-            hold_days_text = str(hold_days) if hold_days is not None else "-"
-            iid = self._mining_onhold_tree.insert(
-                "", tk.END,
-                image=self._placeholder_photo,
-                values=(
-                    row.get("code") or "",
-                    row.get("name") or "",
-                    row.get("status") or "-",
-                    row.get("order_no") or "-",
-                    row.get("ticket_no") or "-",
-                    hold_days_text,
-                    row.get("hold_since") or "-",
-                    int(row.get("qty") or 0),
-                    row.get("warehouse") or "-",
-                ),
-                tags=("hold", "alt") if idx % 2 else ("hold",),
-            )
-            self._mining_onhold_row_data[iid] = row
-            raw = self._image_url_for_item(row)
-            if raw:
-                self._schedule_onhold_row_image(iid, raw, token)
-        if self._mining_status_lbl and self._mining_notebook:
-            on_tab = (
-                self._mining_onhold_tab
-                and str(self._mining_notebook.select()) == str(self._mining_onhold_tab)
-            )
-            if on_tab:
-                if not rows and not total_matched:
-                    diag = panel_data.diagnose_on_hold_bundle(bundle)
-                    self._mining_status_lbl.configure(
-                        text=diag or "On Hold 0 条",
+
+        def _onhold_status_hint(inserted):
+            if not rows and not total_matched:
+                diag = panel_data.diagnose_on_hold_bundle(bundle)
+                return diag or "On Hold 0 条"
+            if not rows and total_matched:
+                return (
+                    f"筛选后 0 条（原始 {total_matched} 条）· 请试「全部状态」或调整冻结天数"
+                    + (f" · 当前状态：{status_f}" if status_f else "")
+                )
+            no_date = sum(1 for r in rows if r.get("hold_days") is None)
+            hint = f"显示 {inserted} / 共 {total_matched} 条"
+            if total_sorted > inserted:
+                hint += f"（界面最多 {ui_cap} 条，已按当前排序截取）"
+            if status_f and status_f != "全部状态":
+                hint += f" · {status_f}"
+            if min_days:
+                hint += f" · 冻结≥{min_days}天"
+            sort_col = getattr(self, "_onhold_sort_col", None)
+            if sort_col:
+                order = "降序" if getattr(self, "_onhold_sort_reverse", False) else "升序"
+                hint += f" · 按{sort_col} {order}"
+            if total_matched > total_sorted:
+                hint += f" · 解析上限 {panel_data.ON_HOLD_ANALYSIS_MAX_ROWS} 条"
+            if bl:
+                hint += f" · 已排除黑名单 SKU"
+            if no_date and rows and min_days:
+                hint += " · 无日期行已排除"
+            elif no_date and rows:
+                hint += f" · {no_date} 条无冻结日期"
+            if total_sorted > ON_HOLD_IMAGE_MAX_ROWS:
+                hint += f" · 仅前 {ON_HOLD_IMAGE_MAX_ROWS} 行加载缩略图"
+            return hint
+
+        if self._onhold_status_lbl and not rows:
+            self._onhold_status_lbl.configure(text=_onhold_status_hint(0))
+
+        def fill_onhold_batch(start=0):
+            if token != self._mining_onhold_render_token:
+                return
+            end = min(start + ON_HOLD_TREE_BATCH, len(rows))
+            for idx in range(start, end):
+                row = rows[idx]
+                try:
+                    hold_days = row.get("hold_days")
+                    hold_days_text = str(hold_days) if hold_days is not None else "-"
+                    qty_raw = row.get("qty")
+                    try:
+                        qty_disp = int(float(qty_raw or 0))
+                    except (TypeError, ValueError):
+                        qty_disp = 0
+                    iid = self._mining_onhold_tree.insert(
+                        "", tk.END,
+                        image=self._placeholder_photo,
+                        values=(
+                            row.get("code") or "",
+                            row.get("name") or "",
+                            row.get("status") or "-",
+                            row.get("order_no") or "-",
+                            row.get("ticket_no") or "-",
+                            hold_days_text,
+                            row.get("hold_since") or "-",
+                            qty_disp,
+                            row.get("warehouse") or "-",
+                        ),
+                        tags=("hold", "alt") if idx % 2 else ("hold",),
                     )
-                else:
-                    no_date = sum(1 for r in rows if r.get("hold_days") is None)
-                    hint = f"显示 {len(rows)} / 共 {total_matched} 条"
-                    if status_f and status_f != "全部状态":
-                        hint += f"（{status_f}）"
-                    if total_matched > len(rows):
-                        hint += f" · 已截断至 {panel_data.ON_HOLD_ANALYSIS_MAX_ROWS} 条"
-                    if no_date and rows:
-                        hint += f" · {no_date} 条无冻结日期"
-                    self._mining_status_lbl.configure(text=hint)
+                    self._mining_onhold_row_data[iid] = row
+                    if idx < ON_HOLD_IMAGE_MAX_ROWS:
+                        raw = self._image_url_for_item(row)
+                        if raw:
+                            self._schedule_onhold_row_image(iid, raw, token)
+                except Exception:
+                    continue
+            if end < len(rows):
+                if self._onhold_status_lbl:
+                    self._onhold_status_lbl.configure(
+                        text=f"加载中 {end} / {len(rows)} 行…",
+                    )
+                self.root.after(1, lambda s=end: fill_onhold_batch(s))
+            elif self._onhold_status_lbl:
+                self._onhold_status_lbl.configure(text=_onhold_status_hint(len(rows)))
+
+        if rows:
+            self.root.after_idle(lambda: fill_onhold_batch(0))
 
     def _open_onhold_selected_image(self):
         sel = self._mining_onhold_tree.selection() if self._mining_onhold_tree else ()
@@ -2188,32 +2375,32 @@ class PanelApp:
                     row.get("sets_walls") or 0,
                     row.get("sets_chch") or 0,
                     row.get("sets_current_total") or 0,
+                    row.get("sets_after_north") or 0,
                     row.get("sets_after_transfer") or 0,
                     gain,
+                    row.get("transfer_plan") or "-",
                     row.get("parts_distribution") or "-",
                 ),
                 tags=tags,
             )
         gain_n = sum(1 for r in rows if (r.get("transfer_gain") or 0) > 0)
-        if self._mining_status_lbl and self._mining_notebook:
-            on_transfer = str(self._mining_notebook.select()) == str(self._mining_transfer_tab)
-            if on_transfer:
-                if rows:
-                    self._mining_status_lbl.configure(
-                        text=f"借调可增收 {gain_n} 个母件 · 共 {len(rows)} 条（按借调收益排序）",
-                    )
-                elif int(bundle.get("parts_row_count") or 0):
-                    hint = panel_data.describe_parts_transfer_gap(detail or [])
-                    self._mining_status_lbl.configure(
-                        text=(
-                            f"{hint}。"
-                            "宽表需 ProductSku + PartName + 三仓库存列；或配置 Data-NZ/parts_kits.csv。"
-                        ),
-                    )
-                else:
-                    self._mining_status_lbl.configure(
-                        text="请导出 parts.csv 后点「刷新数据」",
-                    )
+        if self._transfer_status_lbl:
+            if rows:
+                self._transfer_status_lbl.configure(
+                    text=f"借调可增收 {gain_n} 个母件 · 共 {len(rows)} 条（按借调收益排序）",
+                )
+            elif int(bundle.get("parts_row_count") or 0):
+                hint = panel_data.describe_parts_transfer_gap(detail or [])
+                self._transfer_status_lbl.configure(
+                    text=(
+                        f"{hint}。"
+                        "宽表需 ProductSku + PartName + 三仓库存列；或配置 Data-NZ/parts_kits.csv。"
+                    ),
+                )
+            else:
+                self._transfer_status_lbl.configure(
+                    text="请导出 parts.csv 后点「刷新数据」",
+                )
 
     def _on_mining_transfer_double_click(self, _event=None):
         sel = self._mining_transfer_tree.selection() if self._mining_transfer_tree else ()
@@ -2229,12 +2416,12 @@ class PanelApp:
 
     def _scroll_mining(self, direction):
         tree = self._mining_tree
-        if self._mining_notebook:
+        if self._notebook:
             try:
-                selected = str(self._mining_notebook.select())
-                if self._mining_onhold_tab and selected == str(self._mining_onhold_tab):
+                selected = str(self._notebook.select())
+                if self._tab_onhold and selected == str(self._tab_onhold):
                     tree = self._mining_onhold_tree
-                elif self._mining_transfer_tab and selected == str(self._mining_transfer_tab):
+                elif self._tab_transfer and selected == str(self._tab_transfer):
                     tree = self._mining_transfer_tree
             except tk.TclError:
                 pass
@@ -3054,6 +3241,7 @@ class PanelApp:
     def _expand_all_groups(self):
         if not self._tree:
             return
+        self._sync_filter_combos()
         pending = [iid for iid in self._tree.get_children() if iid in self._lazy_groups]
         if not pending:
             return

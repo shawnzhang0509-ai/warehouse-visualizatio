@@ -118,6 +118,10 @@ DISCONTINUE_KEYS = ["discontinued", "isdiscontinued", "is_discontinued", "isdisc
 STORE_KEYS = ["store", "storename", "store_name", "warehouse", "warehousename",
               "warehouse_name", "location", "branch", "shop", "displaywarehouse",
               "display_warehouse", "site"]
+DISPLAY_FLAG_KEYS = [
+    "display", "displayed", "isdisplayed", "is_displayed", "ondisplay", "on_display",
+    "showondisplay", "show_on_display", "陈列", "是否陈列", "isdisplay",
+]
 IMAGE_KEYS = ["imagefile", "image", "imageurl", "image_url", "img",
               "picture", "photo", "thumbnail", "thumb"]
 
@@ -297,6 +301,76 @@ def _extract_warehouse_stock(row):
 def _store_name_tokens(store_name):
     text = re.sub(r"[^a-z0-9]+", " ", str(store_name).strip().lower())
     return [t for t in text.split() if t and t not in STORE_NAME_SKIP_TOKENS and len(t) >= 3]
+
+
+def _canonical_display_store_key(name):
+    return re.sub(r"[^a-z0-9]+", "", str(name or "").strip().lower())
+
+
+def _display_region_patterns_for_store(store_name, region_key):
+    """北岛 Onehunga/Westgate/Hamilton 等共用陈列面（与库存店面规则一致）。"""
+    if store_name == ALL_STORES:
+        return None
+    text = str(store_name).strip().lower()
+    for patterns, _warehouses in REGION_STORE_STOCK_RULES.get(str(region_key or "").upper(), []):
+        if any(p in text for p in patterns):
+            return patterns
+    return None
+
+
+def _is_display_active_row(row):
+    """display.csv 的 Display 列：仅 1/是 计为陈列；无该列时保持旧行为。"""
+    raw = _pick(row, DISPLAY_FLAG_KEYS) or _pick_fuzzy(row, DISPLAY_FLAG_KEYS)
+    if raw is None or str(raw).strip() == "":
+        return True
+    text = str(raw).strip().lower()
+    if text in ("0", "0.0", "false", "no", "n", "off"):
+        return False
+    if text in ("1", "1.0", "true", "yes", "y", "on"):
+        return True
+    try:
+        return float(text.replace(",", "")) > 0
+    except ValueError:
+        return True
+
+
+def _displayed_codes_for_store(store, by_store, region_key="NZ"):
+    """所选店面 + 同区域陈列组（如北岛三店）在 display 表中的 SKU 并集。"""
+    if store == ALL_STORES:
+        return set().union(*by_store.values()) if by_store else set()
+    codes = set()
+    patterns = _display_region_patterns_for_store(store, region_key)
+    store_canon = _canonical_display_store_key(store)
+    for wh_name, skus in (by_store or {}).items():
+        low = str(wh_name).lower()
+        if patterns and any(p in low for p in patterns):
+            codes |= set(skus)
+        elif wh_name == store or _canonical_display_store_key(wh_name) == store_canon:
+            codes |= set(skus)
+    if codes:
+        return codes
+    return set(by_store.get(store, set()))
+
+
+def _display_details_for_store(display_details, store, region_key="NZ"):
+    """同组店面陈列 SKU 元数据（用于同系列豁免锚点）。"""
+    if store == ALL_STORES:
+        merged = {}
+        for details in (display_details or {}).values():
+            merged.update(details)
+        return merged
+    patterns = _display_region_patterns_for_store(store, region_key)
+    store_canon = _canonical_display_store_key(store)
+    merged = {}
+    for wh_name, details in (display_details or {}).items():
+        low = str(wh_name).lower()
+        if patterns and any(p in low for p in patterns):
+            merged.update(details)
+        elif wh_name == store or _canonical_display_store_key(wh_name) == store_canon:
+            merged.update(details)
+    if merged:
+        return merged
+    return dict((display_details or {}).get(store) or {})
 
 
 def _collect_catalog_warehouse_keys(products):
@@ -769,16 +843,20 @@ ON_HOLD_DAYS_KEYS = [
     "holddays", "on_hold_days", "daysonhold", "hold_days", "dayonhold", "冻结天数",
 ]
 ON_HOLD_ORDER_KEYS = [
-    "orderno", "order_no", "ordernumber", "order_number", "salesorder", "sales_order",
-    "sonumber", "so_number", "orderid", "order_id", "documentno", "document_no",
-    "订单号", "销售订单", "salesorderno",
+    "orderno", "order_no", "ordercode", "order_code", "ordernumber", "order_number",
+    "salesorder", "sales_order", "sonumber", "so_number", "orderid", "order_id",
+    "documentno", "document_no", "salesorderno", "weborder", "web_order", "confirmationno",
+    "订单号", "销售订单", "订单编号",
 ]
 ON_HOLD_TICKET_KEYS = [
     "ticket", "ticketno", "ticket_no", "ticketnumber", "ticket_number", "ticketid",
     "ticket_id", "serviceticket", "service_ticket", "caseno", "case_no", "工单号",
-    "工单", "ticketref",
+    "工单", "ticketref", "notes",
 ]
+ON_HOLD_STOCK_ID_KEYS = ["stockid", "stock_id", "lineid", "line_id", "inventoryid"]
 ON_HOLD_ANALYSIS_MAX_ROWS = 15000
+# 界面 Treeview 最多渲染行数（排序后再截断，避免上千行+缩略图卡死）
+ON_HOLD_UI_MAX_ROWS = 2500
 PARTS_QTY_KEYS = [
     "partsqty", "parts_qty", "partqty", "quantity", "qty", "sum", "total", "amount",
 ]
@@ -1824,6 +1902,50 @@ def _mining_qty_from_row(row, qty_keys):
     return qty
 
 
+def _on_hold_qty_from_row(row):
+    """On Hold 行级数量：Quantity=0 的行保留为 0（不当作 1），分析页会跳过。"""
+    raw = _pick(row, ON_HOLD_QTY_KEYS) or _pick_fuzzy(row, ON_HOLD_QTY_KEYS)
+    qty = _to_float(raw)
+    if qty is None:
+        return 1.0
+    return max(0.0, qty)
+
+
+def _normalize_on_hold_status(status):
+    return re.sub(r"\s+", " ", str(status or "").strip())
+
+
+def _pick_on_hold_order_no(row):
+    val = _pick_fuzzy(row, ON_HOLD_ORDER_KEYS)
+    if val is not None and str(val).strip():
+        return str(val).strip()
+    lower = _column_key_map(row)
+    for col_norm, cell in lower.items():
+        if "order" not in col_norm or "hold" in col_norm:
+            continue
+        text = str(cell or "").strip()
+        if not text:
+            continue
+        if _looks_like_product_sku(text):
+            continue
+        return text
+    return ""
+
+
+def _pick_on_hold_ticket_no(row, order_no=""):
+    val = _pick_fuzzy(row, ON_HOLD_TICKET_KEYS)
+    if val is not None and str(val).strip():
+        text = str(val).strip()
+        if text.lower() not in ("notes", "note", "备注"):
+            return text
+    order_no = str(order_no or "").strip()
+    if "." in order_no:
+        suffix = order_no.rsplit(".", 1)[-1].strip()
+        if suffix and len(suffix) <= 12:
+            return suffix
+    return ""
+
+
 def _read_mining_table(path):
     """on_hold / parts 可能是 Excel 分号或 Tab 导出。"""
     path = Path(path)
@@ -1835,6 +1957,16 @@ def _read_mining_table(path):
 def _parse_hold_datetime(raw):
     text = str(raw or "").strip()
     if not text:
+        return None
+    serial = _to_float(text)
+    if serial is not None and 20000 < serial < 80000:
+        try:
+            from datetime import timedelta
+            base = date(1899, 12, 30)
+            return base + timedelta(days=int(serial))
+        except (ValueError, OverflowError):
+            pass
+    if re.fullmatch(r"\d{1,2}:\d{2}(:\d+)?(\.\d+)?", text):
         return None
     for fmt in (
         "%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d",
@@ -1869,10 +2001,10 @@ def _format_hold_since(hold_at):
 
 def _on_hold_status_tokens(status):
     """一行里可能用逗号拼接多种 On Hold 类型（旧版汇总导出）；筛选时按子类型匹配。"""
-    text = str(status or "").strip()
+    text = _normalize_on_hold_status(status)
     if not text:
         return ["（未标注状态）"]
-    parts = [p.strip() for p in re.split(r"[,;|/]", text) if p.strip()]
+    parts = [_normalize_on_hold_status(p) for p in re.split(r"[,;|/]", text) if p.strip()]
     return parts if parts else [text]
 
 
@@ -1883,17 +2015,19 @@ def _parse_on_hold_detail_rows(rows):
         code = _mining_code_from_row(row)
         if not code:
             continue
-        status = str(
+        status = _normalize_on_hold_status(
             _pick(row, ON_HOLD_STATUS_KEYS) or _pick_fuzzy(row, ON_HOLD_STATUS_KEYS) or ""
-        ).strip() or "（未标注状态）"
+        ) or "（未标注状态）"
         warehouse = str(
             _pick(row, STORE_KEYS + ["warehousename"]) or _pick_fuzzy(row, STORE_KEYS + ["warehousename"]) or ""
         ).strip()
-        order_no = str(_pick_fuzzy(row, ON_HOLD_ORDER_KEYS) or "").strip()
-        ticket_no = str(_pick_fuzzy(row, ON_HOLD_TICKET_KEYS) or "").strip()
+        order_no = _pick_on_hold_order_no(row)
+        ticket_no = _pick_on_hold_ticket_no(row, order_no=order_no)
         hold_at = _parse_hold_datetime(_pick_fuzzy(row, ON_HOLD_DATE_KEYS))
         hold_days = _hold_days_from_row(row, hold_at)
-        qty = _mining_qty_from_row(row, ON_HOLD_QTY_KEYS)
+        qty = _on_hold_qty_from_row(row)
+        if qty <= 0:
+            continue
         norm = _norm_code(code)
         detail.append({
             "norm_code": norm,
@@ -1958,24 +2092,38 @@ def _load_on_hold_inventory(rows):
     return by_code
 
 
-def aggregate_on_hold_by_status(on_hold_rows=None, on_hold_by_code=None):
-    """按 StockOnHoldStatus 汇总行数 / SKU 数 / 数量。"""
+def _on_hold_row_blacklisted(code, norm_code, blacklist):
+    if not blacklist:
+        return False
+    norm = norm_code or _norm_code(code)
+    return bool(norm and norm in blacklist)
+
+
+def aggregate_on_hold_by_status(on_hold_rows=None, on_hold_by_code=None, blacklist=None):
+    """按 StockOnHoldStatus 汇总行数 / SKU 数 / 数量（排除黑名单 SKU）。"""
+    blacklist = blacklist or set()
     by_status = defaultdict(lambda: {"row_count": 0, "sku_codes": set(), "total_qty": 0.0})
     if on_hold_rows:
         for row in on_hold_rows:
             code = _mining_code_from_row(row)
             if not code:
                 continue
-            status = str(
+            if _on_hold_row_blacklisted(code, None, blacklist):
+                continue
+            status = _normalize_on_hold_status(
                 _pick(row, ON_HOLD_STATUS_KEYS) or _pick_fuzzy(row, ON_HOLD_STATUS_KEYS) or ""
-            ).strip() or "（未标注状态）"
-            qty = _mining_qty_from_row(row, ON_HOLD_QTY_KEYS)
+            ) or "（未标注状态）"
+            qty = _on_hold_qty_from_row(row)
+            if qty <= 0:
+                continue
             slot = by_status[status]
             slot["row_count"] += 1
             slot["sku_codes"].add(_norm_code(code))
             slot["total_qty"] += qty
     elif on_hold_by_code:
         for item in on_hold_by_code.values():
+            if _on_hold_row_blacklisted(item.get("code"), item.get("norm_code"), blacklist):
+                continue
             for status, qty in (item.get("status_qty") or {}).items():
                 slot = by_status[status or "（未标注状态）"]
                 slot["row_count"] += 1
@@ -1997,6 +2145,7 @@ def list_on_hold_status_options(bundle):
     rows = aggregate_on_hold_by_status(
         on_hold_rows=bundle.get("on_hold_rows"),
         on_hold_by_code=bundle.get("on_hold_by_code"),
+        blacklist=bundle.get("blacklist"),
     )
     return [r["status"] for r in rows]
 
@@ -2028,26 +2177,72 @@ def diagnose_on_hold_bundle(bundle):
     return ""
 
 
-def list_on_hold_analysis(bundle, status_filter=None, catalog_by_norm=None, max_rows=None):
+def parse_on_hold_min_days(filter_label):
+    """冻结天数筛选：全部 / 30天以上 / 90天以上 / 360天以上。"""
+    text = str(filter_label or "").strip()
+    if not text or text in ("全部", "全部天数", "不限"):
+        return None
+    if "360" in text:
+        return 360
+    if "90" in text:
+        return 90
+    if "30" in text:
+        return 30
+    match = re.search(r"(\d+)", text)
+    return int(match.group(1)) if match else None
+
+
+def _on_hold_status_matches(filter_status, line_status):
+    """状态筛选：精确 + 子串（兼容 Paid Order / Paid Orders 等导出差异）。"""
+    norm_filter = _normalize_on_hold_status(filter_status)
+    if not norm_filter or norm_filter in ("", "全部状态"):
+        return True
+    for tok in _on_hold_status_tokens(line_status):
+        norm_tok = _normalize_on_hold_status(tok)
+        if norm_tok == norm_filter:
+            return True
+        if norm_filter in norm_tok or norm_tok in norm_filter:
+            return True
+    return False
+
+
+def list_on_hold_analysis(
+    bundle,
+    status_filter=None,
+    catalog_by_norm=None,
+    max_rows=None,
+    min_hold_days=None,
+    blacklist=None,
+):
     """On Hold 明细：每行 CSV 一条（同 SKU 不同订单/时间分开），可按状态精确筛选。"""
-    detail = list(bundle.get("on_hold_detail_rows") or [])
-    if not detail and bundle.get("on_hold_rows"):
-        detail = _parse_on_hold_detail_rows(bundle.get("on_hold_rows"))
+    blacklist = blacklist if blacklist is not None else (bundle.get("blacklist") or set())
+    raw_rows = bundle.get("on_hold_rows") or []
+    if raw_rows:
+        detail = _parse_on_hold_detail_rows(raw_rows)
+    else:
+        detail = list(bundle.get("on_hold_detail_rows") or [])
     catalog_by_norm = catalog_by_norm or {}
     status_filter = str(status_filter or "").strip()
     out = []
     for line in detail:
         status_raw = line.get("status") or "（未标注状态）"
         tokens = _on_hold_status_tokens(status_raw)
-        if status_filter and status_filter not in ("", "全部状态"):
-            if status_filter not in tokens:
+        if not _on_hold_status_matches(status_filter, status_raw):
+            continue
+        norm_filter = _normalize_on_hold_status(status_filter)
+        norm_tokens = [_normalize_on_hold_status(t) for t in tokens]
+        hold_days = line.get("hold_days")
+        if min_hold_days is not None and min_hold_days > 0:
+            if hold_days is None or hold_days < min_hold_days:
                 continue
         display_status = (
             status_filter
-            if status_filter and status_filter not in ("", "全部状态") and status_filter in tokens
+            if norm_filter and norm_filter not in ("", "全部状态") and norm_filter in norm_tokens
             else status_raw
         )
         norm = line.get("norm_code") or ""
+        if _on_hold_row_blacklisted(line.get("code"), norm, blacklist):
+            continue
         cat = catalog_by_norm.get(norm) or {}
         out.append({
             "norm_code": norm,
@@ -2059,17 +2254,22 @@ def list_on_hold_analysis(bundle, status_filter=None, catalog_by_norm=None, max_
             "ticket_no": line.get("ticket_no") or "",
             "hold_days": line.get("hold_days"),
             "hold_since": line.get("hold_since") or "",
+            "hold_at": line.get("hold_at"),
             "qty": line.get("qty") or 0,
             "warehouse": line.get("warehouse") or "",
             "image_raw": cat.get("image_raw"),
             "image": cat.get("image"),
         })
-    out.sort(key=lambda r: (
-        -(r.get("hold_days") if r.get("hold_days") is not None else -1),
-        -(float(r.get("qty") or 0)),
-        r.get("order_no") or r.get("ticket_no") or "",
-        r.get("code") or "",
-    ))
+    def _sort_hold_key(r):
+        hold_at = r.get("hold_at")
+        hold_ord = hold_at.toordinal() if hold_at else 0
+        return (
+            hold_ord,
+            str(r.get("order_no") or r.get("ticket_no") or ""),
+            str(r.get("code") or ""),
+        )
+
+    out.sort(key=_sort_hold_key, reverse=True)
     cap = max_rows if max_rows is not None else ON_HOLD_ANALYSIS_MAX_ROWS
     if cap and len(out) > cap:
         return out[:cap], len(out)
@@ -2489,6 +2689,75 @@ def _load_parts_inventory_wide(rows):
     return by_code
 
 
+def _pooled_complete_sets(kit, parts, buckets):
+    if not parts:
+        return 0
+    vals = []
+    for part_id, need in parts.items():
+        if need <= 0:
+            continue
+        total = sum(kit["inv"].get((part_id, b), 0.0) for b in buckets)
+        vals.append(total / need)
+    if not vals:
+        return 0
+    return int(min(vals))
+
+
+def _north_assembly_hub(sets_by):
+    """北岛借调优先在 Carbine / Walls 间调配，缺件侧为组装仓。"""
+    sc = int(sets_by.get("carbine") or 0)
+    sw = int(sets_by.get("walls") or 0)
+    return "walls" if sw > sc else "carbine"
+
+
+def _transfer_flows_between_hubs(kit, parts, target_sets, hub, other):
+    """为在北岛凑 target_sets 套，从 other 仓调部件到 hub 仓（仅 Carbine↔Walls）。"""
+    flows = []
+    if target_sets <= 0:
+        return flows
+    for part_id, need in sorted(parts.items()):
+        if need <= 0:
+            continue
+        req = need * target_sets
+        q_hub = kit["inv"].get((part_id, hub), 0.0)
+        q_other = kit["inv"].get((part_id, other), 0.0)
+        if q_hub + q_other < req:
+            continue
+        move = req - q_hub
+        if move >= 1:
+            flows.append((other, hub, part_id, int(move)))
+    return flows
+
+
+def _transfer_flows_from_chch(kit, parts, extra_sets, hub):
+    """北岛仍凑不齐时，从 CHCH 调南岛件到北岛组装仓。"""
+    flows = []
+    if extra_sets <= 0:
+        return flows
+    for part_id, need in sorted(parts.items()):
+        if need <= 0:
+            continue
+        req = need * extra_sets
+        qh = kit["inv"].get((part_id, "chch"), 0.0)
+        qty = int(min(qh, req))
+        if qty > 0:
+            flows.append(("chch", hub, part_id, qty))
+    return flows
+
+
+def _format_transfer_flows(flows, max_lines=5):
+    if not flows:
+        return ""
+    labels = {"carbine": "Carbine", "walls": "Walls", "chch": "CHCH"}
+    chunks = []
+    for src, dst, part_id, qty in flows[:max_lines]:
+        chunks.append(f"{labels.get(src, src)}→{labels.get(dst, dst)} {part_id}×{qty}")
+    text = "; ".join(chunks)
+    if len(flows) > max_lines:
+        text += f" 等{len(flows)}项"
+    return text
+
+
 def analyze_parts_transfer(rows, parts_kit_bom=None, warehouse_hints=None, warehouse_overrides=None):
     """
     跨 Carbine / Walls / CHCH 借调拼凑：比较各仓独立成套数 vs 三仓合并后最多成套数。
@@ -2537,12 +2806,31 @@ def analyze_parts_transfer(rows, parts_kit_bom=None, warehouse_hints=None, wareh
             )
             sets_by[bucket] = int(sets_by[bucket])
         current_total = sum(sets_by[bucket] for bucket in hub_buckets)
-        pooled = {}
-        for part_id, need in parts.items():
-            pooled[part_id] = sum(kit["inv"].get((part_id, b), 0.0) for b in hub_buckets)
-        after_transfer = min(pooled[part_id] / need for part_id, need in parts.items())
-        after_transfer = int(after_transfer)
+        north_buckets = ("carbine", "walls")
+        after_north = _pooled_complete_sets(kit, parts, north_buckets)
+        after_transfer = _pooled_complete_sets(kit, parts, hub_buckets)
         gain = after_transfer - current_total
+        gain_north = after_north - current_total
+        gain_south = after_transfer - after_north
+        hub = _north_assembly_hub(sets_by)
+        other = "walls" if hub == "carbine" else "carbine"
+        if gain_north > 0 or gain_south > 0:
+            north_txt = _format_transfer_flows(
+                _transfer_flows_between_hubs(kit, parts, after_north, hub, other),
+            )
+            south_txt = _format_transfer_flows(
+                _transfer_flows_from_chch(kit, parts, gain_south, hub),
+            ) if gain_south > 0 else ""
+            if north_txt and south_txt:
+                transfer_plan = f"①北岛 {north_txt}；②南岛补位 {south_txt}"
+            elif north_txt:
+                transfer_plan = f"北岛 {north_txt}"
+            elif south_txt:
+                transfer_plan = f"南岛→北岛 {south_txt}"
+            else:
+                transfer_plan = ""
+        else:
+            transfer_plan = ""
         if current_total <= 0 and after_transfer <= 0:
             continue
         dist_parts = []
@@ -2564,8 +2852,12 @@ def analyze_parts_transfer(rows, parts_kit_bom=None, warehouse_hints=None, wareh
             "sets_walls": sets_by["walls"],
             "sets_chch": sets_by["chch"],
             "sets_current_total": current_total,
+            "sets_after_north": after_north,
             "sets_after_transfer": after_transfer,
             "transfer_gain": gain,
+            "transfer_gain_north": gain_north,
+            "transfer_gain_south": gain_south,
+            "transfer_plan": transfer_plan or "-",
             "parts_distribution": "; ".join(dist_parts[:6]),
         })
     results.sort(key=lambda r: (-r["transfer_gain"], -r["sets_after_transfer"], r["parent"]))
@@ -2614,6 +2906,8 @@ def _load_display(rows):
     for row in rows:
         code = _pick(row, CODE_KEYS)
         if not code:
+            continue
+        if not _is_display_active_row(row):
             continue
         store = _pick(row, STORE_KEYS)
         store = str(store).strip() if store else "（未标注店面）"
@@ -2904,9 +3198,9 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         store = ALL_STORES
 
     if store == ALL_STORES:
-        displayed_codes = set().union(*by_store.values()) if by_store else set()
+        displayed_codes = _displayed_codes_for_store(ALL_STORES, by_store, region_key)
     else:
-        displayed_codes = by_store.get(store, set())
+        displayed_codes = _displayed_codes_for_store(store, by_store, region_key)
 
     store_specific = store != ALL_STORES
     catalog_wh_keys = _collect_catalog_warehouse_keys(iter_rows)
@@ -2971,7 +3265,9 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         products.append(item)
 
     if store_specific:
-        store_display_details = bundle.get("display_details", {}).get(store, {})
+        store_display_details = _display_details_for_store(
+            bundle.get("display_details"), store, region_key,
+        )
         exempted_count = _apply_family_exemptions(products, store_display_details)
     else:
         config = _load_exemption_config()
