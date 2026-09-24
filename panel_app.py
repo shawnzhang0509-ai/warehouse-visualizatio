@@ -2213,7 +2213,7 @@ class PanelApp:
                     row.get("ticket_no") or "-",
                     hold_days_text,
                     row.get("hold_since") or "-",
-                    int(row.get("qty") or 0),
+                    int(float(row.get("qty") or 0)),
                     row.get("warehouse") or "-",
                 ),
                 tags=("hold", "alt") if idx % 2 else ("hold",),
