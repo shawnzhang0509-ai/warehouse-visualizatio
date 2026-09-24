@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.23"
+APP_VERSION = "1.9.25"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -158,6 +158,8 @@ class PanelApp:
         self._onhold_status_combo = None
         self._mining_onhold_render_token = 0
         self._mining_onhold_row_data = {}
+        self._onhold_sort_col = None
+        self._onhold_sort_reverse = False
         self._tab_onhold = None
         self._tab_transfer = None
         self._onhold_status_lbl = None
@@ -232,6 +234,8 @@ class PanelApp:
         self._onhold_status_filter_var = tk.StringVar(value="全部状态")
         self._onhold_days_filter_var = tk.StringVar(value="全部天数")
         self._onhold_days_combo = None
+        self._onhold_sort_col = None
+        self._onhold_sort_reverse = False
         self._filter_combos = []
         self.load_images_var = tk.BooleanVar(value=True)
         self.result_count_var = tk.StringVar(value="")
@@ -2033,8 +2037,18 @@ class PanelApp:
 
     def _render_mining_panels(self):
         self._render_mining_table()
-        self._render_on_hold_analysis()
-        self._render_mining_transfer_table()
+        try:
+            self._render_on_hold_analysis()
+        except Exception as exc:
+            if self._onhold_status_lbl:
+                self._onhold_status_lbl.configure(
+                    text=f"On Hold 渲染失败（v{APP_VERSION}）：{exc}",
+                )
+        try:
+            self._render_mining_transfer_table()
+        except Exception as exc:
+            if self._transfer_status_lbl:
+                self._transfer_status_lbl.configure(text=f"借调渲染失败：{exc}")
 
     def _catalog_by_norm(self):
         out = {}
@@ -2146,17 +2160,19 @@ class PanelApp:
         return str(self._onhold_days_filter_var.get()).strip()
 
     def _sort_onhold_rows(self, rows):
-        col = self._onhold_sort_col
+        col = getattr(self, "_onhold_sort_col", None)
         if col and col in ONHOLD_SORTABLE_COLS:
             key_fn = ONHOLD_SORTABLE_COLS[col]
-            return sorted(rows, key=key_fn, reverse=self._onhold_sort_reverse)
+            reverse = bool(getattr(self, "_onhold_sort_reverse", False))
+            return sorted(rows, key=key_fn, reverse=reverse)
         return rows
 
     def _on_onhold_sort_column(self, col):
         if col not in ONHOLD_SORTABLE_COLS:
             return
-        if self._onhold_sort_col == col:
-            self._onhold_sort_reverse = not self._onhold_sort_reverse
+        sort_col = getattr(self, "_onhold_sort_col", None)
+        if sort_col == col:
+            self._onhold_sort_reverse = not bool(getattr(self, "_onhold_sort_reverse", False))
         else:
             self._onhold_sort_col = col
             self._onhold_sort_reverse = col in ONHOLD_NUMERIC_SORT_COLS
@@ -2193,35 +2209,48 @@ class PanelApp:
             catalog_by_norm=self._catalog_by_norm(),
             min_hold_days=min_days,
         )
-        rows = self._sort_onhold_rows(rows)
+        try:
+            rows = self._sort_onhold_rows(rows)
+        except Exception:
+            pass
         self._mining_onhold_render_token += 1
         token = self._mining_onhold_render_token
         self._mining_onhold_row_data = {}
         if self._mining_onhold_tree.get_children():
             self._mining_onhold_tree.delete(*self._mining_onhold_tree.get_children())
+        inserted = 0
         for idx, row in enumerate(rows):
-            hold_days = row.get("hold_days")
-            hold_days_text = str(hold_days) if hold_days is not None else "-"
-            iid = self._mining_onhold_tree.insert(
-                "", tk.END,
-                image=self._placeholder_photo,
-                values=(
-                    row.get("code") or "",
-                    row.get("name") or "",
-                    row.get("status") or "-",
-                    row.get("order_no") or "-",
-                    row.get("ticket_no") or "-",
-                    hold_days_text,
-                    row.get("hold_since") or "-",
-                    int(float(row.get("qty") or 0)),
-                    row.get("warehouse") or "-",
-                ),
-                tags=("hold", "alt") if idx % 2 else ("hold",),
-            )
-            self._mining_onhold_row_data[iid] = row
-            raw = self._image_url_for_item(row)
-            if raw:
-                self._schedule_onhold_row_image(iid, raw, token)
+            try:
+                hold_days = row.get("hold_days")
+                hold_days_text = str(hold_days) if hold_days is not None else "-"
+                qty_raw = row.get("qty")
+                try:
+                    qty_disp = int(float(qty_raw or 0))
+                except (TypeError, ValueError):
+                    qty_disp = 0
+                iid = self._mining_onhold_tree.insert(
+                    "", tk.END,
+                    image=self._placeholder_photo,
+                    values=(
+                        row.get("code") or "",
+                        row.get("name") or "",
+                        row.get("status") or "-",
+                        row.get("order_no") or "-",
+                        row.get("ticket_no") or "-",
+                        hold_days_text,
+                        row.get("hold_since") or "-",
+                        qty_disp,
+                        row.get("warehouse") or "-",
+                    ),
+                    tags=("hold", "alt") if idx % 2 else ("hold",),
+                )
+                self._mining_onhold_row_data[iid] = row
+                inserted += 1
+                raw = self._image_url_for_item(row)
+                if raw:
+                    self._schedule_onhold_row_image(iid, raw, token)
+            except Exception:
+                continue
         if self._onhold_status_lbl:
             if not rows and not total_matched:
                 diag = panel_data.diagnose_on_hold_bundle(bundle)
@@ -2235,14 +2264,15 @@ class PanelApp:
                 )
             else:
                 no_date = sum(1 for r in rows if r.get("hold_days") is None)
-                hint = f"显示 {len(rows)} / 共 {total_matched} 条"
+                hint = f"显示 {inserted} / 共 {total_matched} 条"
                 if status_f and status_f != "全部状态":
                     hint += f"（{status_f}）"
                 if min_days:
                     hint += f" · 冻结≥{min_days}天"
-                if self._onhold_sort_col:
-                    order = "降序" if self._onhold_sort_reverse else "升序"
-                    hint += f" · 按{self._onhold_sort_col} {order}"
+                sort_col = getattr(self, "_onhold_sort_col", None)
+                if sort_col:
+                    order = "降序" if getattr(self, "_onhold_sort_reverse", False) else "升序"
+                    hint += f" · 按{sort_col} {order}"
                 if total_matched > len(rows):
                     hint += f" · 已截断至 {panel_data.ON_HOLD_ANALYSIS_MAX_ROWS} 条"
                 if no_date and rows and min_days:
