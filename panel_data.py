@@ -855,6 +855,8 @@ ON_HOLD_TICKET_KEYS = [
 ]
 ON_HOLD_STOCK_ID_KEYS = ["stockid", "stock_id", "lineid", "line_id", "inventoryid"]
 ON_HOLD_ANALYSIS_MAX_ROWS = 15000
+# 界面 Treeview 最多渲染行数（排序后再截断，避免上千行+缩略图卡死）
+ON_HOLD_UI_MAX_ROWS = 2500
 PARTS_QTY_KEYS = [
     "partsqty", "parts_qty", "partqty", "quantity", "qty", "sum", "total", "amount",
 ]
@@ -2090,13 +2092,23 @@ def _load_on_hold_inventory(rows):
     return by_code
 
 
-def aggregate_on_hold_by_status(on_hold_rows=None, on_hold_by_code=None):
-    """按 StockOnHoldStatus 汇总行数 / SKU 数 / 数量。"""
+def _on_hold_row_blacklisted(code, norm_code, blacklist):
+    if not blacklist:
+        return False
+    norm = norm_code or _norm_code(code)
+    return bool(norm and norm in blacklist)
+
+
+def aggregate_on_hold_by_status(on_hold_rows=None, on_hold_by_code=None, blacklist=None):
+    """按 StockOnHoldStatus 汇总行数 / SKU 数 / 数量（排除黑名单 SKU）。"""
+    blacklist = blacklist or set()
     by_status = defaultdict(lambda: {"row_count": 0, "sku_codes": set(), "total_qty": 0.0})
     if on_hold_rows:
         for row in on_hold_rows:
             code = _mining_code_from_row(row)
             if not code:
+                continue
+            if _on_hold_row_blacklisted(code, None, blacklist):
                 continue
             status = _normalize_on_hold_status(
                 _pick(row, ON_HOLD_STATUS_KEYS) or _pick_fuzzy(row, ON_HOLD_STATUS_KEYS) or ""
@@ -2110,6 +2122,8 @@ def aggregate_on_hold_by_status(on_hold_rows=None, on_hold_by_code=None):
             slot["total_qty"] += qty
     elif on_hold_by_code:
         for item in on_hold_by_code.values():
+            if _on_hold_row_blacklisted(item.get("code"), item.get("norm_code"), blacklist):
+                continue
             for status, qty in (item.get("status_qty") or {}).items():
                 slot = by_status[status or "（未标注状态）"]
                 slot["row_count"] += 1
@@ -2131,6 +2145,7 @@ def list_on_hold_status_options(bundle):
     rows = aggregate_on_hold_by_status(
         on_hold_rows=bundle.get("on_hold_rows"),
         on_hold_by_code=bundle.get("on_hold_by_code"),
+        blacklist=bundle.get("blacklist"),
     )
     return [r["status"] for r in rows]
 
@@ -2192,9 +2207,15 @@ def _on_hold_status_matches(filter_status, line_status):
 
 
 def list_on_hold_analysis(
-    bundle, status_filter=None, catalog_by_norm=None, max_rows=None, min_hold_days=None,
+    bundle,
+    status_filter=None,
+    catalog_by_norm=None,
+    max_rows=None,
+    min_hold_days=None,
+    blacklist=None,
 ):
     """On Hold 明细：每行 CSV 一条（同 SKU 不同订单/时间分开），可按状态精确筛选。"""
+    blacklist = blacklist if blacklist is not None else (bundle.get("blacklist") or set())
     raw_rows = bundle.get("on_hold_rows") or []
     if raw_rows:
         detail = _parse_on_hold_detail_rows(raw_rows)
@@ -2220,6 +2241,8 @@ def list_on_hold_analysis(
             else status_raw
         )
         norm = line.get("norm_code") or ""
+        if _on_hold_row_blacklisted(line.get("code"), norm, blacklist):
+            continue
         cat = catalog_by_norm.get(norm) or {}
         out.append({
             "norm_code": norm,

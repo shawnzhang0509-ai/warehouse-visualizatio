@@ -33,10 +33,12 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.25"
+APP_VERSION = "1.9.26"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
+ON_HOLD_TREE_BATCH = 80
+ON_HOLD_IMAGE_MAX_ROWS = 120
 PLACEHOLDER_COLOR = "#d1d5db"
 SCROLL_UNITS = 8
 AUTO_EXPAND_ALL_GROUPS = 300
@@ -2186,9 +2188,11 @@ class PanelApp:
             bundle = panel_data.get_region_bundle(region)
         except Exception:
             bundle = {}
+        bl = bundle.get("blacklist") or set()
         status_rows = panel_data.aggregate_on_hold_by_status(
             on_hold_rows=bundle.get("on_hold_rows"),
             on_hold_by_code=bundle.get("on_hold_by_code"),
+            blacklist=bl,
         )
         self._render_on_hold_summary(status_rows)
         options = ["全部状态"] + [r["status"] for r in status_rows]
@@ -2208,78 +2212,106 @@ class PanelApp:
             status_filter=status_f,
             catalog_by_norm=self._catalog_by_norm(),
             min_hold_days=min_days,
+            blacklist=bl,
         )
         try:
             rows = self._sort_onhold_rows(rows)
         except Exception:
             pass
+        ui_cap = panel_data.ON_HOLD_UI_MAX_ROWS
+        total_sorted = len(rows)
+        if ui_cap and total_sorted > ui_cap:
+            rows = rows[:ui_cap]
         self._mining_onhold_render_token += 1
         token = self._mining_onhold_render_token
         self._mining_onhold_row_data = {}
         if self._mining_onhold_tree.get_children():
             self._mining_onhold_tree.delete(*self._mining_onhold_tree.get_children())
-        inserted = 0
-        for idx, row in enumerate(rows):
-            try:
-                hold_days = row.get("hold_days")
-                hold_days_text = str(hold_days) if hold_days is not None else "-"
-                qty_raw = row.get("qty")
-                try:
-                    qty_disp = int(float(qty_raw or 0))
-                except (TypeError, ValueError):
-                    qty_disp = 0
-                iid = self._mining_onhold_tree.insert(
-                    "", tk.END,
-                    image=self._placeholder_photo,
-                    values=(
-                        row.get("code") or "",
-                        row.get("name") or "",
-                        row.get("status") or "-",
-                        row.get("order_no") or "-",
-                        row.get("ticket_no") or "-",
-                        hold_days_text,
-                        row.get("hold_since") or "-",
-                        qty_disp,
-                        row.get("warehouse") or "-",
-                    ),
-                    tags=("hold", "alt") if idx % 2 else ("hold",),
-                )
-                self._mining_onhold_row_data[iid] = row
-                inserted += 1
-                raw = self._image_url_for_item(row)
-                if raw:
-                    self._schedule_onhold_row_image(iid, raw, token)
-            except Exception:
-                continue
-        if self._onhold_status_lbl:
+
+        def _onhold_status_hint(inserted):
             if not rows and not total_matched:
                 diag = panel_data.diagnose_on_hold_bundle(bundle)
-                self._onhold_status_lbl.configure(text=diag or "On Hold 0 条")
-            elif not rows and total_matched:
-                self._onhold_status_lbl.configure(
-                    text=(
-                        f"筛选后 0 条（原始 {total_matched} 条）· 请试「全部状态」或调整冻结天数"
-                        + (f" · 当前状态：{status_f}" if status_f else "")
-                    ),
+                return diag or "On Hold 0 条"
+            if not rows and total_matched:
+                return (
+                    f"筛选后 0 条（原始 {total_matched} 条）· 请试「全部状态」或调整冻结天数"
+                    + (f" · 当前状态：{status_f}" if status_f else "")
                 )
-            else:
-                no_date = sum(1 for r in rows if r.get("hold_days") is None)
-                hint = f"显示 {inserted} / 共 {total_matched} 条"
-                if status_f and status_f != "全部状态":
-                    hint += f"（{status_f}）"
-                if min_days:
-                    hint += f" · 冻结≥{min_days}天"
-                sort_col = getattr(self, "_onhold_sort_col", None)
-                if sort_col:
-                    order = "降序" if getattr(self, "_onhold_sort_reverse", False) else "升序"
-                    hint += f" · 按{sort_col} {order}"
-                if total_matched > len(rows):
-                    hint += f" · 已截断至 {panel_data.ON_HOLD_ANALYSIS_MAX_ROWS} 条"
-                if no_date and rows and min_days:
-                    hint += f" · 无日期行已排除"
-                elif no_date and rows:
-                    hint += f" · {no_date} 条无冻结日期"
-                self._onhold_status_lbl.configure(text=hint)
+            no_date = sum(1 for r in rows if r.get("hold_days") is None)
+            hint = f"显示 {inserted} / 共 {total_matched} 条"
+            if total_sorted > inserted:
+                hint += f"（界面最多 {ui_cap} 条，已按当前排序截取）"
+            if status_f and status_f != "全部状态":
+                hint += f" · {status_f}"
+            if min_days:
+                hint += f" · 冻结≥{min_days}天"
+            sort_col = getattr(self, "_onhold_sort_col", None)
+            if sort_col:
+                order = "降序" if getattr(self, "_onhold_sort_reverse", False) else "升序"
+                hint += f" · 按{sort_col} {order}"
+            if total_matched > total_sorted:
+                hint += f" · 解析上限 {panel_data.ON_HOLD_ANALYSIS_MAX_ROWS} 条"
+            if bl:
+                hint += f" · 已排除黑名单 SKU"
+            if no_date and rows and min_days:
+                hint += " · 无日期行已排除"
+            elif no_date and rows:
+                hint += f" · {no_date} 条无冻结日期"
+            if total_sorted > ON_HOLD_IMAGE_MAX_ROWS:
+                hint += f" · 仅前 {ON_HOLD_IMAGE_MAX_ROWS} 行加载缩略图"
+            return hint
+
+        if self._onhold_status_lbl and not rows:
+            self._onhold_status_lbl.configure(text=_onhold_status_hint(0))
+
+        def fill_onhold_batch(start=0):
+            if token != self._mining_onhold_render_token:
+                return
+            end = min(start + ON_HOLD_TREE_BATCH, len(rows))
+            for idx in range(start, end):
+                row = rows[idx]
+                try:
+                    hold_days = row.get("hold_days")
+                    hold_days_text = str(hold_days) if hold_days is not None else "-"
+                    qty_raw = row.get("qty")
+                    try:
+                        qty_disp = int(float(qty_raw or 0))
+                    except (TypeError, ValueError):
+                        qty_disp = 0
+                    iid = self._mining_onhold_tree.insert(
+                        "", tk.END,
+                        image=self._placeholder_photo,
+                        values=(
+                            row.get("code") or "",
+                            row.get("name") or "",
+                            row.get("status") or "-",
+                            row.get("order_no") or "-",
+                            row.get("ticket_no") or "-",
+                            hold_days_text,
+                            row.get("hold_since") or "-",
+                            qty_disp,
+                            row.get("warehouse") or "-",
+                        ),
+                        tags=("hold", "alt") if idx % 2 else ("hold",),
+                    )
+                    self._mining_onhold_row_data[iid] = row
+                    if idx < ON_HOLD_IMAGE_MAX_ROWS:
+                        raw = self._image_url_for_item(row)
+                        if raw:
+                            self._schedule_onhold_row_image(iid, raw, token)
+                except Exception:
+                    continue
+            if end < len(rows):
+                if self._onhold_status_lbl:
+                    self._onhold_status_lbl.configure(
+                        text=f"加载中 {end} / {len(rows)} 行…",
+                    )
+                self.root.after(1, lambda s=end: fill_onhold_batch(s))
+            elif self._onhold_status_lbl:
+                self._onhold_status_lbl.configure(text=_onhold_status_hint(len(rows)))
+
+        if rows:
+            self.root.after_idle(lambda: fill_onhold_batch(0))
 
     def _open_onhold_selected_image(self):
         sel = self._mining_onhold_tree.selection() if self._mining_onhold_tree else ()
