@@ -33,7 +33,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.26"
+APP_VERSION = "1.9.27"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -170,6 +170,8 @@ class PanelApp:
         self._island_groups_canvas = None
         self._island_groups_frame = None
         self._island_single_frame = None
+        self._island_filter_label = None
+        self._island_filter_combo = None
         self._cached_owner_config = []
         self._cached_owner_path = ""
         self._lazy_groups = {}
@@ -246,6 +248,7 @@ class PanelApp:
         self._region_labels = {r["key"]: r["label"] for r in regions}
         self._setup_styles()
         self._build_ui(stores, regions)
+        self._apply_region_specific_ui()
         self.search_var.trace_add("write", lambda *_: self._debounce_refresh())
         self.reload()
 
@@ -332,12 +335,15 @@ class PanelApp:
             ("组排序", self.group_sort_var, ("字母序", "SKU数量多到少", "库存总数多到少"), 5),
         ]
         for label, var, values, col in filters:
-            tk.Label(filter_bar, text=label, bg="white", fg=C_MUTED, font=("Segoe UI", 9)).grid(
-                row=0, column=col, sticky="w")
+            lbl = tk.Label(filter_bar, text=label, bg="white", fg=C_MUTED, font=("Segoe UI", 9))
+            lbl.grid(row=0, column=col, sticky="w")
             cb = ttk.Combobox(filter_bar, width=10, state="readonly", textvariable=var, values=values)
             cb.grid(row=1, column=col, sticky="w", padx=(0, 10), pady=(2, 0))
             self._filter_combos.append((cb, var))
             cb.bind("<<ComboboxSelected>>", lambda _e: self.root.after_idle(self._on_filter_combo_change))
+            if label == "南北岛":
+                self._island_filter_label = lbl
+                self._island_filter_combo = cb
 
         ttk.Checkbutton(filter_bar, text="行内缩略图", variable=self.load_images_var,
                         command=self._on_toggle_inline_images).grid(row=1, column=6, sticky="w", padx=(4, 0))
@@ -1257,8 +1263,33 @@ class PanelApp:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _apply_region_specific_ui(self, region=None):
+        """NZ 专有：南北岛筛选 / 象限 Tab；其它地区隐藏，避免误以为与 NZ 完全一致。"""
+        region = region or self._current_region()
+        nz_only = panel_data.island_stock_supported(region)
+        if self._island_filter_label and self._island_filter_combo:
+            if nz_only:
+                self._island_filter_label.grid()
+                self._island_filter_combo.grid()
+            else:
+                self._island_filter_label.grid_remove()
+                self._island_filter_combo.grid_remove()
+                self.island_filter_var.set("全部")
+        if self._notebook and getattr(self, "_tab_island", None):
+            try:
+                self._notebook.tab(self._tab_island, state="normal" if nz_only else "hidden")
+            except Exception:
+                pass
+        if self._tree:
+            w = 76 if nz_only else 0
+            try:
+                self._tree.column("island", width=w, minwidth=max(w, 0), stretch=False)
+            except Exception:
+                pass
+
     def _on_region_change(self):
         region = self._current_region()
+        self._apply_region_specific_ui(region)
         panel_data.clear_region_cache(region)
         self._products_cache = {}
         self._prefix_rendered_for = None
@@ -1443,12 +1474,22 @@ class PanelApp:
         iid = self._tree.identify_row(event.y)
         if not iid:
             return
-        if iid in self._lazy_groups:
-            self._populate_lazy_group(iid)
+        if iid in self._lazy_groups or iid in self._group_labels:
+            if iid in self._lazy_groups:
+                self._populate_lazy_group(iid)
+            self._tree.item(iid, open=True)
+            if iid in self._lazy_groups:
+                self._populate_lazy_group(iid)
             return
         item = self._products_by_iid.get(iid)
         if item:
             self._open_image_for_item(item)
+            return
+        if messagebox:
+            messagebox.showinfo(
+                "提示",
+                "这是系列分组行：请先点左侧小三角或再双击展开，然后选中具体 SKU 行查看图片。",
+            )
 
     def _load_visible_images(self):
         if not self._images_enabled() or not self._tree:
