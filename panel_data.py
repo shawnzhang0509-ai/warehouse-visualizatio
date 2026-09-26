@@ -140,14 +140,6 @@ REGION_STORE_STOCK_RULES = {
         (("onehunga", "westgate", "hamilton", "sleeplab"), ("carbine", "walls")),
         (("chch", "christchurch", "gerald", "treffers", "presale"), ("geraldconnelly",)),
     ],
-    # warehouses 为空时：用店面名与 stock 表「仓库存列」名做模糊匹配（如 Melbourne → melbournestock）
-    "AU": [
-        (("melbourne", "melb", "vic"), ()),
-        (("sydney", "nsw"), ()),
-        (("brisbane", "queensland", "qld"), ()),
-        (("perth", "wa"), ()),
-        (("adelaide", "sa"), ()),
-    ],
 }
 DEFAULT_ALL_WAREHOUSES = ("carbine", "walls", "geraldconnelly")
 NZ_NORTH_WAREHOUSES = ("carbine", "walls")
@@ -357,19 +349,7 @@ def _displayed_codes_for_store(store, by_store, region_key="NZ"):
             codes |= set(skus)
     if codes:
         return codes
-    direct = set(by_store.get(store, set()))
-    if direct:
-        return direct
-    if str(region_key or "").upper() != "NZ":
-        tokens = _store_name_tokens(store)
-        fuzzy = set()
-        for wh_name, skus in (by_store or {}).items():
-            low = str(wh_name).lower()
-            if any(t in low for t in tokens):
-                fuzzy |= set(skus)
-        if fuzzy:
-            return fuzzy
-    return set()
+    return set(by_store.get(store, set()))
 
 
 def _display_details_for_store(display_details, store, region_key="NZ"):
@@ -390,19 +370,7 @@ def _display_details_for_store(display_details, store, region_key="NZ"):
             merged.update(details)
     if merged:
         return merged
-    direct = dict((display_details or {}).get(store) or {})
-    if direct:
-        return direct
-    if str(region_key or "").upper() != "NZ":
-        tokens = _store_name_tokens(store)
-        fuzzy = {}
-        for wh_name, details in (display_details or {}).items():
-            low = str(wh_name).lower()
-            if any(t in low for t in tokens):
-                fuzzy.update(details)
-        if fuzzy:
-            return fuzzy
-    return {}
+    return dict((display_details or {}).get(store) or {})
 
 
 def _collect_catalog_warehouse_keys(products):
@@ -412,56 +380,31 @@ def _collect_catalog_warehouse_keys(products):
     return keys
 
 
-def _match_catalog_warehouses_for_store(store_name, catalog_keys):
-    """店面名 ↔ stock 导出里的仓库存列名（melbourne / melbournestock 等）。"""
-    catalog = [k for k in (catalog_keys or ()) if k]
-    if not catalog:
-        return ()
-    matched = []
-    for token in _store_name_tokens(store_name):
-        for wh in catalog:
-            if token in wh.lower() and wh not in matched:
-                matched.append(wh)
-    if matched:
-        return tuple(matched)
-    text = re.sub(r"[^a-z0-9]+", "", str(store_name or "").strip().lower())
-    if text:
-        for wh in catalog:
-            wh_key = re.sub(r"[^a-z0-9]+", "", wh.lower())
-            if text in wh_key or wh_key in text:
-                matched.append(wh)
-    if matched:
-        return tuple(dict.fromkeys(matched))
-    if len(catalog) == 1:
-        return tuple(catalog)
-    return tuple(catalog)
-
-
 def _warehouses_for_store(store_name, region_key, catalog_keys=None):
     """根据所选店面，决定用哪些仓库列计算有货数量。"""
     catalog = tuple(catalog_keys or ())
-    region_u = str(region_key or "").upper()
     if store_name == ALL_STORES:
         if catalog:
             return catalog
-        if region_u == "NZ":
+        if region_key.upper() == "NZ":
             return DEFAULT_ALL_WAREHOUSES
         return catalog
 
     text = str(store_name).strip().lower()
-    for patterns, warehouses in REGION_STORE_STOCK_RULES.get(region_u, []):
+    for patterns, warehouses in REGION_STORE_STOCK_RULES.get(region_key.upper(), []):
         if any(p in text for p in patterns):
-            if warehouses:
-                return warehouses
-            matched = _match_catalog_warehouses_for_store(store_name, catalog)
-            if matched:
-                return matched
+            return warehouses
 
-    matched = _match_catalog_warehouses_for_store(store_name, catalog)
-    if matched:
-        return matched
+    if catalog:
+        matched = []
+        for token in _store_name_tokens(store_name):
+            for wh in catalog:
+                if token in wh.lower() and wh not in matched:
+                    matched.append(wh)
+        if matched:
+            return tuple(matched)
 
-    if region_u == "NZ":
+    if region_key.upper() == "NZ":
         if any(x in text for x in ("auck", "onehunga", "westgate", "hamilton", "north")):
             return ("carbine", "walls")
         if any(x in text for x in ("chch", "christ", "gerald", "treffers", "south")):
@@ -470,7 +413,7 @@ def _warehouses_for_store(store_name, region_key, catalog_keys=None):
 
     if catalog:
         return catalog
-    return ()
+    return DEFAULT_ALL_WAREHOUSES
 
 
 def _qty_from_warehouses(warehouse_stock, warehouse_keys):
