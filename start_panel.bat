@@ -4,6 +4,9 @@ setlocal
 cd /d "%~dp0"
 
 echo Starting 有货未展示看板 (panel_app.py) ...
+echo 默认分支: git pull origin main  （本仓库没有 master）
+echo [提示] 需要 Output-NZ\stock.csv 与 display.csv（AU 用 Output-AU）。
+echo [提示] clone 后若缺文件：从旧目录拷贝，或先运行 start_app.bat / python app.py 导出 SQL。
 
 set "PYEXE="
 where py >nul 2>nul && set "PYEXE=py -3"

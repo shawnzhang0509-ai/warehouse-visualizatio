@@ -955,6 +955,16 @@ def _region_output_dir(region_key):
     return path.resolve()
 
 
+def _missing_output_csv_message(path, kind, region_key, data_dir):
+    region = (region_key or "NZ").upper()
+    folder = data_dir or Path(f"Output-{region}")
+    return (
+        f"未找到{kind}文件：{path}\n"
+        f"看板不连数据库，只读 Output-{region}/{kind}.csv。\n"
+        f"clone 后请从旧目录拷贝到 {folder}，或运行 start_app.bat / python app.py 导出 SQL。"
+    )
+
+
 def resolve_sources(region=None):
     stock_env = os.getenv("INSTOCK_STOCK_CSV")
     display_env = os.getenv("INSTOCK_DISPLAY_CSV")
@@ -1520,9 +1530,9 @@ def _load_region_bundle(region, force=False):
         return cached
 
     if not Path(stock_path).is_file():
-        raise FileNotFoundError(stock_path)
+        raise FileNotFoundError(_missing_output_csv_message(stock_path, "stock", region_key, data_dir))
     if not Path(display_path).is_file():
-        raise FileNotFoundError(display_path)
+        raise FileNotFoundError(_missing_output_csv_message(display_path, "display", region_key, data_dir))
 
     display_rows = _read_table(display_path)
     by_store, display_details = _load_display(display_rows)
