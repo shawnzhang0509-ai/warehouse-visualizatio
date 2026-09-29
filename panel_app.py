@@ -21,11 +21,12 @@ import panel_data
 
 try:
     import tkinter as tk
-    from tkinter import ttk, messagebox
+    from tkinter import ttk, messagebox, filedialog
 except Exception:
     tk = None
     ttk = None
     messagebox = None
+    filedialog = None
 
 try:
     from PIL import Image, ImageTk
@@ -33,7 +34,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.26"
+APP_VERSION = "1.9.27"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -314,7 +315,12 @@ class PanelApp:
             toolbar, text="折叠全部系列", style="Tool.TButton",
             command=self._collapse_all_groups, state=tk.DISABLED,
         )
-        self._collapse_all_btn.grid(row=1, column=5, sticky="w", pady=(2, 0))
+        self._collapse_all_btn.grid(row=1, column=5, sticky="w", padx=(0, 8), pady=(2, 0))
+        self._export_btn = ttk.Button(
+            toolbar, text="导出当前筛选", style="Tool.TButton",
+            command=self._export_current_filtered,
+        )
+        self._export_btn.grid(row=1, column=6, sticky="w", pady=(2, 0))
 
         filter_bar = tk.Frame(self.root, bg="white", padx=14, pady=8)
         filter_bar.pack(fill=tk.X, padx=12, pady=(6, 0))
@@ -851,6 +857,10 @@ class PanelApp:
         ttk.Button(
             onhold_toolbar, text="查看图片", style="Tool.TButton",
             command=self._open_onhold_selected_image,
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(
+            onhold_toolbar, text="导出当前筛选", style="Tool.TButton",
+            command=self._export_filtered_onhold,
         ).pack(side=tk.LEFT, padx=(0, 8))
         self._onhold_status_lbl = tk.Label(
             onhold_tab, text="", bg="white", fg=C_MUTED, font=("Segoe UI", 9),
@@ -3006,6 +3016,147 @@ class PanelApp:
                 f"{len(report['channels'])} 条渠道规则 · 当前明细 {detail_count} 条"
             ),
         )
+
+    def _current_notebook_tab(self):
+        if not self._notebook:
+            return ""
+        try:
+            return str(self._notebook.tab(self._notebook.select(), "text") or "")
+        except Exception:
+            return ""
+
+    def _ask_save_csv(self, default_name):
+        if filedialog is None:
+            if messagebox:
+                messagebox.showerror("导出", "当前环境没有文件保存对话框。")
+            return ""
+        initial = Path(self._cached_data_dir or ".")
+        if not initial.is_dir():
+            initial = Path.home()
+        path = filedialog.asksaveasfilename(
+            parent=self.root,
+            title="导出当前筛选",
+            defaultextension=".csv",
+            filetypes=[("CSV 文件", "*.csv"), ("所有文件", "*.*")],
+            initialdir=str(initial),
+            initialfile=default_name,
+        )
+        return str(path or "").strip()
+
+    def _export_default_stamp(self):
+        region = self._cached_summary.get("region") or self._current_region() or "NZ"
+        store = self._cached_summary.get("store") or self.store_var.get() or "store"
+        stamp = datetime.now().strftime("%Y%m%d_%H%M")
+        return panel_data.export_filename_slug(region), panel_data.export_filename_slug(store), stamp
+
+    def _export_current_filtered(self):
+        tab = self._current_notebook_tab()
+        if tab == "On Hold 分析":
+            self._export_filtered_onhold()
+            return
+        if tab in ("", "产品明细"):
+            self._export_filtered_products()
+            return
+        if messagebox:
+            messagebox.showinfo(
+                "导出当前筛选",
+                f"「{tab}」页请用该页自己的导出（负责人报表有「导出 CSV 报表」）。\n"
+                "此按钮导出「产品明细」或「On Hold 分析」当前筛选结果。",
+            )
+
+    def _collect_filtered_onhold_rows(self):
+        region = self._cached_summary.get("region") or self._current_region()
+        try:
+            bundle = panel_data.get_region_bundle(region)
+        except Exception:
+            bundle = {}
+        bl = bundle.get("blacklist") or set()
+        status_f = self._onhold_status_filter_value()
+        days_f = self._onhold_days_filter_value()
+        min_days = panel_data.parse_on_hold_min_days(days_f)
+        rows, _total = panel_data.list_on_hold_analysis(
+            bundle,
+            status_filter=status_f,
+            catalog_by_norm=self._catalog_by_norm(),
+            min_hold_days=min_days,
+            blacklist=bl,
+            max_rows=0,
+        )
+        try:
+            rows = self._sort_onhold_rows(rows)
+        except Exception:
+            pass
+        return rows, status_f, days_f, min_days
+
+    def _export_filtered_onhold(self):
+        rows, status_f, days_f, min_days = self._collect_filtered_onhold_rows()
+        if not rows:
+            if messagebox:
+                messagebox.showinfo("导出当前筛选", "当前筛选没有可导出的 On Hold 行。")
+            return
+        region, _store, stamp = self._export_default_stamp()
+        status_slug = panel_data.export_filename_slug(status_f, "allstatus")
+        days_slug = f"{min_days}d" if min_days else "alldays"
+        default_name = f"onhold_{region}_{status_slug}_{days_slug}_{stamp}.csv"
+        path = self._ask_save_csv(default_name)
+        if not path:
+            return
+        export_rows = [panel_data.format_onhold_export_row(row) for row in rows]
+        headers = [panel_data.ONHOLD_EXPORT_HEADERS[k] for k in panel_data.ONHOLD_EXPORT_FIELDS]
+        named_rows = [
+            {panel_data.ONHOLD_EXPORT_HEADERS[k]: row[k] for k in panel_data.ONHOLD_EXPORT_FIELDS}
+            for row in export_rows
+        ]
+        out = panel_data.write_export_csv(path, headers, named_rows)
+        hint = f"已导出 {len(export_rows)} 条当前筛选"
+        if status_f and status_f != "全部状态":
+            hint += f" · {status_f}"
+        if min_days:
+            hint += f" · 冻结≥{min_days}天"
+        hint += f"：{out}"
+        if self._onhold_status_lbl:
+            self._onhold_status_lbl.configure(text=hint)
+        self._status_var.set(hint)
+        if messagebox:
+            messagebox.showinfo("导出当前筛选", hint)
+
+    def _export_filtered_products(self):
+        if not self._cached_products:
+            if messagebox:
+                messagebox.showinfo("导出当前筛选", "还没有产品数据。请先点「刷新数据」。")
+            return
+        filtered = self._sort_products(self._apply_client_filters(self._cached_products))
+        if not filtered:
+            if messagebox:
+                messagebox.showinfo("导出当前筛选", "当前筛选没有可导出的产品。")
+            return
+        region, store, stamp = self._export_default_stamp()
+        default_name = f"products_{region}_{store}_{stamp}.csv"
+        path = self._ask_save_csv(default_name)
+        if not path:
+            return
+        named_rows = []
+        for item in filtered:
+            values = self._tree_row_values(item)
+            named_rows.append({
+                "编码": values[0],
+                "名称": values[1],
+                "系列": values[2],
+                "价格": values[3],
+                "库存": values[4],
+                "南北岛": values[5],
+                "展示": values[6],
+                "停产": values[7],
+                "状态": values[8],
+            })
+        headers = ["编码", "名称", "系列", "价格", "库存", "南北岛", "展示", "停产", "状态"]
+        out = panel_data.write_export_csv(path, headers, named_rows)
+        hint = f"已导出 {len(named_rows)} 条当前筛选：{out}"
+        self._status_var.set(hint)
+        if self.result_count_var:
+            self.result_count_var.set(f"{self.result_count_var.get()} · 已导出 {len(named_rows)} 条")
+        if messagebox:
+            messagebox.showinfo("导出当前筛选", hint)
 
     def _export_owner_report(self):
         if not self._cached_products:

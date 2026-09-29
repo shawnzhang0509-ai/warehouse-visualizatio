@@ -3494,6 +3494,82 @@ def prewarm_store_views(region, stores=None, include_discontinued=True):
     return warmed
 
 
+def export_filename_slug(text, fallback="all"):
+    raw = str(text or "").strip()
+    cleaned = re.sub(r"[^\w\u4e00-\u9fff\-]+", "_", raw, flags=re.UNICODE)
+    cleaned = cleaned.strip("_")[:48]
+    return cleaned or fallback
+
+
+def write_export_csv(path, fieldnames, rows):
+    """写入 UTF-8 BOM CSV，便于 Excel 打开中文。只写传入行，不做额外筛选。"""
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out, "w", encoding="utf-8-sig", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=list(fieldnames), extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({key: "" if row.get(key) is None else row.get(key) for key in fieldnames})
+    return out
+
+
+ONHOLD_EXPORT_FIELDS = (
+    "code", "name", "family", "status", "order_no", "ticket_no",
+    "hold_days", "hold_since", "qty", "warehouse",
+)
+ONHOLD_EXPORT_HEADERS = {
+    "code": "编码",
+    "name": "名称",
+    "family": "系列",
+    "status": "On Hold 类型",
+    "order_no": "订单号",
+    "ticket_no": "Ticket",
+    "hold_days": "冻结天数",
+    "hold_since": "起始日",
+    "qty": "数量",
+    "warehouse": "仓",
+}
+
+PRODUCT_EXPORT_FIELDS = (
+    "code", "name", "family", "price", "stock_qty", "stock_breakdown",
+    "island", "displayed", "in_storage", "discontinued", "status",
+)
+PRODUCT_EXPORT_HEADERS = {
+    "code": "编码",
+    "name": "名称",
+    "family": "系列",
+    "price": "价格",
+    "stock_qty": "库存",
+    "stock_breakdown": "库存明细",
+    "island": "南北岛",
+    "displayed": "展示",
+    "in_storage": "店仓",
+    "discontinued": "停产",
+    "status": "状态",
+}
+
+
+def format_onhold_export_row(row):
+    hold_days = row.get("hold_days")
+    qty = row.get("qty") or 0
+    try:
+        qty_disp = int(float(qty))
+    except (TypeError, ValueError):
+        qty_disp = qty
+    return {
+        "code": row.get("code") or "",
+        "name": row.get("name") or "",
+        "family": row.get("family") or "",
+        "status": row.get("status") or "",
+        "order_no": row.get("order_no") or "",
+        "ticket_no": row.get("ticket_no") or "",
+        "hold_days": "" if hold_days is None else hold_days,
+        "hold_since": row.get("hold_since") or "",
+        "qty": qty_disp,
+        "warehouse": row.get("warehouse") or "",
+    }
+
+
 if __name__ == "__main__":
     import json as _json
     data = build_products(store=ALL_STORES, region=default_region())
