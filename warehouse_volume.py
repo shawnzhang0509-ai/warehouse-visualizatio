@@ -259,10 +259,10 @@ def _load_csv_fallback() -> dict[str, float]:
                 continue
             raw = row.get("TotalOccupiedVolume")
             try:
-                val = float(raw) if raw not in (None, "") else 0.0
+                m3 = float(raw) if raw not in (None, "") else 0.0
             except ValueError:
-                val = 0.0
-            out[name] = val
+                m3 = 0.0
+            out[name] = _m3_to_containers(m3)
     return out
 
 
@@ -317,11 +317,16 @@ def build_volume_report(
     volumes, source, err = query_warehouse_volumes(region, channel_filters)
     channels = [c.strip().upper() for c in (channel_filters or []) if c and str(c).strip()]
 
+    warehouse_names = set(master.keys()) | set(volumes.keys())
     rows_out = []
     total = 0.0
     unmapped = []
-    for name, profile in sorted(master.items(), key=lambda x: x[0]):
-        if not profile.get("include_in_volume", True):
+    hint = None
+    if not master:
+        hint = "缺少 warehouse_master.csv（仓库容量与坐标）；可从仓库根目录补全该文件"
+    for name in sorted(warehouse_names, key=lambda x: x.lower()):
+        profile = master.get(name) or {}
+        if profile and not profile.get("include_in_volume", True):
             continue
         if _normalize_warehouse_key(name) in EXCLUDED_WAREHOUSE_KEYS:
             continue
@@ -352,12 +357,22 @@ def build_volume_report(
 
     rows_out.sort(key=lambda r: -(r.get("volume_containers") or 0))
 
+    if source == "database" and not channels and (total <= 0 or not volumes):
+        hint = (
+            hint
+            or "占用为 0 时请核对 iERP 产品字段 VolumeWithBox（体积）是否维护；"
+            "本页不读 stock.csv，需能连 SQL Server（Windows 需 ODBC Driver 18）"
+        )
+    elif source == "csv" and err:
+        hint = hint or f"数据库不可用，已用 data.csv 快照：{err}"
+
     return {
         "status": "success" if volumes or source == "csv" else "empty",
         "region": region,
         "filters": {"channels": channels},
         "source": source,
         "error": err,
+        "hint": hint,
         "total_containers": round(total, 2),
         "total_m3": round(_containers_to_m3(total), 1),
         "data": rows_out,

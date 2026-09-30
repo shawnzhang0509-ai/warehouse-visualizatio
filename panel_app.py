@@ -35,7 +35,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.29"
+APP_VERSION = "1.9.30"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -2107,16 +2107,13 @@ class PanelApp:
         channels = self._volume_channel_list()
 
         def work():
-            try:
-                import warehouse_volume as wv
-                report = wv.build_volume_report(region, channels or None)
-                channel_rows = wv.channel_breakdown(region)
-                channel_names = [r["channel"] for r in channel_rows]
-                return (report, channel_rows, channel_names), None
-            except Exception as exc:
-                return None, exc
+            import warehouse_volume as wv
+            report = wv.build_volume_report(region, channels or None)
+            channel_rows = wv.channel_breakdown(region)
+            channel_names = [r["channel"] for r in channel_rows]
+            return report, channel_rows, channel_names
 
-        def done(payload, err):
+        def done(err, payload):
             if err:
                 if self._volume_status_lbl:
                     self._volume_status_lbl.configure(text=f"查询失败：{err}")
@@ -2153,19 +2150,23 @@ class PanelApp:
             src = report.get("source") or "-"
             err_hint = f" · {report.get('error')}" if report.get("error") else ""
             ch = ",".join(report.get("filters", {}).get("channels") or []) or "全部"
+            hint = report.get("hint") or ""
             if self._volume_status_lbl:
                 self._volume_status_lbl.configure(
                     text=(
                         f"{region} · 渠道 {ch} · 合计 {report.get('total_containers', 0)} 柜"
                         f"（{report.get('total_m3', 0)} m³）· 来源 {src}{err_hint}"
+                        + (f" · {hint}" if hint else "")
                     ),
                 )
 
         if force:
-            payload, err = work()
-            done(payload, err)
+            try:
+                done(None, work())
+            except Exception as exc:
+                done(exc, None)
             return
-        self._run_bg(work, lambda r, e: done(r, e))
+        self._run_bg(work, done)
 
     def _mining_kind_key(self):
         kind = self._mining_kind_var.get()
