@@ -1,13 +1,10 @@
 -- 在途 PO → Output-NZ/po.csv
--- 复制为 PO.txt（本机专用，不提交 Git），在 app.py SQL 执行器里跑 NZ 模板。
+-- 复制本文件为 PO.txt，在 app.py 里执行 NZ 模板（不要提交 Git）。
 --
--- 看板「仓库容积率」读取 po.csv：
---   · 仅统计 CheckinDate / ActualArrivingDate 为空的行（尚未 check-in = 在途）
---   · 在途只汇总为「北岛总在途」「南岛总在途」，不按仓库、不含 Presale 仓
---   · 渠道 = SKU 前三位；体积 = QuantityOrdered × VolumeWithBox（或 VolumeM3 列）
--- SSMS / 执行器：@SkuFilter 留空 '' 导出全部渠道；填 '775' 只导出该前三位系列。
+-- 看板规则：只统计 CheckinDate 为空的行；在途体积按南北岛汇总（北岛总在途 / 南岛总在途）。
+-- 必含列：Sku、QuantityOrdered、VolumeM3（或 VolumeWithBox）、Region（北岛/南岛）
 
-DECLARE @SkuFilter VARCHAR(20) = '';
+DECLARE @SkuFilter VARCHAR(20) = '';   -- 只查 996 系列填 '996'，查全部留空
 
 SELECT
     po.Id AS PurchaseOrderId,
@@ -32,13 +29,13 @@ FROM dbo.PurchaseOrders po
 INNER JOIN dbo.PurchaseOrderLines pol ON pol.PurchaseOrderId = po.Id
 INNER JOIN dbo.Products p ON pol.ProductId = p.Id
 LEFT JOIN dbo.Containers c ON c.PurchaseOrderId = po.Id
-WHERE (@SkuFilter = '' OR p.Sku LIKE @SkuFilter + '%')
+WHERE (@SkuFilter = '' OR p.Sku LIKE @SkuFilter + '%')   -- 注意：必须是 996% 不能写 LIKE '996'
   AND pol.QuantityOrdered > 0
-  -- 在途：未到港（看板会再排除有 CheckinDate 的行，这里建议 SQL 先筛一遍）
-  AND (c.ActualArrivingDate IS NULL OR c.Id IS NULL)
-  -- 若只要「在途」、排除已入库，请按你们 PO 状态字段取消注释，例如：
-  -- AND po.Status IN ('Shipped', 'InTransit')
+  -- 只导出未到港（在途）；已填 ActualArrivingDate 的行看板也会排除
+  AND (c.ActualArrivingDate IS NULL)
 ORDER BY po.POPlacedOnUtc DESC, p.Sku;
 
--- 注意：一个 PO 多柜时 LEFT JOIN Containers 可能重复行、体积被放大。
--- 若发现合计偏大，改为按 PO+Sku 汇总，或只关联每个 PO 一行 Container。
+-- 常见踩坑：
+-- 1) p.Sku LIKE '996' 没有 % 时，SQL Server 只匹配 SKU 完全等于 "996" 的一条，不是 996-xxx 系列。
+-- 2) 不加 AND ActualArrivingDate IS NULL 时，已到货柜会把 CheckinDate 带出来，看板在途会变成 0。
+-- 3) 一个 PO 多柜时 JOIN 会重复行；若合计偏大，改为按 PO+Sku 汇总或 OUTER APPLY 取一行柜。
