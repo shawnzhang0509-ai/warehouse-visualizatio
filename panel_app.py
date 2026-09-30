@@ -35,7 +35,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.32"
+APP_VERSION = "1.9.33"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -1008,9 +1008,10 @@ class PanelApp:
         self._volume_channel_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         ch_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._volume_channel_tree.bind("<Double-1>", self._on_volume_channel_double_click)
-        tk.Label(wh_frame, text="按仓库", bg="white", fg=C_TEXT, font=("Segoe UI", 9, "bold")).pack(
-            anchor="w", padx=4, pady=(0, 4),
-        )
+        tk.Label(
+            wh_frame, text="按南北岛（在库分仓；在途仅南北岛总在途）",
+            bg="white", fg=C_TEXT, font=("Segoe UI", 9, "bold"),
+        ).pack(anchor="w", padx=4, pady=(0, 4))
         wh_wrap = tk.Frame(wh_frame, bg="white")
         wh_wrap.pack(fill=tk.BOTH, expand=True)
         vcols = ("name", "volume", "po", "total", "capacity", "util", "m3")
@@ -1032,6 +1033,8 @@ class PanelApp:
         self._volume_tree.configure(yscrollcommand=vol_vscroll.set)
         self._volume_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vol_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._volume_tree.tag_configure("island_hdr", font=("Segoe UI", 9, "bold"), background="#f1f5f9")
+        self._volume_tree.tag_configure("island_transit", background="#e0f2fe")
 
         for widget in (
             mining_inner, self._tab_mining, self._tab_onhold, self._tab_transfer,
@@ -2156,19 +2159,35 @@ class PanelApp:
             if self._volume_tree.get_children():
                 self._volume_tree.delete(*self._volume_tree.get_children())
             for row in report.get("data") or []:
+                row_type = row.get("row_type") or "warehouse"
+                if row_type == "island_header":
+                    self._volume_tree.insert(
+                        "", tk.END, tags=("island_hdr",),
+                        values=(row.get("name") or "", "", "", "", "", "", ""),
+                    )
+                    continue
                 util = row.get("utilization_pct")
                 util_txt = f"{util}%" if util is not None else "-"
                 cap = row.get("capacity_containers")
+                tags = ("island_transit",) if row_type == "island_transit" else ()
+                if row_type == "island_transit":
+                    stock_val = ""
+                    po_val = row.get("po_containers") or 0
+                    m3_val = ""
+                else:
+                    stock_val = row.get("volume_containers") or 0
+                    po_val = 0
+                    m3_val = row.get("volume_m3") or "-"
                 self._volume_tree.insert(
-                    "", tk.END,
+                    "", tk.END, tags=tags,
                     values=(
                         row.get("name") or "",
-                        row.get("volume_containers") or 0,
-                        row.get("po_containers") or 0,
+                        stock_val,
+                        po_val,
                         row.get("total_containers") or row.get("volume_containers") or 0,
                         cap if cap is not None else "-",
                         util_txt,
-                        row.get("volume_m3") or "-",
+                        m3_val,
                     ),
                 )
             src = report.get("source") or "-"

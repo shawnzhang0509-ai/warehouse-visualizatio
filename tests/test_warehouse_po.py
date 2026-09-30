@@ -27,8 +27,16 @@ class WarehousePoTest(unittest.TestCase):
             },
         ]
         rlines = wv._parse_po_rows(region_rows)
-        self.assertEqual(rlines[0]["warehouse"], "南岛在途(PO)")
+        self.assertEqual(rlines[0]["island"], "南岛")
         self.assertAlmostEqual(rlines[0]["volume_containers"], 1.0, places=2)
+
+        checked_in = dict(region_rows[0])
+        checked_in["CheckinDate"] = "2026-04-01"
+        self.assertEqual(wv._parse_po_rows([checked_in]), [])
+
+        with mock.patch.object(wv, "load_po_lines", return_value=(rlines, None, Path("po.csv"))):
+            po_report = wv.build_po_report("NZ")
+        self.assertEqual(po_report["island_totals"]["南岛"], 1.0)
 
         with mock.patch.object(wv, "load_po_lines", return_value=(lines, None, Path("po.csv"))):
             po_report = wv.build_po_report("NZ")

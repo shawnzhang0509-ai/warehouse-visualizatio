@@ -43,9 +43,14 @@ PO_WAREHOUSE_KEYS = [
     "warehousename", "warehouse_name", "warehouse", "destinationwarehouse", "destwarehouse",
 ]
 PO_REGION_KEYS = ["region", "区域", "island", "南北岛", "destinationregion"]
-PO_REGION_WAREHOUSE_LABEL = {
-    "南岛": "南岛在途(PO)",
-    "北岛": "北岛在途(PO)",
+PO_CHECKIN_KEYS = [
+    "checkindate", "check_in_date", "actualarrivingdate", "actual_arriving_date",
+    "arrivaldate", "arriveddate", "receiveddate",
+]
+ISLAND_ORDER = ("北岛", "南岛")
+ISLAND_TRANSIT_LABEL = {
+    "北岛": "北岛总在途",
+    "南岛": "南岛总在途",
 }
 MASTER_FILE = ROOT_DIR / "warehouse_master.csv"
 CONTAINER_VOLUME_M3 = 69.0
@@ -212,6 +217,56 @@ def _is_excluded(name: str, master: dict) -> bool:
     return not meta["includeInVolume"]
 
 
+def _volume_stock_warehouse_excluded(name: str, master: dict) -> bool:
+    """在库汇总：排除 Presale、ERP 里名为 In Transit 的虚拟仓（在途只看 po.csv + 南北岛）。"""
+    if _is_excluded(name, master):
+        return True
+    low = str(name or "").lower()
+    if "presale" in low:
+        return True
+    if "in transit" in low or "intransit" in low.replace(" ", ""):
+        return True
+    return False
+
+
+def _normalize_po_island(text: str | None) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    if raw in ("北岛", "北", "North", "NI", "North Island", "NorthIsland"):
+        return "北岛"
+    if raw in ("南岛", "南", "South", "SI", "South Island", "SouthIsland"):
+        return "南岛"
+    if "南" in raw:
+        return "南岛"
+    if "北" in raw:
+        return "北岛"
+    return ""
+
+
+def _warehouse_island(name: str) -> str | None:
+    n = _normalize_warehouse_key(name)
+    if any(k in n for k in ("chch", "gerald", "connelly", "treffers", "christchurch")):
+        return "南岛"
+    if any(k in n for k in ("carbine", "walls", "wallrd")):
+        return "北岛"
+    if n.startswith("walls") or "wallsroad" in n:
+        return "北岛"
+    return None
+
+
+def _po_row_has_checkin(row: dict) -> bool:
+    val = _pick_fuzzy(row, PO_CHECKIN_KEYS)
+    if val is None:
+        return False
+    s = str(val).strip()
+    if not s or s.lower() in ("null", "none", "nat", "n/a", "na"):
+        return False
+    if s.startswith("1900-01-01") or s.startswith("0001-01-01"):
+        return False
+    return True
+
+
 def _row_get(row, key, default=None):
     if isinstance(row, dict):
         return row.get(key, default)
@@ -253,7 +308,7 @@ def _rows_to_warehouse_map(rows, master: dict) -> dict[str, float]:
     out: dict[str, float] = {}
     for row in rows:
         name = (_row_get(row, "WarehouseName", "") or "").strip()
-        if not name or _is_excluded(name, master):
+        if not name or _volume_stock_warehouse_excluded(name, master):
             continue
         m3 = float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
         out[name] = out.get(name, 0.0) + _m3_to_containers(m3)
@@ -298,16 +353,6 @@ def _channel_from_sku(sku: str) -> str:
     return sku[:3] if len(sku) >= 3 else ""
 
 
-def _po_warehouse_label(row: dict) -> str:
-    wh = str(_pick_fuzzy(row, PO_WAREHOUSE_KEYS) or "").strip()
-    if wh:
-        return wh
-    region = str(_pick_fuzzy(row, PO_REGION_KEYS) or "").strip()
-    if region in PO_REGION_WAREHOUSE_LABEL:
-        return PO_REGION_WAREHOUSE_LABEL[region]
-    return region
-
-
 def _row_line_volume_m3(row: dict, qty: float) -> float:
     direct = _pick_fuzzy(row, PO_M3_KEYS)
     if direct is not None:
@@ -319,8 +364,11 @@ def _row_line_volume_m3(row: dict, qty: float) -> float:
 
 
 def _parse_po_rows(rows: list[dict]) -> list[dict]:
+    """仅保留尚未 check-in 的行（无 CheckinDate），在途体积只按南北岛汇总，不按仓库。"""
     lines = []
     for row in rows:
+        if _po_row_has_checkin(row):
+            continue
         sku = str(_pick_fuzzy(row, PO_SKU_KEYS) or "").strip()
         if not sku:
             continue
@@ -330,13 +378,13 @@ def _parse_po_rows(rows: list[dict]) -> list[dict]:
         ch = str(_pick_fuzzy(row, PO_CHANNEL_KEYS) or "").strip().upper()
         if not ch:
             ch = _channel_from_sku(sku)
-        wh = _po_warehouse_label(row)
+        island = _normalize_po_island(_pick_fuzzy(row, PO_REGION_KEYS))
         m3 = _row_line_volume_m3(row, qty)
         lines.append(
             {
                 "sku": sku,
                 "channel": ch,
-                "warehouse": wh,
+                "island": island,
                 "quantity": qty,
                 "volume_m3": m3,
                 "volume_containers": _m3_to_containers(m3),
@@ -357,15 +405,16 @@ def load_po_lines(region: str | None = None) -> tuple[list[dict], str | None, Pa
 
 def _aggregate_po(lines: list[dict]) -> tuple[dict[str, float], dict[str, float]]:
     by_channel: dict[str, float] = {}
-    by_wh: dict[str, float] = {}
+    by_island: dict[str, float] = {}
     for line in lines:
+        vol = float(line.get("volume_containers") or 0)
         ch = line.get("channel") or ""
         if ch:
-            by_channel[ch] = by_channel.get(ch, 0.0) + float(line.get("volume_containers") or 0)
-        wh = line.get("warehouse") or ""
-        if wh:
-            by_wh[wh] = by_wh.get(wh, 0.0) + float(line.get("volume_containers") or 0)
-    return by_channel, by_wh
+            by_channel[ch] = by_channel.get(ch, 0.0) + vol
+        isl = line.get("island") or ""
+        if isl:
+            by_island[isl] = by_island.get(isl, 0.0) + vol
+    return by_channel, by_island
 
 
 def build_po_report(
@@ -377,11 +426,19 @@ def build_po_report(
     lines, err, path = load_po_lines(region)
     if channels:
         lines = [ln for ln in lines if (ln.get("channel") or "").upper() in channels]
-    by_ch, by_wh = _aggregate_po(lines)
+    by_ch, by_island = _aggregate_po(lines)
     total = sum(by_ch.values())
     ch_rows = [
         {"channel": k, "po_containers": round(v, 2)}
         for k, v in sorted(by_ch.items(), key=lambda x: -x[1])
+    ]
+    island_rows = [
+        {
+            "island": isl,
+            "name": ISLAND_TRANSIT_LABEL.get(isl, f"{isl}总在途"),
+            "po_containers": round(by_island.get(isl, 0.0), 2),
+        }
+        for isl in ISLAND_ORDER
     ]
     return {
         "region": region,
@@ -392,10 +449,8 @@ def build_po_report(
         "total_po_containers": round(total, 2),
         "total_po_m3": round(_containers_to_m3(total), 1),
         "channels": ch_rows,
-        "warehouses": [
-            {"name": k, "po_containers": round(v, 2)}
-            for k, v in sorted(by_wh.items(), key=lambda x: -x[1])
-        ],
+        "islands": island_rows,
+        "island_totals": {isl: round(by_island.get(isl, 0.0), 2) for isl in ISLAND_ORDER},
     }
 
 
@@ -413,7 +468,7 @@ def _stock_volume_rows_to_maps(
             continue
         containers = _m3_to_containers(m3)
         ch = str(_pick_fuzzy(row, PO_CHANNEL_KEYS) or "").strip().upper() or _channel_from_sku(sku)
-        if wh and not _is_excluded(wh, master):
+        if wh and not _volume_stock_warehouse_excluded(wh, master):
             by_wh[wh] = by_wh.get(wh, 0.0) + containers
         if ch:
             by_ch[ch] = by_ch.get(ch, 0.0) + containers
@@ -518,7 +573,7 @@ def channel_breakdown(region: str | None = None) -> list[dict[str, Any]]:
         for row in rows:
             ch = (_row_get(row, "ChannelName", "") or "").strip().upper()
             wh = (_row_get(row, "WarehouseName", "") or "").strip()
-            if not ch or not wh or _is_excluded(wh, master):
+            if not ch or not wh or _volume_stock_warehouse_excluded(wh, master):
                 continue
             m3 = float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
             totals[ch] = totals.get(ch, 0.0) + _m3_to_containers(m3)
@@ -531,6 +586,77 @@ def channel_breakdown(region: str | None = None) -> list[dict[str, Any]]:
     return [{"channel": k, "volume_containers": round(v, 2)} for k, v in ranked]
 
 
+def _build_island_volume_rows(
+    volumes: dict[str, float],
+    master: dict,
+    po_by_island: dict[str, float],
+    channels: list[str],
+) -> tuple[list[dict[str, Any]], float, list[str]]:
+    by_island: dict[str, list[dict[str, Any]]] = {isl: [] for isl in ISLAND_ORDER}
+    unmapped: list[str] = []
+    warehouse_names = set(master.keys()) | set(volumes.keys())
+    for name in warehouse_names:
+        if _volume_stock_warehouse_excluded(name, master):
+            continue
+        island = _warehouse_island(name)
+        if not island:
+            continue
+        vol = float(volumes.get(name, 0.0))
+        if channels and vol <= 0:
+            continue
+        profile = master.get(name) or {}
+        cap = profile.get("capacity_containers")
+        util = round(vol / float(cap) * 100, 1) if cap and cap > 0 else None
+        meta = _warehouse_meta(name, master)
+        if vol > 0 and not meta.get("coords"):
+            unmapped.append(name)
+        by_island[island].append(
+            {
+                "row_type": "warehouse",
+                "island": island,
+                "name": name,
+                "volume_containers": round(vol, 2),
+                "po_containers": 0.0,
+                "total_containers": round(vol, 2),
+                "volume_m3": round(_containers_to_m3(vol), 1),
+                "capacity_containers": cap,
+                "capacity_m3": meta.get("capacity_m3"),
+                "utilization_pct": util,
+                "coords": meta.get("coords"),
+            }
+        )
+
+    rows_out: list[dict[str, Any]] = []
+    total = 0.0
+    for island in ISLAND_ORDER:
+        wh_rows = sorted(by_island.get(island, []), key=lambda r: -(r.get("volume_containers") or 0))
+        po_vol = float(po_by_island.get(island, 0.0))
+        if channels and not wh_rows and po_vol <= 0:
+            continue
+        rows_out.append({"row_type": "island_header", "island": island, "name": f"■ {island}"})
+        for wh in wh_rows:
+            rows_out.append(wh)
+            total += float(wh.get("volume_containers") or 0)
+        if po_vol > 0:
+            rows_out.append(
+                {
+                    "row_type": "island_transit",
+                    "island": island,
+                    "name": ISLAND_TRANSIT_LABEL[island],
+                    "volume_containers": 0.0,
+                    "po_containers": round(po_vol, 2),
+                    "total_containers": round(po_vol, 2),
+                    "volume_m3": 0.0,
+                    "capacity_containers": None,
+                    "capacity_m3": None,
+                    "utilization_pct": None,
+                    "coords": None,
+                }
+            )
+            total += po_vol
+    return rows_out, total, unmapped
+
+
 def build_volume_report(
     region: str | None = None,
     channel_filters: list[str] | None = None,
@@ -540,50 +666,12 @@ def build_volume_report(
     volumes, source, err = query_warehouse_volumes(region, channel_filters)
     channels = [c.strip().upper() for c in (channel_filters or []) if c and str(c).strip()]
     po_report = build_po_report(region, channels or None)
-    po_by_wh = {w["name"]: w["po_containers"] for w in (po_report.get("warehouses") or [])}
+    po_by_island = dict(po_report.get("island_totals") or {})
 
-    warehouse_names = set(master.keys()) | set(volumes.keys()) | set(po_by_wh.keys())
-    rows_out = []
-    total = 0.0
-    unmapped = []
     hint = None
     if not master:
         hint = "缺少 warehouse_master.csv（仓库容量与坐标）；可从仓库根目录补全该文件"
-    for name in sorted(warehouse_names, key=lambda x: x.lower()):
-        profile = master.get(name) or {}
-        if profile and not profile.get("include_in_volume", True):
-            continue
-        if _normalize_warehouse_key(name) in EXCLUDED_WAREHOUSE_KEYS:
-            continue
-        vol = float(volumes.get(name, 0.0))
-        po_vol = float(po_by_wh.get(name, 0.0))
-        cap = profile.get("capacity_containers")
-        util = None
-        if cap and cap > 0:
-            util = round((vol + po_vol) / float(cap) * 100, 1)
-        meta = _warehouse_meta(name, master)
-        if channels and vol <= 0 and po_vol <= 0:
-            continue
-        if vol > 0 or po_vol > 0 or not channels:
-            total += vol + po_vol
-            if vol > 0 and not meta.get("coords"):
-                unmapped.append(name)
-            rows_out.append(
-                {
-                    "name": name,
-                    "volume_containers": round(vol, 2),
-                    "po_containers": round(po_vol, 2),
-                    "total_containers": round(vol + po_vol, 2),
-                    "volume_m3": round(_containers_to_m3(vol), 1),
-                    "capacity_containers": cap,
-                    "capacity_m3": meta.get("capacity_m3"),
-                    "utilization_pct": util,
-                    "coords": meta.get("coords"),
-                    "includeInVolume": True,
-                }
-            )
-
-    rows_out.sort(key=lambda r: -(r.get("total_containers") or r.get("volume_containers") or 0))
+    rows_out, total, unmapped = _build_island_volume_rows(volumes, master, po_by_island, channels)
 
     if source == "database" and not channels and (total <= 0 or not volumes):
         hint = (
@@ -598,7 +686,8 @@ def build_volume_report(
     if po_report.get("path"):
         hint = (hint or "") + (
             f"；在途 PO {po_report.get('total_po_containers', 0)} 柜"
-            f"（{po_report.get('line_count', 0)} 行 po.csv）"
+            f"（无 CheckinDate 的 {po_report.get('line_count', 0)} 行）"
+            f" 北岛 {po_by_island.get('北岛', 0)} / 南岛 {po_by_island.get('南岛', 0)} 柜"
         )
     elif po_report.get("error") and not channels:
         hint = (hint or "") + f"；{po_report.get('error')}"

@@ -1,7 +1,10 @@
 -- 在途 PO → Output-NZ/po.csv
 -- 复制为 PO.txt（本机专用，不提交 Git），在 app.py SQL 执行器里跑 NZ 模板。
 --
--- 看板「仓库容积率」读取 po.csv：渠道=SKU前三位；在途体积=QuantityOrdered×VolumeWithBox（或 VolumeM3 列）。
+-- 看板「仓库容积率」读取 po.csv：
+--   · 仅统计 CheckinDate / ActualArrivingDate 为空的行（尚未 check-in = 在途）
+--   · 在途只汇总为「北岛总在途」「南岛总在途」，不按仓库、不含 Presale 仓
+--   · 渠道 = SKU 前三位；体积 = QuantityOrdered × VolumeWithBox（或 VolumeM3 列）
 -- SSMS / 执行器：@SkuFilter 留空 '' 导出全部渠道；填 '775' 只导出该前三位系列。
 
 DECLARE @SkuFilter VARCHAR(20) = '';
