@@ -1,6 +1,6 @@
 """仓库容积率：按仓库 / SKU 前三位渠道汇总占用体积（多地区 ERP 库）。
 
-供桌面看板 panel_app 与 warehouse_volume_web（Flask）共用。
+供桌面看板 panel_app「仓库容积率」页调用（纯 Tkinter，无浏览器）。
 连接串来自 region_runner_config（与 SQL 执行器一致），可用环境变量 WAREHOUSE_VOLUME_REGION 覆盖默认地区。
 """
 

@@ -35,7 +35,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.28"
+APP_VERSION = "1.9.29"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -168,8 +168,11 @@ class PanelApp:
         self._tab_transfer = None
         self._tab_volume = None
         self._volume_tree = None
+        self._volume_channel_tree = None
         self._volume_status_lbl = None
         self._volume_channel_var = None
+        self._volume_channel_pick_var = None
+        self._volume_channel_options = []
         self._volume_last_report = None
         self._onhold_status_lbl = None
         self._transfer_status_lbl = None
@@ -241,6 +244,7 @@ class PanelApp:
         self._island_channel_filter_var = tk.StringVar(value="全部渠道")
         self._mining_kind_var = tk.StringVar(value="全部")
         self._volume_channel_var = tk.StringVar(value="")
+        self._volume_channel_pick_var = tk.StringVar(value="全部渠道")
         self._onhold_status_filter_var = tk.StringVar(value="全部状态")
         self._onhold_days_filter_var = tk.StringVar(value="全部天数")
         self._onhold_days_combo = None
@@ -950,28 +954,59 @@ class PanelApp:
         self._mining_transfer_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._mining_transfer_tree.bind("<Double-1>", self._on_mining_transfer_double_click)
 
-        # ── 仓库容积率 ──
+        # ── 仓库容积率（纯桌面，无浏览器）──
         self._tab_volume = ttk.Frame(self._notebook)
         self._notebook.add(self._tab_volume, text="仓库容积率")
         vol_tab = self._tab_volume
         vol_toolbar = tk.Frame(vol_tab, bg="white")
         vol_toolbar.pack(fill=tk.X, padx=4, pady=(6, 4))
-        tk.Label(vol_toolbar, text="渠道(SKU前三位)", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(
-            side=tk.LEFT,
-        )
-        ttk.Entry(vol_toolbar, width=28, textvariable=self._volume_channel_var).pack(side=tk.LEFT, padx=(6, 12))
         ttk.Button(vol_toolbar, text="刷新", command=self._refresh_volume_tab).pack(side=tk.LEFT, padx=(0, 8))
-        ttk.Button(vol_toolbar, text="浏览器地图", command=self._open_volume_web).pack(side=tk.LEFT)
+        tk.Label(vol_toolbar, text="筛选渠道", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        self._volume_channel_combo = ttk.Combobox(
+            vol_toolbar, width=14, state="readonly", textvariable=self._volume_channel_pick_var,
+        )
+        self._volume_channel_combo.pack(side=tk.LEFT, padx=(6, 8))
+        self._volume_channel_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_volume_channel_pick())
+        tk.Label(vol_toolbar, text="或手动", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        ttk.Entry(vol_toolbar, width=16, textvariable=self._volume_channel_var).pack(side=tk.LEFT, padx=(6, 8))
+        ttk.Button(vol_toolbar, text="应用筛选", command=self._refresh_volume_tab).pack(side=tk.LEFT)
         self._volume_status_lbl = tk.Label(
-            vol_tab, text="选择地区后点刷新（与顶部地区一致，连对应 ERP 库）",
+            vol_tab,
+            text="与顶部地区一致连接 ERP；左侧渠道(SKU前三位)，右侧各仓占用与容积率",
             bg="white", fg=C_MUTED, font=("Segoe UI", 9),
         )
         self._volume_status_lbl.pack(anchor="w", padx=8, pady=(0, 4))
-        vol_wrap = tk.Frame(vol_tab, bg="white")
-        vol_wrap.pack(fill=tk.BOTH, expand=True, padx=0, pady=(0, 6))
+        vol_panes = tk.PanedWindow(vol_tab, orient=tk.HORIZONTAL, bg="white", sashwidth=6)
+        vol_panes.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 6))
+        ch_frame = tk.Frame(vol_panes, bg="white")
+        wh_frame = tk.Frame(vol_panes, bg="white")
+        vol_panes.add(ch_frame, minsize=220)
+        vol_panes.add(wh_frame, minsize=420)
+        tk.Label(ch_frame, text="按渠道合计（双击筛选仓库）", bg="white", fg=C_TEXT, font=("Segoe UI", 9, "bold")).pack(
+            anchor="w", padx=4, pady=(0, 4),
+        )
+        ch_wrap = tk.Frame(ch_frame, bg="white")
+        ch_wrap.pack(fill=tk.BOTH, expand=True)
+        self._volume_channel_tree = ttk.Treeview(
+            ch_wrap, columns=("channel", "volume"), show="headings", style="Prefix.Treeview",
+        )
+        self._volume_channel_tree.heading("channel", text="渠道")
+        self._volume_channel_tree.heading("volume", text="占用(柜)")
+        self._volume_channel_tree.column("channel", width=72, stretch=True)
+        self._volume_channel_tree.column("volume", width=88, stretch=False)
+        ch_vscroll = ttk.Scrollbar(ch_wrap, orient="vertical", command=self._volume_channel_tree.yview)
+        self._volume_channel_tree.configure(yscrollcommand=ch_vscroll.set)
+        self._volume_channel_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ch_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._volume_channel_tree.bind("<Double-1>", self._on_volume_channel_double_click)
+        tk.Label(wh_frame, text="按仓库", bg="white", fg=C_TEXT, font=("Segoe UI", 9, "bold")).pack(
+            anchor="w", padx=4, pady=(0, 4),
+        )
+        wh_wrap = tk.Frame(wh_frame, bg="white")
+        wh_wrap.pack(fill=tk.BOTH, expand=True)
         vcols = ("name", "volume", "capacity", "util", "m3")
         self._volume_tree = ttk.Treeview(
-            vol_wrap, columns=vcols, show="headings", selectmode="browse", style="Prefix.Treeview",
+            wh_wrap, columns=vcols, show="headings", selectmode="browse", style="Prefix.Treeview",
         )
         for col, text, w in (
             ("name", "仓库", 200),
@@ -982,7 +1017,7 @@ class PanelApp:
         ):
             self._volume_tree.heading(col, text=text)
             self._volume_tree.column(col, width=w, minwidth=60, stretch=col == "name")
-        vol_vscroll = ttk.Scrollbar(vol_wrap, orient="vertical", command=self._volume_tree.yview)
+        vol_vscroll = ttk.Scrollbar(wh_wrap, orient="vertical", command=self._volume_tree.yview)
         self._volume_tree.configure(yscrollcommand=vol_vscroll.set)
         self._volume_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vol_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
@@ -2038,29 +2073,30 @@ class PanelApp:
     def _refresh_volume_tab(self):
         self._render_volume_tab(force=True)
 
-    def _open_volume_web(self):
-        import subprocess
-        import sys
-        script = Path(__file__).resolve().parent / "warehouse_volume_web.py"
-        if not script.is_file():
-            if messagebox:
-                messagebox.showinfo("仓库容积率", "未找到 warehouse_volume_web.py")
+    def _on_volume_channel_pick(self):
+        pick = str(self._volume_channel_pick_var.get() or "").strip()
+        if pick in ("", "全部渠道"):
+            self._volume_channel_var.set("")
+        else:
+            self._volume_channel_var.set(pick)
+        self._refresh_volume_tab()
+
+    def _on_volume_channel_double_click(self, _event=None):
+        if not self._volume_channel_tree:
             return
-        try:
-            subprocess.Popen(
-                [sys.executable, str(script)],
-                cwd=str(script.parent),
-                creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0,
-            )
-        except Exception as exc:
-            if messagebox:
-                messagebox.showerror("仓库容积率", str(exc))
+        sel = self._volume_channel_tree.selection()
+        if not sel:
             return
-        if messagebox:
-            messagebox.showinfo(
-                "仓库容积率",
-                "已在后台启动 Web 服务。\n浏览器打开：\nhttp://127.0.0.1:5001/volume",
-            )
+        vals = self._volume_channel_tree.item(sel[0], "values")
+        if not vals:
+            return
+        ch = str(vals[0]).strip()
+        if not ch:
+            return
+        self._volume_channel_var.set(ch)
+        if self._volume_channel_pick_var:
+            self._volume_channel_pick_var.set(ch)
+        self._refresh_volume_tab()
 
     def _render_volume_tab(self, force=False):
         if not self._volume_tree:
@@ -2073,16 +2109,31 @@ class PanelApp:
         def work():
             try:
                 import warehouse_volume as wv
-                return wv.build_volume_report(region, channels or None), None
+                report = wv.build_volume_report(region, channels or None)
+                channel_rows = wv.channel_breakdown(region)
+                channel_names = [r["channel"] for r in channel_rows]
+                return (report, channel_rows, channel_names), None
             except Exception as exc:
                 return None, exc
 
-        def done(report, err):
+        def done(payload, err):
             if err:
                 if self._volume_status_lbl:
                     self._volume_status_lbl.configure(text=f"查询失败：{err}")
                 return
+            report, channel_rows, channel_names = payload
             self._volume_last_report = report
+            self._volume_channel_options = ["全部渠道"] + channel_names
+            if getattr(self, "_volume_channel_combo", None):
+                self._volume_channel_combo.configure(values=self._volume_channel_options)
+            if self._volume_channel_tree:
+                if self._volume_channel_tree.get_children():
+                    self._volume_channel_tree.delete(*self._volume_channel_tree.get_children())
+                for row in channel_rows or []:
+                    self._volume_channel_tree.insert(
+                        "", tk.END,
+                        values=(row.get("channel") or "", row.get("volume_containers") or 0),
+                    )
             if self._volume_tree.get_children():
                 self._volume_tree.delete(*self._volume_tree.get_children())
             for row in report.get("data") or []:
@@ -2111,8 +2162,8 @@ class PanelApp:
                 )
 
         if force:
-            report, err = work()
-            done(report, err)
+            payload, err = work()
+            done(payload, err)
             return
         self._run_bg(work, lambda r, e: done(r, e))
 
