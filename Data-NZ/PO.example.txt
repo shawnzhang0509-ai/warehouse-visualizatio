@@ -1,24 +1,39 @@
--- 在途 PO → Output-NZ/po.csv（复制本文件为 PO.txt 后按你们 iERP 表结构改 SQL）
--- PO.txt 仅放本机，不提交 Git（与 on_hold.txt 相同用法）
+-- 在途 PO → Output-NZ/po.csv
+-- 复制为 PO.txt（本机专用，不提交 Git），在 app.py SQL 执行器里跑 NZ 模板。
 --
--- 看板「仓库容积率」会读 Output-NZ/po.csv，按渠道(SKU前三位)汇总在途体积（柜）。
--- 推荐列名（大小写不限，看板会模糊匹配）：
---   Sku / ProductCode
---   Quantity 或 POQty（件数）
---   VolumeM3 或 TotalOccupiedVolume（该行总体积 m³）；若无则用 VolumeWithBox × Quantity
--- 可选：Channel、WarehouseName、POCode、ETA / ExpectedArrivalDate
---
--- ↓↓↓ 下面 SQL 仅为示例，请替换成你本机 PO.txt 里能跑通的查询 ↓↓↓
+-- 看板「仓库容积率」读取 po.csv：渠道=SKU前三位；在途体积=QuantityOrdered×VolumeWithBox（或 VolumeM3 列）。
+-- SSMS / 执行器：@SkuFilter 留空 '' 导出全部渠道；填 '775' 只导出该前三位系列。
+
+DECLARE @SkuFilter VARCHAR(20) = '';
 
 SELECT
-    po.PurchaseOrderNumber AS POCode,
-    pol.Sku AS Sku,
-    LEFT(pol.Sku, 3) AS Channel,
-    pol.Quantity AS Quantity,
-    pol.Quantity * ISNULL(p.VolumeWithBox, 0) AS VolumeM3,
-    po.ExpectedDeliveryDate AS ETA
-FROM dbo.PurchaseOrderLines pol
-INNER JOIN dbo.PurchaseOrders po ON pol.PurchaseOrderId = po.Id
-INNER JOIN dbo.Products p ON p.Sku = pol.Sku
-WHERE po.Status IN ('InTransit', 'Shipped', 'OnTheWay')
-  AND pol.Quantity > 0;
+    po.Id AS PurchaseOrderId,
+    po.PurchaseOrderCode,
+    p.Sku,
+    LEFT(p.Sku, 3) AS Channel,
+    pol.QuantityOrdered,
+    ISNULL(p.VolumeWithBox, 0) AS VolumeWithBox,
+    pol.QuantityOrdered * ISNULL(p.VolumeWithBox, 0) AS VolumeM3,
+    po.[ETD],
+    po.ShippedToPortId,
+    c.ActualArrivingDate AS CheckinDate,
+    c.ContainerNumber,
+    CASE
+        WHEN c.ShippedtoportId = '3b9ff26b-4ec0-44c6-92ac-ee9804272426' THEN N'南岛'
+        WHEN c.ShippedtoportId = '646a2216-87c2-4bc6-8469-fdbd90bb2d84' THEN N'北岛'
+        WHEN po.ShippedToPortId = '3b9ff26b-4ec0-44c6-92ac-ee9804272426' THEN N'南岛'
+        WHEN po.ShippedToPortId = '646a2216-87c2-4bc6-8469-fdbd90bb2d84' THEN N'北岛'
+        ELSE N'北岛'
+    END AS Region
+FROM dbo.PurchaseOrders po
+INNER JOIN dbo.PurchaseOrderLines pol ON pol.PurchaseOrderId = po.Id
+INNER JOIN dbo.Products p ON pol.ProductId = p.Id
+LEFT JOIN dbo.Containers c ON c.PurchaseOrderId = po.Id
+WHERE (@SkuFilter = '' OR p.Sku LIKE @SkuFilter + '%')
+  AND pol.QuantityOrdered > 0
+  -- 若只要「在途」、排除已入库，请按你们 PO 状态字段取消注释，例如：
+  -- AND po.Status IN ('Shipped', 'InTransit')
+ORDER BY po.POPlacedOnUtc DESC, p.Sku;
+
+-- 注意：一个 PO 多柜时 LEFT JOIN Containers 可能重复行、体积被放大。
+-- 若发现合计偏大，改为按 PO+Sku 汇总，或只关联每个 PO 一行 Container。

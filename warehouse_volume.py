@@ -31,7 +31,8 @@ PO_SKU_KEYS = [
     "sku", "productsku", "productcode", "product_code", "itemcode", "code",
 ]
 PO_QTY_KEYS = [
-    "quantity", "qty", "poqty", "po_qty", "orderqty", "order_qty", "openqty",
+    "quantity", "qty", "quantityordered", "quantity_ordered",
+    "poqty", "po_qty", "orderqty", "order_qty", "openqty",
 ]
 PO_M3_KEYS = [
     "volumem3", "volume_m3", "totaloccupiedvolume", "occupiedvolume", "volume",
@@ -41,6 +42,11 @@ PO_CHANNEL_KEYS = ["channel", "channelname", "channel_code", "skuchannel"]
 PO_WAREHOUSE_KEYS = [
     "warehousename", "warehouse_name", "warehouse", "destinationwarehouse", "destwarehouse",
 ]
+PO_REGION_KEYS = ["region", "区域", "island", "南北岛", "destinationregion"]
+PO_REGION_WAREHOUSE_LABEL = {
+    "南岛": "南岛在途(PO)",
+    "北岛": "北岛在途(PO)",
+}
 MASTER_FILE = ROOT_DIR / "warehouse_master.csv"
 CONTAINER_VOLUME_M3 = 69.0
 
@@ -292,6 +298,16 @@ def _channel_from_sku(sku: str) -> str:
     return sku[:3] if len(sku) >= 3 else ""
 
 
+def _po_warehouse_label(row: dict) -> str:
+    wh = str(_pick_fuzzy(row, PO_WAREHOUSE_KEYS) or "").strip()
+    if wh:
+        return wh
+    region = str(_pick_fuzzy(row, PO_REGION_KEYS) or "").strip()
+    if region in PO_REGION_WAREHOUSE_LABEL:
+        return PO_REGION_WAREHOUSE_LABEL[region]
+    return region
+
+
 def _row_line_volume_m3(row: dict, qty: float) -> float:
     direct = _pick_fuzzy(row, PO_M3_KEYS)
     if direct is not None:
@@ -314,7 +330,7 @@ def _parse_po_rows(rows: list[dict]) -> list[dict]:
         ch = str(_pick_fuzzy(row, PO_CHANNEL_KEYS) or "").strip().upper()
         if not ch:
             ch = _channel_from_sku(sku)
-        wh = str(_pick_fuzzy(row, PO_WAREHOUSE_KEYS) or "").strip()
+        wh = _po_warehouse_label(row)
         m3 = _row_line_volume_m3(row, qty)
         lines.append(
             {

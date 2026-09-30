@@ -18,6 +18,18 @@ class WarehousePoTest(unittest.TestCase):
         self.assertAlmostEqual(lines[0]["volume_containers"], 1.0, places=2)
         self.assertEqual(lines[0]["channel"], "271")
 
+        region_rows = [
+            {
+                "Sku": "271-001",
+                "QuantityOrdered": 2,
+                "VolumeWithBox": 34.5,
+                "Region": "南岛",
+            },
+        ]
+        rlines = wv._parse_po_rows(region_rows)
+        self.assertEqual(rlines[0]["warehouse"], "南岛在途(PO)")
+        self.assertAlmostEqual(rlines[0]["volume_containers"], 1.0, places=2)
+
         with mock.patch.object(wv, "load_po_lines", return_value=(lines, None, Path("po.csv"))):
             po_report = wv.build_po_report("NZ")
         self.assertAlmostEqual(po_report["total_po_containers"], 2.0, places=2)
