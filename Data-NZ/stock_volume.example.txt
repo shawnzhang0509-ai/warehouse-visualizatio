@@ -1,0 +1,29 @@
+-- 中心仓占用体积明细 → Output-NZ/stock_volume.csv
+-- 复制为 stock_volume.txt（勿用 stock.txt，会与 product_stock_price.sql 抢 stock.csv）
+--
+-- 容积率页优先连库查体积；若 VolumeWithBox 未维护或连不上库，可导出本文件供看板汇总。
+-- 列：WarehouseName, Sku, Channel(可选), Quantity(可选), VolumeM3（或 Quantity×VolumeWithBox 导出）
+
+SELECT
+    w.Name AS WarehouseName,
+    p.Sku AS Sku,
+    LEFT(p.Sku, 3) AS Channel,
+    SUM(s.Quantity) AS Quantity,
+    SUM(s.Quantity * ISNULL(p.VolumeWithBox, 0)) AS VolumeM3
+FROM dbo.Stocks s
+INNER JOIN dbo.Products p ON s.ProductId = p.Id
+INNER JOIN dbo.Warehouses w ON s.WarehouseId = w.Id
+WHERE s.StockStatus = 'Normal'
+  AND (s.StockOnHoldStatus IS NULL OR s.StockOnHoldStatus = '')
+  AND w.Name IN (
+      'Carbine Rd Warehouse',
+      'Walls Road',
+      'Walls',
+      'Walls in Transit',
+      'CHCH Gerald Connelly',
+      'CHCH Treffers',
+      'Presale-AKL',
+      'Presale-CHCH'
+  )
+GROUP BY w.Name, p.Sku, LEFT(p.Sku, 3)
+HAVING SUM(s.Quantity * ISNULL(p.VolumeWithBox, 0)) > 0;

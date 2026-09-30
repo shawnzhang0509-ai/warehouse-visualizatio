@@ -35,7 +35,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.30"
+APP_VERSION = "1.9.31"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -972,7 +972,7 @@ class PanelApp:
         ttk.Button(vol_toolbar, text="应用筛选", command=self._refresh_volume_tab).pack(side=tk.LEFT)
         self._volume_status_lbl = tk.Label(
             vol_tab,
-            text="与顶部地区一致连接 ERP；左侧渠道(SKU前三位)，右侧各仓占用与容积率",
+            text="在库：ERP 或 stock_volume.csv；在途：Output 下 po.csv（Data-NZ/PO.txt 导出）",
             bg="white", fg=C_MUTED, font=("Segoe UI", 9),
         )
         self._volume_status_lbl.pack(anchor="w", padx=8, pady=(0, 4))
@@ -982,18 +982,27 @@ class PanelApp:
         wh_frame = tk.Frame(vol_panes, bg="white")
         vol_panes.add(ch_frame, minsize=220)
         vol_panes.add(wh_frame, minsize=420)
-        tk.Label(ch_frame, text="按渠道合计（双击筛选仓库）", bg="white", fg=C_TEXT, font=("Segoe UI", 9, "bold")).pack(
-            anchor="w", padx=4, pady=(0, 4),
-        )
+        tk.Label(
+            ch_frame,
+            text="按渠道合计（在库+在途 PO；双击筛选）",
+            bg="white", fg=C_TEXT, font=("Segoe UI", 9, "bold"),
+        ).pack(anchor="w", padx=4, pady=(0, 4))
         ch_wrap = tk.Frame(ch_frame, bg="white")
         ch_wrap.pack(fill=tk.BOTH, expand=True)
         self._volume_channel_tree = ttk.Treeview(
-            ch_wrap, columns=("channel", "volume"), show="headings", style="Prefix.Treeview",
+            ch_wrap,
+            columns=("channel", "stock", "po", "total"),
+            show="headings",
+            style="Prefix.Treeview",
         )
         self._volume_channel_tree.heading("channel", text="渠道")
-        self._volume_channel_tree.heading("volume", text="占用(柜)")
-        self._volume_channel_tree.column("channel", width=72, stretch=True)
-        self._volume_channel_tree.column("volume", width=88, stretch=False)
+        self._volume_channel_tree.heading("stock", text="在库(柜)")
+        self._volume_channel_tree.heading("po", text="在途(柜)")
+        self._volume_channel_tree.heading("total", text="合计(柜)")
+        self._volume_channel_tree.column("channel", width=56, stretch=True)
+        self._volume_channel_tree.column("stock", width=72, stretch=False)
+        self._volume_channel_tree.column("po", width=72, stretch=False)
+        self._volume_channel_tree.column("total", width=72, stretch=False)
         ch_vscroll = ttk.Scrollbar(ch_wrap, orient="vertical", command=self._volume_channel_tree.yview)
         self._volume_channel_tree.configure(yscrollcommand=ch_vscroll.set)
         self._volume_channel_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -1004,16 +1013,18 @@ class PanelApp:
         )
         wh_wrap = tk.Frame(wh_frame, bg="white")
         wh_wrap.pack(fill=tk.BOTH, expand=True)
-        vcols = ("name", "volume", "capacity", "util", "m3")
+        vcols = ("name", "volume", "po", "total", "capacity", "util", "m3")
         self._volume_tree = ttk.Treeview(
             wh_wrap, columns=vcols, show="headings", selectmode="browse", style="Prefix.Treeview",
         )
         for col, text, w in (
-            ("name", "仓库", 200),
-            ("volume", "占用(柜)", 88),
-            ("capacity", "容量(柜)", 88),
-            ("util", "容积率%", 72),
-            ("m3", "占用m³", 80),
+            ("name", "仓库", 180),
+            ("volume", "在库(柜)", 72),
+            ("po", "在途(柜)", 72),
+            ("total", "合计(柜)", 72),
+            ("capacity", "容量(柜)", 72),
+            ("util", "容积率%", 68),
+            ("m3", "在库m³", 72),
         ):
             self._volume_tree.heading(col, text=text)
             self._volume_tree.column(col, width=w, minwidth=60, stretch=col == "name")
@@ -2109,7 +2120,13 @@ class PanelApp:
         def work():
             import warehouse_volume as wv
             report = wv.build_volume_report(region, channels or None)
-            channel_rows = wv.channel_breakdown(region)
+            stock_channels = wv.channel_breakdown(region)
+            if channels:
+                stock_channels = [
+                    r for r in stock_channels if str(r.get("channel") or "").upper() in channels
+                ]
+            po_report = report.get("po") or wv.build_po_report(region, channels or None)
+            channel_rows = wv.merge_channel_breakdown(stock_channels, po_report)
             channel_names = [r["channel"] for r in channel_rows]
             return report, channel_rows, channel_names
 
@@ -2129,7 +2146,12 @@ class PanelApp:
                 for row in channel_rows or []:
                     self._volume_channel_tree.insert(
                         "", tk.END,
-                        values=(row.get("channel") or "", row.get("volume_containers") or 0),
+                        values=(
+                            row.get("channel") or "",
+                            row.get("volume_containers") or 0,
+                            row.get("po_containers") or 0,
+                            row.get("total_containers") or 0,
+                        ),
                     )
             if self._volume_tree.get_children():
                 self._volume_tree.delete(*self._volume_tree.get_children())
@@ -2142,6 +2164,8 @@ class PanelApp:
                     values=(
                         row.get("name") or "",
                         row.get("volume_containers") or 0,
+                        row.get("po_containers") or 0,
+                        row.get("total_containers") or row.get("volume_containers") or 0,
                         cap if cap is not None else "-",
                         util_txt,
                         row.get("volume_m3") or "-",
@@ -2151,11 +2175,13 @@ class PanelApp:
             err_hint = f" · {report.get('error')}" if report.get("error") else ""
             ch = ",".join(report.get("filters", {}).get("channels") or []) or "全部"
             hint = report.get("hint") or ""
+            po = report.get("po") or {}
+            po_total = po.get("total_po_containers") or 0
             if self._volume_status_lbl:
                 self._volume_status_lbl.configure(
                     text=(
-                        f"{region} · 渠道 {ch} · 合计 {report.get('total_containers', 0)} 柜"
-                        f"（{report.get('total_m3', 0)} m³）· 来源 {src}{err_hint}"
+                        f"{region} · 渠道 {ch} · 在库+在途合计 {report.get('total_containers', 0)} 柜"
+                        f"（在途 PO {po_total} 柜）· 来源 {src}{err_hint}"
                         + (f" · {hint}" if hint else "")
                     ),
                 )

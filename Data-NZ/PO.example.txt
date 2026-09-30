@@ -1,0 +1,24 @@
+-- 在途 PO → Output-NZ/po.csv（复制本文件为 PO.txt 后按你们 iERP 表结构改 SQL）
+-- PO.txt 仅放本机，不提交 Git（与 on_hold.txt 相同用法）
+--
+-- 看板「仓库容积率」会读 Output-NZ/po.csv，按渠道(SKU前三位)汇总在途体积（柜）。
+-- 推荐列名（大小写不限，看板会模糊匹配）：
+--   Sku / ProductCode
+--   Quantity 或 POQty（件数）
+--   VolumeM3 或 TotalOccupiedVolume（该行总体积 m³）；若无则用 VolumeWithBox × Quantity
+-- 可选：Channel、WarehouseName、POCode、ETA / ExpectedArrivalDate
+--
+-- ↓↓↓ 下面 SQL 仅为示例，请替换成你本机 PO.txt 里能跑通的查询 ↓↓↓
+
+SELECT
+    po.PurchaseOrderNumber AS POCode,
+    pol.Sku AS Sku,
+    LEFT(pol.Sku, 3) AS Channel,
+    pol.Quantity AS Quantity,
+    pol.Quantity * ISNULL(p.VolumeWithBox, 0) AS VolumeM3,
+    po.ExpectedDeliveryDate AS ETA
+FROM dbo.PurchaseOrderLines pol
+INNER JOIN dbo.PurchaseOrders po ON pol.PurchaseOrderId = po.Id
+INNER JOIN dbo.Products p ON p.Sku = pol.Sku
+WHERE po.Status IN ('InTransit', 'Shipped', 'OnTheWay')
+  AND pol.Quantity > 0;

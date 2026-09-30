@@ -34,6 +34,13 @@ STANDARD_OUTPUT_NAMES = {
     "parts": "parts",
     "spare_parts": "parts",
     "part_stock": "parts",
+    "po": "po",
+    "purchase_order": "po",
+    "purchase_orders": "po",
+    "po_in_transit": "po",
+    "stock_volume": "stock_volume",
+    "warehouse_volume": "stock_volume",
+    "warehouse_stock_volume": "stock_volume",
 }
 
 try:

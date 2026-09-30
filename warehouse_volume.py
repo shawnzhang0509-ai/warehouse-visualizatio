@@ -21,9 +21,26 @@ try:
 except ImportError:
     pyodbc = None
 
+from panel_data import _pick_fuzzy, _region_output_dir
 from runner_config import load_runner_config
 
 ROOT_DIR = Path(__file__).resolve().parent
+PO_FILE_STEMS = ("po", "po_in_transit", "purchase_orders")
+STOCK_VOLUME_STEMS = ("stock_volume", "warehouse_stock_volume")
+PO_SKU_KEYS = [
+    "sku", "productsku", "productcode", "product_code", "itemcode", "code",
+]
+PO_QTY_KEYS = [
+    "quantity", "qty", "poqty", "po_qty", "orderqty", "order_qty", "openqty",
+]
+PO_M3_KEYS = [
+    "volumem3", "volume_m3", "totaloccupiedvolume", "occupiedvolume", "volume",
+]
+PO_UNIT_VOL_KEYS = ["volumewithbox", "volume_with_box", "unitvolume", "unit_volume"]
+PO_CHANNEL_KEYS = ["channel", "channelname", "channel_code", "skuchannel"]
+PO_WAREHOUSE_KEYS = [
+    "warehousename", "warehouse_name", "warehouse", "destinationwarehouse", "destwarehouse",
+]
 MASTER_FILE = ROOT_DIR / "warehouse_master.csv"
 CONTAINER_VOLUME_M3 = 69.0
 
@@ -246,6 +263,185 @@ def list_channels(region: str | None = None) -> list[str]:
         return []
 
 
+def _read_region_csv(region: str, stems: tuple[str, ...]) -> tuple[Path | None, list[dict]]:
+    out_dir = _region_output_dir(region)
+    for stem in stems:
+        path = out_dir / f"{stem}.csv"
+        if not path.is_file():
+            continue
+        rows = []
+        with path.open("r", encoding="utf-8-sig", newline="") as f:
+            rows = list(csv.DictReader(f))
+        return path, rows
+    return None, []
+
+
+def _float_cell(val, default=0.0) -> float:
+    if val is None or str(val).strip() == "":
+        return default
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return default
+
+
+def _channel_from_sku(sku: str) -> str:
+    sku = str(sku or "").strip().upper()
+    if len(sku) >= 3 and sku[:3].isdigit():
+        return sku[:3]
+    return sku[:3] if len(sku) >= 3 else ""
+
+
+def _row_line_volume_m3(row: dict, qty: float) -> float:
+    direct = _pick_fuzzy(row, PO_M3_KEYS)
+    if direct is not None:
+        return _float_cell(direct, 0.0)
+    unit = _pick_fuzzy(row, PO_UNIT_VOL_KEYS)
+    if unit is not None and qty > 0:
+        return _float_cell(unit, 0.0) * qty
+    return 0.0
+
+
+def _parse_po_rows(rows: list[dict]) -> list[dict]:
+    lines = []
+    for row in rows:
+        sku = str(_pick_fuzzy(row, PO_SKU_KEYS) or "").strip()
+        if not sku:
+            continue
+        qty = _float_cell(_pick_fuzzy(row, PO_QTY_KEYS), 0.0)
+        if qty <= 0:
+            continue
+        ch = str(_pick_fuzzy(row, PO_CHANNEL_KEYS) or "").strip().upper()
+        if not ch:
+            ch = _channel_from_sku(sku)
+        wh = str(_pick_fuzzy(row, PO_WAREHOUSE_KEYS) or "").strip()
+        m3 = _row_line_volume_m3(row, qty)
+        lines.append(
+            {
+                "sku": sku,
+                "channel": ch,
+                "warehouse": wh,
+                "quantity": qty,
+                "volume_m3": m3,
+                "volume_containers": _m3_to_containers(m3),
+            }
+        )
+    return lines
+
+
+def load_po_lines(region: str | None = None) -> tuple[list[dict], str | None, Path | None]:
+    region = normalize_region(region)
+    path, rows = _read_region_csv(region, PO_FILE_STEMS)
+    if path is None:
+        return [], "未找到 Output-{0}/po.csv：请在 Data-{0} 放 PO.txt 并执行 SQL 导出".format(region), None
+    if not rows:
+        return [], f"po.csv 为空：{path.name}", path
+    return _parse_po_rows(rows), None, path
+
+
+def _aggregate_po(lines: list[dict]) -> tuple[dict[str, float], dict[str, float]]:
+    by_channel: dict[str, float] = {}
+    by_wh: dict[str, float] = {}
+    for line in lines:
+        ch = line.get("channel") or ""
+        if ch:
+            by_channel[ch] = by_channel.get(ch, 0.0) + float(line.get("volume_containers") or 0)
+        wh = line.get("warehouse") or ""
+        if wh:
+            by_wh[wh] = by_wh.get(wh, 0.0) + float(line.get("volume_containers") or 0)
+    return by_channel, by_wh
+
+
+def build_po_report(
+    region: str | None = None,
+    channel_filters: list[str] | None = None,
+) -> dict[str, Any]:
+    region = normalize_region(region)
+    channels = [c.strip().upper() for c in (channel_filters or []) if c and str(c).strip()]
+    lines, err, path = load_po_lines(region)
+    if channels:
+        lines = [ln for ln in lines if (ln.get("channel") or "").upper() in channels]
+    by_ch, by_wh = _aggregate_po(lines)
+    total = sum(by_ch.values())
+    ch_rows = [
+        {"channel": k, "po_containers": round(v, 2)}
+        for k, v in sorted(by_ch.items(), key=lambda x: -x[1])
+    ]
+    return {
+        "region": region,
+        "source": "po_csv" if path else "none",
+        "path": str(path) if path else None,
+        "error": err,
+        "line_count": len(lines),
+        "total_po_containers": round(total, 2),
+        "total_po_m3": round(_containers_to_m3(total), 1),
+        "channels": ch_rows,
+        "warehouses": [
+            {"name": k, "po_containers": round(v, 2)}
+            for k, v in sorted(by_wh.items(), key=lambda x: -x[1])
+        ],
+    }
+
+
+def _stock_volume_rows_to_maps(
+    rows: list[dict], master: dict
+) -> tuple[dict[str, float], dict[str, float]]:
+    by_wh: dict[str, float] = {}
+    by_ch: dict[str, float] = {}
+    for row in rows:
+        wh = str(_pick_fuzzy(row, PO_WAREHOUSE_KEYS) or row.get("WarehouseName") or "").strip()
+        sku = str(_pick_fuzzy(row, PO_SKU_KEYS) or "").strip()
+        qty = _float_cell(_pick_fuzzy(row, PO_QTY_KEYS), 0.0)
+        m3 = _row_line_volume_m3(row, qty)
+        if m3 <= 0:
+            continue
+        containers = _m3_to_containers(m3)
+        ch = str(_pick_fuzzy(row, PO_CHANNEL_KEYS) or "").strip().upper() or _channel_from_sku(sku)
+        if wh and not _is_excluded(wh, master):
+            by_wh[wh] = by_wh.get(wh, 0.0) + containers
+        if ch:
+            by_ch[ch] = by_ch.get(ch, 0.0) + containers
+    return by_wh, by_ch
+
+
+def _load_stock_volume_maps(region: str) -> tuple[dict[str, float], dict[str, float], Path | None]:
+    master = _load_warehouse_master()
+    path, rows = _read_region_csv(region, STOCK_VOLUME_STEMS)
+    if path is None or not rows:
+        return {}, {}, None
+    return (*_stock_volume_rows_to_maps(rows, master), path)
+
+
+def merge_channel_breakdown(
+    stock_rows: list[dict[str, Any]],
+    po_report: dict[str, Any],
+) -> list[dict[str, Any]]:
+    stock_map = {
+        str(r.get("channel") or "").upper(): float(r.get("volume_containers") or 0)
+        for r in stock_rows
+    }
+    po_map = {
+        str(r.get("channel") or "").upper(): float(r.get("po_containers") or 0)
+        for r in (po_report.get("channels") or [])
+    }
+    keys = sorted(set(stock_map) | set(po_map), key=lambda k: (-(stock_map.get(k, 0) + po_map.get(k, 0)), k))
+    out = []
+    for ch in keys:
+        if not ch:
+            continue
+        stock_v = round(stock_map.get(ch, 0.0), 2)
+        po_v = round(po_map.get(ch, 0.0), 2)
+        out.append(
+            {
+                "channel": ch,
+                "volume_containers": stock_v,
+                "po_containers": po_v,
+                "total_containers": round(stock_v + po_v, 2),
+            }
+        )
+    return out
+
+
 def _load_csv_fallback() -> dict[str, float]:
     path = ROOT_DIR / "data.csv"
     if not path.is_file():
@@ -281,8 +477,16 @@ def query_warehouse_volumes(
             rows = _run_query(region, sql, channels)
         else:
             rows = _run_query(region, BASE_VOLUME_SQL)
-        return _rows_to_warehouse_map(rows, master), "database", None
+        volumes = _rows_to_warehouse_map(rows, master)
+        if not volumes or sum(volumes.values()) <= 0:
+            sv_wh, _, sv_path = _load_stock_volume_maps(region)
+            if sv_wh:
+                return sv_wh, "stock_volume_csv", None
+        return volumes, "database", None
     except Exception as exc:
+        sv_wh, _, sv_path = _load_stock_volume_maps(region)
+        if sv_wh:
+            return sv_wh, "stock_volume_csv", str(exc)
         fb = _load_csv_fallback()
         if fb:
             return fb, "csv", str(exc)
@@ -292,18 +496,21 @@ def query_warehouse_volumes(
 def channel_breakdown(region: str | None = None) -> list[dict[str, Any]]:
     region = normalize_region(region)
     master = _load_warehouse_master()
+    totals: dict[str, float] = {}
     try:
         rows = _run_query(region, CHANNEL_VOLUME_SQL)
+        for row in rows:
+            ch = (_row_get(row, "ChannelName", "") or "").strip().upper()
+            wh = (_row_get(row, "WarehouseName", "") or "").strip()
+            if not ch or not wh or _is_excluded(wh, master):
+                continue
+            m3 = float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
+            totals[ch] = totals.get(ch, 0.0) + _m3_to_containers(m3)
     except Exception:
-        return []
-    totals: dict[str, float] = {}
-    for row in rows:
-        ch = (_row_get(row, "ChannelName", "") or "").strip().upper()
-        wh = (_row_get(row, "WarehouseName", "") or "").strip()
-        if not ch or not wh or _is_excluded(wh, master):
-            continue
-        m3 = float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
-        totals[ch] = totals.get(ch, 0.0) + _m3_to_containers(m3)
+        totals = {}
+    if not totals:
+        _, by_ch, _path = _load_stock_volume_maps(region)
+        totals = dict(by_ch)
     ranked = sorted(totals.items(), key=lambda x: -x[1])
     return [{"channel": k, "volume_containers": round(v, 2)} for k, v in ranked]
 
@@ -316,8 +523,10 @@ def build_volume_report(
     master = _load_warehouse_master()
     volumes, source, err = query_warehouse_volumes(region, channel_filters)
     channels = [c.strip().upper() for c in (channel_filters or []) if c and str(c).strip()]
+    po_report = build_po_report(region, channels or None)
+    po_by_wh = {w["name"]: w["po_containers"] for w in (po_report.get("warehouses") or [])}
 
-    warehouse_names = set(master.keys()) | set(volumes.keys())
+    warehouse_names = set(master.keys()) | set(volumes.keys()) | set(po_by_wh.keys())
     rows_out = []
     total = 0.0
     unmapped = []
@@ -331,21 +540,24 @@ def build_volume_report(
         if _normalize_warehouse_key(name) in EXCLUDED_WAREHOUSE_KEYS:
             continue
         vol = float(volumes.get(name, 0.0))
+        po_vol = float(po_by_wh.get(name, 0.0))
         cap = profile.get("capacity_containers")
         util = None
         if cap and cap > 0:
-            util = round(vol / float(cap) * 100, 1)
+            util = round((vol + po_vol) / float(cap) * 100, 1)
         meta = _warehouse_meta(name, master)
-        if channels and vol <= 0:
+        if channels and vol <= 0 and po_vol <= 0:
             continue
-        if vol > 0 or not channels:
-            total += vol
+        if vol > 0 or po_vol > 0 or not channels:
+            total += vol + po_vol
             if vol > 0 and not meta.get("coords"):
                 unmapped.append(name)
             rows_out.append(
                 {
                     "name": name,
                     "volume_containers": round(vol, 2),
+                    "po_containers": round(po_vol, 2),
+                    "total_containers": round(vol + po_vol, 2),
                     "volume_m3": round(_containers_to_m3(vol), 1),
                     "capacity_containers": cap,
                     "capacity_m3": meta.get("capacity_m3"),
@@ -355,7 +567,7 @@ def build_volume_report(
                 }
             )
 
-    rows_out.sort(key=lambda r: -(r.get("volume_containers") or 0))
+    rows_out.sort(key=lambda r: -(r.get("total_containers") or r.get("volume_containers") or 0))
 
     if source == "database" and not channels and (total <= 0 or not volumes):
         hint = (
@@ -365,6 +577,15 @@ def build_volume_report(
         )
     elif source == "csv" and err:
         hint = hint or f"数据库不可用，已用 data.csv 快照：{err}"
+    elif source == "stock_volume_csv":
+        hint = hint or "在库体积来自 Output 下 stock_volume.csv（由 Data 目录 stock_volume.txt 导出）"
+    if po_report.get("path"):
+        hint = (hint or "") + (
+            f"；在途 PO {po_report.get('total_po_containers', 0)} 柜"
+            f"（{po_report.get('line_count', 0)} 行 po.csv）"
+        )
+    elif po_report.get("error") and not channels:
+        hint = (hint or "") + f"；{po_report.get('error')}"
 
     return {
         "status": "success" if volumes or source == "csv" else "empty",
@@ -377,6 +598,7 @@ def build_volume_report(
         "total_m3": round(_containers_to_m3(total), 1),
         "data": rows_out,
         "channelTotals": channel_breakdown(region) if not channels else [],
+        "po": po_report,
         "unmappedWarehouses": unmapped,
         "container_m3": CONTAINER_VOLUME_M3,
     }
