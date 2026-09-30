@@ -9,6 +9,7 @@
 import csv
 import io
 import os
+import re
 import ssl
 import sys
 import threading
@@ -34,7 +35,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.27"
+APP_VERSION = "1.9.28"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -165,6 +166,11 @@ class PanelApp:
         self._onhold_sort_reverse = False
         self._tab_onhold = None
         self._tab_transfer = None
+        self._tab_volume = None
+        self._volume_tree = None
+        self._volume_status_lbl = None
+        self._volume_channel_var = None
+        self._volume_last_report = None
         self._onhold_status_lbl = None
         self._transfer_status_lbl = None
         self._mining_rendered_for = None
@@ -234,6 +240,7 @@ class PanelApp:
         self._island_owner_filter_var = tk.StringVar(value="全部负责人")
         self._island_channel_filter_var = tk.StringVar(value="全部渠道")
         self._mining_kind_var = tk.StringVar(value="全部")
+        self._volume_channel_var = tk.StringVar(value="")
         self._onhold_status_filter_var = tk.StringVar(value="全部状态")
         self._onhold_days_filter_var = tk.StringVar(value="全部天数")
         self._onhold_days_combo = None
@@ -942,6 +949,43 @@ class PanelApp:
         self._mining_transfer_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._mining_transfer_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._mining_transfer_tree.bind("<Double-1>", self._on_mining_transfer_double_click)
+
+        # ── 仓库容积率 ──
+        self._tab_volume = ttk.Frame(self._notebook)
+        self._notebook.add(self._tab_volume, text="仓库容积率")
+        vol_tab = self._tab_volume
+        vol_toolbar = tk.Frame(vol_tab, bg="white")
+        vol_toolbar.pack(fill=tk.X, padx=4, pady=(6, 4))
+        tk.Label(vol_toolbar, text="渠道(SKU前三位)", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(
+            side=tk.LEFT,
+        )
+        ttk.Entry(vol_toolbar, width=28, textvariable=self._volume_channel_var).pack(side=tk.LEFT, padx=(6, 12))
+        ttk.Button(vol_toolbar, text="刷新", command=self._refresh_volume_tab).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(vol_toolbar, text="浏览器地图", command=self._open_volume_web).pack(side=tk.LEFT)
+        self._volume_status_lbl = tk.Label(
+            vol_tab, text="选择地区后点刷新（与顶部地区一致，连对应 ERP 库）",
+            bg="white", fg=C_MUTED, font=("Segoe UI", 9),
+        )
+        self._volume_status_lbl.pack(anchor="w", padx=8, pady=(0, 4))
+        vol_wrap = tk.Frame(vol_tab, bg="white")
+        vol_wrap.pack(fill=tk.BOTH, expand=True, padx=0, pady=(0, 6))
+        vcols = ("name", "volume", "capacity", "util", "m3")
+        self._volume_tree = ttk.Treeview(
+            vol_wrap, columns=vcols, show="headings", selectmode="browse", style="Prefix.Treeview",
+        )
+        for col, text, w in (
+            ("name", "仓库", 200),
+            ("volume", "占用(柜)", 88),
+            ("capacity", "容量(柜)", 88),
+            ("util", "容积率%", 72),
+            ("m3", "占用m³", 80),
+        ):
+            self._volume_tree.heading(col, text=text)
+            self._volume_tree.column(col, width=w, minwidth=60, stretch=col == "name")
+        vol_vscroll = ttk.Scrollbar(vol_wrap, orient="vertical", command=self._volume_tree.yview)
+        self._volume_tree.configure(yscrollcommand=vol_vscroll.set)
+        self._volume_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vol_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
 
         for widget in (
             mining_inner, self._tab_mining, self._tab_onhold, self._tab_transfer,
@@ -1965,7 +2009,7 @@ class PanelApp:
             return
         mining_tabs = tuple(
             str(t) for t in (
-                self._tab_mining, self._tab_onhold, self._tab_transfer,
+                self._tab_mining, self._tab_onhold, self._tab_transfer, self._tab_volume,
             ) if t
         )
         if not self._cached_products and selected not in mining_tabs:
@@ -1981,6 +2025,96 @@ class PanelApp:
             self._render_on_hold_analysis()
         elif self._tab_transfer and selected == str(self._tab_transfer):
             self._render_mining_transfer_table()
+        elif self._tab_volume and selected == str(self._tab_volume):
+            self._render_volume_tab()
+
+    def _volume_channel_list(self):
+        raw = str(self._volume_channel_var.get() if self._volume_channel_var else "").strip()
+        if not raw:
+            return []
+        parts = re.split(r"[,，\s]+", raw)
+        return [p.strip().upper() for p in parts if p.strip()]
+
+    def _refresh_volume_tab(self):
+        self._render_volume_tab(force=True)
+
+    def _open_volume_web(self):
+        import subprocess
+        import sys
+        script = Path(__file__).resolve().parent / "warehouse_volume_web.py"
+        if not script.is_file():
+            if messagebox:
+                messagebox.showinfo("仓库容积率", "未找到 warehouse_volume_web.py")
+            return
+        try:
+            subprocess.Popen(
+                [sys.executable, str(script)],
+                cwd=str(script.parent),
+                creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0,
+            )
+        except Exception as exc:
+            if messagebox:
+                messagebox.showerror("仓库容积率", str(exc))
+            return
+        if messagebox:
+            messagebox.showinfo(
+                "仓库容积率",
+                "已在后台启动 Web 服务。\n浏览器打开：\nhttp://127.0.0.1:5001/volume",
+            )
+
+    def _render_volume_tab(self, force=False):
+        if not self._volume_tree:
+            return
+        region = self._cached_summary.get("region") or self._current_region()
+        if self._volume_status_lbl:
+            self._volume_status_lbl.configure(text=f"正在查询 {region} 仓库体积…")
+        channels = self._volume_channel_list()
+
+        def work():
+            try:
+                import warehouse_volume as wv
+                return wv.build_volume_report(region, channels or None), None
+            except Exception as exc:
+                return None, exc
+
+        def done(report, err):
+            if err:
+                if self._volume_status_lbl:
+                    self._volume_status_lbl.configure(text=f"查询失败：{err}")
+                return
+            self._volume_last_report = report
+            if self._volume_tree.get_children():
+                self._volume_tree.delete(*self._volume_tree.get_children())
+            for row in report.get("data") or []:
+                util = row.get("utilization_pct")
+                util_txt = f"{util}%" if util is not None else "-"
+                cap = row.get("capacity_containers")
+                self._volume_tree.insert(
+                    "", tk.END,
+                    values=(
+                        row.get("name") or "",
+                        row.get("volume_containers") or 0,
+                        cap if cap is not None else "-",
+                        util_txt,
+                        row.get("volume_m3") or "-",
+                    ),
+                )
+            src = report.get("source") or "-"
+            err_hint = f" · {report.get('error')}" if report.get("error") else ""
+            ch = ",".join(report.get("filters", {}).get("channels") or []) or "全部"
+            if self._volume_status_lbl:
+                self._volume_status_lbl.configure(
+                    text=(
+                        f"{region} · 渠道 {ch} · 合计 {report.get('total_containers', 0)} 柜"
+                        f"（{report.get('total_m3', 0)} m³）· 来源 {src}{err_hint}"
+                    ),
+                )
+
+        if force:
+            report, err = work()
+            done(report, err)
+            return
+        self._run_bg(work, lambda r, e: done(r, e))
 
     def _mining_kind_key(self):
         kind = self._mining_kind_var.get()

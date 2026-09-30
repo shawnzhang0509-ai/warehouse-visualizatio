@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>仓库容积率</title>
+  <script src="./echarts.min.js"></script>
+  <style>
+    :root {
+      --bg: #f0f4f8; --panel: #fff; --text: #1e293b; --muted: #64748b;
+      --primary: #1e4f8a; --line: #e2e8f0;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--text); }
+    .wrap { max-width: 1280px; margin: 0 auto; padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; }
+    h1 { margin: 0 0 6px; font-size: 22px; }
+    .hint { color: var(--muted); font-size: 13px; line-height: 1.5; }
+    .toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+    select, input, button {
+      padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; font-size: 14px;
+    }
+    button { background: var(--primary); color: #fff; border: none; cursor: pointer; }
+    button:disabled { opacity: 0.6; cursor: default; }
+    .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; }
+    .kpi { padding: 10px 12px; border: 1px solid var(--line); border-radius: 8px; }
+    .kpi .label { font-size: 12px; color: var(--muted); }
+    .kpi .val { font-size: 22px; font-weight: 700; margin-top: 4px; }
+    #map { height: 420px; }
+    #bar { height: 320px; }
+    #channelBar { height: 260px; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td { border-bottom: 1px solid var(--line); padding: 8px 6px; text-align: left; }
+    th { color: var(--muted); font-weight: 600; }
+    .err { color: #b91c1c; background: #fef2f2; padding: 8px 12px; border-radius: 8px; font-size: 13px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="panel">
+      <h1>仓库容积率</h1>
+      <p class="hint">按 ERP 库存 × 带箱体积汇总；渠道 = SKU 前三位。地区库与 <code>region_runner_config.json</code> 一致（NZ / AU / CA）。</p>
+      <div class="toolbar" style="margin-top:12px;">
+        <label>地区
+          <select id="region">
+            <option value="NZ">新西兰 NZ</option>
+            <option value="AU">澳洲 AU</option>
+            <option value="CA">加拿大 CA</option>
+          </select>
+        </label>
+        <label>渠道（逗号分隔，空=全部）
+          <input id="channels" type="text" placeholder="如 130,107" style="min-width:200px;">
+        </label>
+        <button id="refreshBtn" type="button">刷新</button>
+      </div>
+      <div id="msg" class="err" style="display:none;margin-top:10px;"></div>
+    </div>
+
+    <div class="kpis" id="kpis"></div>
+
+    <div class="panel"><div id="map"></div></div>
+    <div class="panel"><div id="bar"></div></div>
+    <div class="panel" id="channelPanel" style="display:none;"><div id="channelBar"></div></div>
+
+    <div class="panel">
+      <h3 style="margin:0 0 8px;">明细</h3>
+      <table>
+        <thead>
+          <tr><th>仓库</th><th>占用(柜)</th><th>容量(柜)</th><th>容积率%</th></tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+  </div>
+
+  <script>
+    const mapChart = echarts.init(document.getElementById('map'));
+    const barChart = echarts.init(document.getElementById('bar'));
+    const channelChart = echarts.init(document.getElementById('channelBar'));
+
+    function parseChannels() {
+      return document.getElementById('channels').value
+        .split(/[,，\s]+/).map(s => s.trim()).filter(Boolean);
+    }
+
+    function buildUrl(path) {
+      const region = document.getElementById('region').value;
+      const ch = parseChannels();
+      const params = new URLSearchParams({ region });
+      ch.forEach(c => params.append('channel', c));
+      return `${path}?${params}`;
+    }
+
+    function setMsg(text) {
+      const el = document.getElementById('msg');
+      if (!text) { el.style.display = 'none'; el.textContent = ''; return; }
+      el.style.display = 'block';
+      el.textContent = text;
+    }
+
+    function renderKpis(report) {
+      const src = report.source || '-';
+      const err = report.error ? `（回退原因：${report.error}）` : '';
+      document.getElementById('kpis').innerHTML = `
+        <div class="kpi"><div class="label">合计占用</div><div class="val">${report.total_containers ?? '-'} 柜</div></div>
+        <div class="kpi"><div class="label">约合体积</div><div class="val">${report.total_m3 ?? '-'} m³</div></div>
+        <div class="kpi"><div class="label">数据来源</div><div class="val" style="font-size:16px;">${src}${err}</div></div>
+        <div class="kpi"><div class="label">地区</div><div class="val" style="font-size:16px;">${report.region}</div></div>
+      `;
+    }
+
+    function renderTable(rows) {
+      const tb = document.getElementById('tbody');
+      tb.innerHTML = (rows || []).map(r => `
+        <tr>
+          <td>${r.name}</td>
+          <td>${r.volume_containers ?? 0}</td>
+          <td>${r.capacity_containers ?? '-'}</td>
+          <td>${r.utilization_pct != null ? r.utilization_pct + '%' : '-'}</td>
+        </tr>
+      `).join('');
+    }
+
+    async function renderMap(markers) {
+      const res = await fetch('nz.json');
+      if (!res.ok) throw new Error('缺少 nz.json（地图仅适用于有坐标的仓库）');
+      const geo = await res.json();
+      echarts.registerMap('NZ', geo);
+      mapChart.setOption({
+        title: { text: '仓库占用分布（气泡=柜数）', left: 'center' },
+        tooltip: { trigger: 'item', formatter: p => `${p.name}<br/>${p.value[2]} 柜` },
+        geo: {
+          map: 'NZ', roam: true, center: [173.5, -41], zoom: 4.2,
+          itemStyle: { areaColor: '#e8edf2', borderColor: '#94a3b8' },
+        },
+        series: [{
+          type: 'scatter', coordinateSystem: 'geo',
+          data: markers || [],
+          symbolSize: val => Math.max(12, Math.min(48, Math.sqrt(val[2] || 0) * 3)),
+          itemStyle: { color: '#1e4f8a', opacity: 0.85 },
+        }],
+      });
+    }
+
+    function renderBar(rows) {
+      const names = (rows || []).map(r => r.name);
+      const vals = (rows || []).map(r => r.volume_containers || 0);
+      barChart.setOption({
+        title: { text: '各仓占用（柜）', left: 'center' },
+        tooltip: { trigger: 'axis' },
+        grid: { left: 48, right: 16, bottom: 80, top: 48 },
+        xAxis: { type: 'category', data: names, axisLabel: { rotate: 35, interval: 0 } },
+        yAxis: { type: 'value', name: '柜' },
+        series: [{ type: 'bar', data: vals, itemStyle: { color: '#2563eb' } }],
+      });
+    }
+
+    function renderChannelBar(channelTotals) {
+      const panel = document.getElementById('channelPanel');
+      if (!channelTotals || !channelTotals.length) {
+        panel.style.display = 'none';
+        return;
+      }
+      panel.style.display = 'block';
+      channelChart.setOption({
+        title: { text: '渠道占用合计（SKU 前三位）', left: 'center' },
+        tooltip: { trigger: 'axis' },
+        grid: { left: 48, right: 16, bottom: 40, top: 48 },
+        xAxis: { type: 'category', data: channelTotals.map(c => c.channel) },
+        yAxis: { type: 'value', name: '柜' },
+        series: [{ type: 'bar', data: channelTotals.map(c => c.volume_containers), itemStyle: { color: '#0d9488' } }],
+      });
+    }
+
+    async function load() {
+      const btn = document.getElementById('refreshBtn');
+      btn.disabled = true;
+      setMsg('');
+      try {
+        const res = await fetch(buildUrl('/api/volume/report'));
+        const report = await res.json();
+        if (report.status === 'error') throw new Error(report.message || '请求失败');
+        renderKpis(report);
+        renderTable(report.data);
+        renderBar(report.data);
+        renderChannelBar(report.channelTotals);
+        try {
+          await renderMap(report.mapMarkers || []);
+        } catch (e) {
+          setMsg((report.error ? report.error + ' · ' : '') + '地图未加载：' + e.message);
+        }
+        if (report.error && !document.getElementById('msg').textContent) setMsg(report.error);
+      } catch (e) {
+        setMsg(String(e.message || e));
+      } finally {
+        btn.disabled = false;
+      }
+    }
+
+    document.getElementById('refreshBtn').addEventListener('click', load);
+    document.getElementById('region').addEventListener('change', load);
+    load();
+  </script>
+</body>
+</html>
