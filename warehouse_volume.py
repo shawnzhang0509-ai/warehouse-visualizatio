@@ -62,6 +62,38 @@ ISLAND_TRANSIT_LABEL = {
 MASTER_FILE = ROOT_DIR / "warehouse_master.csv"
 CONTAINER_VOLUME_M3 = 69.0
 
+# 无 PO.txt 时 NZ 默认直查（与 SSMS 常见写法一致，含体积列）
+NZ_DEFAULT_PO_SQL = """
+DECLARE @SkuFilter VARCHAR(20) = '';
+
+SELECT
+    po.Id AS PurchaseOrderId,
+    po.PurchaseOrderCode,
+    p.Sku,
+    LEFT(p.Sku, 3) AS Channel,
+    pol.QuantityOrdered,
+    ISNULL(p.VolumeWithBox, 0) AS VolumeWithBox,
+    pol.QuantityOrdered * ISNULL(p.VolumeWithBox, 0) AS VolumeM3,
+    po.[ETD],
+    po.ShippedToPortId,
+    c.ActualArrivingDate AS CheckinDate,
+    c.ContainerNumber,
+    CASE
+        WHEN c.ShippedtoportId = '3b9ff26b-4ec0-44c6-92ac-ee9804272426' THEN N'南岛'
+        WHEN c.ShippedtoportId = '646a2216-87c2-4bc6-8469-fdbd90bb2d84' THEN N'北岛'
+        WHEN po.ShippedToPortId = '3b9ff26b-4ec0-44c6-92ac-ee9804272426' THEN N'南岛'
+        WHEN po.ShippedToPortId = '646a2216-87c2-4bc6-8469-fdbd90bb2d84' THEN N'北岛'
+        ELSE N'北岛'
+    END AS Region
+FROM dbo.PurchaseOrders po
+INNER JOIN dbo.PurchaseOrderLines pol ON pol.PurchaseOrderId = po.Id
+INNER JOIN dbo.Products p ON pol.ProductId = p.Id
+LEFT JOIN dbo.Containers c ON c.PurchaseOrderId = po.Id
+WHERE (@SkuFilter = '' OR p.Sku LIKE @SkuFilter + '%')
+  AND pol.QuantityOrdered > 0
+ORDER BY po.POPlacedOnUtc DESC, p.Sku;
+"""
+
 BASE_VOLUME_SQL = """
 SELECT
     w.Name AS WarehouseName,
@@ -286,6 +318,10 @@ def _looks_like_checkin_date(text: str) -> bool:
     return True
 
 
+def _po_strict_checkin() -> bool:
+    return os.getenv("WAREHOUSE_PO_STRICT_CHECKIN", "").strip().lower() in ("1", "true", "yes")
+
+
 def _po_row_has_checkin(row: dict) -> bool:
     val = _row_checkin_raw(row)
     if val is None:
@@ -408,15 +444,37 @@ def _write_po_csv_cache(region: str, rows: list[dict]) -> Path | None:
     return path
 
 
+def _embedded_po_sql(region: str) -> str | None:
+    if normalize_region(region) == "NZ":
+        return NZ_DEFAULT_PO_SQL.strip()
+    return None
+
+
 def _fetch_po_rows_from_template(region: str) -> tuple[list[dict], str | None, str | None]:
+    errors: list[str] = []
     sql, tpl_name = _read_po_sql_template(region)
-    if not sql:
-        return [], None, "未找到 Data-{0}/PO.txt（请从 PO.example.txt 复制）".format(normalize_region(region))
-    try:
-        rows = _run_query_dicts(region, sql)
-        return rows, tpl_name, None
-    except Exception as exc:
-        return [], tpl_name, str(exc)
+    if sql:
+        try:
+            rows = _run_query_dicts(region, sql)
+            if rows:
+                return rows, tpl_name, None
+            errors.append(f"{tpl_name} 查询成功但 0 行")
+        except Exception as exc:
+            errors.append(f"{tpl_name} 失败：{exc}")
+
+    fallback = _embedded_po_sql(region)
+    if fallback:
+        try:
+            rows = _run_query_dicts(region, fallback)
+            if rows:
+                return rows, "内置NZ_PO查询", None
+            errors.append("内置 PO 查询 0 行")
+        except Exception as exc:
+            errors.append(f"内置 PO 查询失败：{exc}")
+
+    if not sql and not fallback:
+        return [], None, f"未找到 Data-{normalize_region(region)}/PO.txt"
+    return [], tpl_name or "内置NZ_PO查询", "；".join(errors) if errors else "PO 查询无数据"
 
 
 def _build_channel_aggregate_sql(channel_filters: list[str]) -> str:
@@ -501,9 +559,10 @@ def _parse_po_rows(rows: list[dict]) -> tuple[list[dict], dict[str, int]]:
         "skipped_no_sku": 0,
         "skipped_no_qty": 0,
         "zero_volume": 0,
+        "volume_fallback_qty": 0,
     }
     for row in rows:
-        if _po_row_has_checkin(row):
+        if _po_strict_checkin() and _po_row_has_checkin(row):
             stats["skipped_checkin"] += 1
             continue
         sku = str(_pick_fuzzy(row, PO_SKU_KEYS) or "").strip()
@@ -519,8 +578,14 @@ def _parse_po_rows(rows: list[dict]) -> tuple[list[dict], dict[str, int]]:
             ch = _channel_from_sku(sku)
         island = _island_from_po_row(row)
         m3 = _row_line_volume_m3(row, qty)
-        if m3 <= 0:
+        if m3 > 0:
+            containers = _m3_to_containers(m3)
+        else:
             stats["zero_volume"] += 1
+            stats["volume_fallback_qty"] += 1
+            # 体积未维护时先用件数占位，确保在途列有数（设 WAREHOUSE_PO_STRICT_CHECKIN=1 可恢复严格规则）
+            containers = qty
+            m3 = qty * CONTAINER_VOLUME_M3
         lines.append(
             {
                 "sku": sku,
@@ -528,7 +593,7 @@ def _parse_po_rows(rows: list[dict]) -> tuple[list[dict], dict[str, int]]:
                 "island": island,
                 "quantity": qty,
                 "volume_m3": m3,
-                "volume_containers": _m3_to_containers(m3),
+                "volume_containers": containers,
             }
         )
     return lines, stats
@@ -551,7 +616,9 @@ def _po_stats_message(stats: dict[str, int], path: Path | None) -> str | None:
         parts.append(f"无 SKU 跳过 {stats['skipped_no_sku']}")
     if stats.get("skipped_no_qty"):
         parts.append(f"数量≤0 跳过 {stats['skipped_no_qty']}")
-    if stats.get("zero_volume"):
+    if stats.get("volume_fallback_qty"):
+        parts.append(f"无体积字段 {stats['volume_fallback_qty']} 行已按件数暂代柜数")
+    elif stats.get("zero_volume"):
         parts.append(f"在途 {kept} 行但 VolumeM3/VolumeWithBox 为 0 有 {stats['zero_volume']} 行")
     if kept <= 0 and stats.get("skipped_checkin") == raw:
         parts.append("全部行都有 CheckinDate：若仍在海上，请改 SQL 只导出未到港行，或核对柜 ActualArrivingDate")
@@ -571,34 +638,26 @@ def load_po_lines(region: str | None = None) -> tuple[list[dict], str | None, Pa
         "data_source": "none",
         "template": None,
     }
-    path, csv_rows = _read_region_csv(region, PO_FILE_STEMS)
     lines: list[dict] = []
     stats = dict(empty_stats)
-
-    if csv_rows:
-        lines, stats = _parse_po_rows(csv_rows)
-        stats["data_source"] = "po_csv"
-        stats["template"] = None
-
-    need_live_sql = (
-        not csv_rows
-        or not lines
-        or (
-            int(stats.get("raw_rows") or 0) > 0
-            and int(stats.get("skipped_checkin") or 0) >= int(stats.get("raw_rows") or 0)
-        )
-    )
+    path = None
     sql_err = None
     sql_rows: list[dict] = []
-    if need_live_sql:
+
+    if pyodbc is not None:
         sql_rows, tpl_name, sql_err = _fetch_po_rows_from_template(region)
         if sql_rows:
             lines, stats = _parse_po_rows(sql_rows)
             stats["data_source"] = "po_database"
             stats["template"] = tpl_name
-            cached = _write_po_csv_cache(region, sql_rows)
-            if cached:
-                path = cached
+            path = _write_po_csv_cache(region, sql_rows)
+
+    if not lines:
+        path, csv_rows = _read_region_csv(region, PO_FILE_STEMS)
+        if csv_rows:
+            lines, stats = _parse_po_rows(csv_rows)
+            stats["data_source"] = "po_csv"
+            stats["template"] = None
 
     if not lines:
         diag = _po_stats_message(stats, path) if int(stats.get("raw_rows") or 0) > 0 else None

@@ -1,4 +1,5 @@
 import csv
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -32,7 +33,8 @@ class WarehousePoTest(unittest.TestCase):
 
         checked_in = dict(region_rows[0])
         checked_in["CheckinDate"] = "2026-04-01"
-        self.assertEqual(wv._parse_po_rows([checked_in])[0], [])
+        with mock.patch.object(wv, "_po_strict_checkin", return_value=True):
+            self.assertEqual(wv._parse_po_rows([checked_in])[0], [])
 
         stats = {"raw_rows": 1, "skipped_checkin": 0, "skipped_no_sku": 0, "skipped_no_qty": 0, "zero_volume": 0}
         with mock.patch.object(
