@@ -34,6 +34,8 @@ INNER JOIN dbo.Products p ON pol.ProductId = p.Id
 LEFT JOIN dbo.Containers c ON c.PurchaseOrderId = po.Id
 WHERE (@SkuFilter = '' OR p.Sku LIKE @SkuFilter + '%')
   AND pol.QuantityOrdered > 0
+  -- 在途：未到港（看板会再排除有 CheckinDate 的行，这里建议 SQL 先筛一遍）
+  AND (c.ActualArrivingDate IS NULL OR c.Id IS NULL)
   -- 若只要「在途」、排除已入库，请按你们 PO 状态字段取消注释，例如：
   -- AND po.Status IN ('Shipped', 'InTransit')
 ORDER BY po.POPlacedOnUtc DESC, p.Sku;

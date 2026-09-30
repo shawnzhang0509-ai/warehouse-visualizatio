@@ -13,7 +13,7 @@ class WarehousePoTest(unittest.TestCase):
             {"Sku": "271-001", "Quantity": 10, "VolumeM3": 69.0},
             {"Sku": "155-002", "Quantity": 5, "VolumeWithBox": 13.8},
         ]
-        lines = wv._parse_po_rows(rows)
+        lines, _stats = wv._parse_po_rows(rows)
         self.assertEqual(len(lines), 2)
         self.assertAlmostEqual(lines[0]["volume_containers"], 1.0, places=2)
         self.assertEqual(lines[0]["channel"], "271")
@@ -26,19 +26,24 @@ class WarehousePoTest(unittest.TestCase):
                 "Region": "南岛",
             },
         ]
-        rlines = wv._parse_po_rows(region_rows)
+        rlines, _ = wv._parse_po_rows(region_rows)
         self.assertEqual(rlines[0]["island"], "南岛")
         self.assertAlmostEqual(rlines[0]["volume_containers"], 1.0, places=2)
 
         checked_in = dict(region_rows[0])
         checked_in["CheckinDate"] = "2026-04-01"
-        self.assertEqual(wv._parse_po_rows([checked_in]), [])
+        self.assertEqual(wv._parse_po_rows([checked_in])[0], [])
 
-        with mock.patch.object(wv, "load_po_lines", return_value=(rlines, None, Path("po.csv"))):
+        stats = {"raw_rows": 1, "skipped_checkin": 0, "skipped_no_sku": 0, "skipped_no_qty": 0, "zero_volume": 0}
+        with mock.patch.object(
+            wv, "load_po_lines", return_value=(rlines, None, Path("po.csv"), stats),
+        ):
             po_report = wv.build_po_report("NZ")
         self.assertEqual(po_report["island_totals"]["南岛"], 1.0)
 
-        with mock.patch.object(wv, "load_po_lines", return_value=(lines, None, Path("po.csv"))):
+        with mock.patch.object(
+            wv, "load_po_lines", return_value=(lines, None, Path("po.csv"), stats),
+        ):
             po_report = wv.build_po_report("NZ")
         self.assertAlmostEqual(po_report["total_po_containers"], 2.0, places=2)
 

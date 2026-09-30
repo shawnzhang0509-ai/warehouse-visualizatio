@@ -47,6 +47,13 @@ PO_CHECKIN_KEYS = [
     "checkindate", "check_in_date", "actualarrivingdate", "actual_arriving_date",
     "arrivaldate", "arriveddate", "receiveddate",
 ]
+PO_PORT_KEYS = ["shippedtoportid", "shipped_to_port_id", "portid", "shippedtoport"]
+NZ_SOUTH_PORT_ID = "3b9ff26b-4ec0-44c6-92ac-ee9804272426"
+NZ_NORTH_PORT_ID = "646a2216-87c2-4bc6-8469-fdbd90bb2d84"
+PORT_ID_TO_ISLAND = {
+    NZ_SOUTH_PORT_ID: "南岛",
+    NZ_NORTH_PORT_ID: "北岛",
+}
 ISLAND_ORDER = ("北岛", "南岛")
 ISLAND_TRANSIT_LABEL = {
     "北岛": "北岛总在途",
@@ -255,16 +262,47 @@ def _warehouse_island(name: str) -> str | None:
     return None
 
 
-def _po_row_has_checkin(row: dict) -> bool:
-    val = _pick_fuzzy(row, PO_CHECKIN_KEYS)
-    if val is None:
+def _row_checkin_raw(row: dict):
+    for key in ("CheckinDate", "CheckInDate", "ActualArrivingDate"):
+        if key in row and row[key] is not None:
+            return row[key]
+    return _pick_fuzzy(row, PO_CHECKIN_KEYS)
+
+
+def _looks_like_checkin_date(text: str) -> bool:
+    s = str(text or "").strip()
+    if not s:
         return False
-    s = str(val).strip()
-    if not s or s.lower() in ("null", "none", "nat", "n/a", "na"):
+    low = s.lower()
+    if low in ("null", "none", "nat", "n/a", "na", "#n/a", "-", "—"):
         return False
-    if s.startswith("1900-01-01") or s.startswith("0001-01-01"):
+    if low.startswith(("1900-01-01", "0001-01-01", "1753-01-01")):
+        return False
+    if low in ("0", "0.0", "00:00:00", "00:00:00.000"):
+        return False
+    # 仅时间、无日期 → 不算已入库
+    if len(s) <= 12 and ":" in s and "-" not in s and "/" not in s:
         return False
     return True
+
+
+def _po_row_has_checkin(row: dict) -> bool:
+    val = _row_checkin_raw(row)
+    if val is None:
+        return False
+    return _looks_like_checkin_date(str(val))
+
+
+def _island_from_po_row(row: dict) -> str:
+    isl = _normalize_po_island(_pick_fuzzy(row, PO_REGION_KEYS))
+    if isl:
+        return isl
+    port = str(_pick_fuzzy(row, PO_PORT_KEYS) or "").strip().lower()
+    port = port.replace("{", "").replace("}", "")
+    for pid, name in PORT_ID_TO_ISLAND.items():
+        if pid.lower() in port or port in pid.lower():
+            return name
+    return ""
 
 
 def _row_get(row, key, default=None):
@@ -363,23 +401,35 @@ def _row_line_volume_m3(row: dict, qty: float) -> float:
     return 0.0
 
 
-def _parse_po_rows(rows: list[dict]) -> list[dict]:
-    """仅保留尚未 check-in 的行（无 CheckinDate），在途体积只按南北岛汇总，不按仓库。"""
-    lines = []
+def _parse_po_rows(rows: list[dict]) -> tuple[list[dict], dict[str, int]]:
+    """仅保留尚未 check-in 的行（无有效 CheckinDate），在途体积只按南北岛汇总。"""
+    lines: list[dict] = []
+    stats = {
+        "raw_rows": len(rows),
+        "skipped_checkin": 0,
+        "skipped_no_sku": 0,
+        "skipped_no_qty": 0,
+        "zero_volume": 0,
+    }
     for row in rows:
         if _po_row_has_checkin(row):
+            stats["skipped_checkin"] += 1
             continue
         sku = str(_pick_fuzzy(row, PO_SKU_KEYS) or "").strip()
         if not sku:
+            stats["skipped_no_sku"] += 1
             continue
         qty = _float_cell(_pick_fuzzy(row, PO_QTY_KEYS), 0.0)
         if qty <= 0:
+            stats["skipped_no_qty"] += 1
             continue
         ch = str(_pick_fuzzy(row, PO_CHANNEL_KEYS) or "").strip().upper()
         if not ch:
             ch = _channel_from_sku(sku)
-        island = _normalize_po_island(_pick_fuzzy(row, PO_REGION_KEYS))
+        island = _island_from_po_row(row)
         m3 = _row_line_volume_m3(row, qty)
+        if m3 <= 0:
+            stats["zero_volume"] += 1
         lines.append(
             {
                 "sku": sku,
@@ -390,17 +440,46 @@ def _parse_po_rows(rows: list[dict]) -> list[dict]:
                 "volume_containers": _m3_to_containers(m3),
             }
         )
-    return lines
+    return lines, stats
 
 
-def load_po_lines(region: str | None = None) -> tuple[list[dict], str | None, Path | None]:
+def _po_stats_message(stats: dict[str, int], path: Path | None) -> str | None:
+    raw = int(stats.get("raw_rows") or 0)
+    kept = raw - int(stats.get("skipped_checkin") or 0) - int(stats.get("skipped_no_sku") or 0) - int(
+        stats.get("skipped_no_qty") or 0
+    )
+    if raw <= 0:
+        return None
+    parts = [f"po.csv 共 {raw} 行"]
+    if stats.get("skipped_checkin"):
+        parts.append(f"已 Check-in 跳过 {stats['skipped_checkin']}")
+    if stats.get("skipped_no_sku"):
+        parts.append(f"无 SKU 跳过 {stats['skipped_no_sku']}")
+    if stats.get("skipped_no_qty"):
+        parts.append(f"数量≤0 跳过 {stats['skipped_no_qty']}")
+    if stats.get("zero_volume"):
+        parts.append(f"在途 {kept} 行但 VolumeM3/VolumeWithBox 为 0 有 {stats['zero_volume']} 行")
+    if kept <= 0 and stats.get("skipped_checkin") == raw:
+        parts.append("全部行都有 CheckinDate：若仍在海上，请改 SQL 只导出未到港行，或核对柜 ActualArrivingDate")
+    if path:
+        parts.append(f"文件 {path.name}")
+    return "；".join(parts)
+
+
+def load_po_lines(region: str | None = None) -> tuple[list[dict], str | None, Path | None, dict[str, int]]:
     region = normalize_region(region)
     path, rows = _read_region_csv(region, PO_FILE_STEMS)
+    empty_stats = {"raw_rows": 0, "skipped_checkin": 0, "skipped_no_sku": 0, "skipped_no_qty": 0, "zero_volume": 0}
     if path is None:
-        return [], "未找到 Output-{0}/po.csv：请在 Data-{0} 放 PO.txt 并执行 SQL 导出".format(region), None
+        return [], "未找到 Output-{0}/po.csv：请在 Data-{0} 放 PO.txt 并执行 SQL 导出".format(region), None, empty_stats
     if not rows:
-        return [], f"po.csv 为空：{path.name}", path
-    return _parse_po_rows(rows), None, path
+        return [], f"po.csv 为空（仅有表头？）：{path}", path, empty_stats
+    lines, stats = _parse_po_rows(rows)
+    diag = _po_stats_message(stats, path)
+    err = None
+    if not lines and diag:
+        err = diag
+    return lines, err, path, stats
 
 
 def _aggregate_po(lines: list[dict]) -> tuple[dict[str, float], dict[str, float]]:
@@ -423,10 +502,12 @@ def build_po_report(
 ) -> dict[str, Any]:
     region = normalize_region(region)
     channels = [c.strip().upper() for c in (channel_filters or []) if c and str(c).strip()]
-    lines, err, path = load_po_lines(region)
+    lines, err, path, stats = load_po_lines(region)
     if channels:
         lines = [ln for ln in lines if (ln.get("channel") or "").upper() in channels]
     by_ch, by_island = _aggregate_po(lines)
+    if not lines and not err:
+        err = _po_stats_message(stats, path)
     total = sum(by_ch.values())
     ch_rows = [
         {"channel": k, "po_containers": round(v, 2)}
@@ -446,6 +527,7 @@ def build_po_report(
         "path": str(path) if path else None,
         "error": err,
         "line_count": len(lines),
+        "parse_stats": stats,
         "total_po_containers": round(total, 2),
         "total_po_m3": round(_containers_to_m3(total), 1),
         "channels": ch_rows,
@@ -683,14 +765,17 @@ def build_volume_report(
         hint = hint or f"数据库不可用，已用 data.csv 快照：{err}"
     elif source == "stock_volume_csv":
         hint = hint or "在库体积来自 Output 下 stock_volume.csv（由 Data 目录 stock_volume.txt 导出）"
+    po_err = po_report.get("error")
     if po_report.get("path"):
         hint = (hint or "") + (
             f"；在途 PO {po_report.get('total_po_containers', 0)} 柜"
-            f"（无 CheckinDate 的 {po_report.get('line_count', 0)} 行）"
+            f"（有效行 {po_report.get('line_count', 0)}）"
             f" 北岛 {po_by_island.get('北岛', 0)} / 南岛 {po_by_island.get('南岛', 0)} 柜"
         )
-    elif po_report.get("error") and not channels:
-        hint = (hint or "") + f"；{po_report.get('error')}"
+        if po_err:
+            hint += f"；{po_err}"
+    elif po_err and not channels:
+        hint = (hint or "") + f"；{po_err}"
 
     return {
         "status": "success" if volumes or source == "csv" else "empty",
