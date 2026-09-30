@@ -405,6 +405,11 @@ def execute_region(region_key, region_cfg, log=None, on_template_start=None, on_
                         )
                     if paths["standard_name"] == "stock" and result["row_count"] < 10:
                         _log(f"[{region_key}] ⚠ 警告：stock 只有 {result['row_count']} 行，请检查库存 SQL。")
+                    if paths["standard_name"] == "po" and result["row_count"] == 0:
+                        _log(
+                            f"[{region_key}] ⚠ po.csv 0 行：SSMS 有数时检查 PO.txt 是否与 SSMS 同一条 SQL"
+                            f"（LIKE 要带 %），或直接在容积率页点刷新（会尝试执行 PO.txt）。"
+                        )
                 else:
                     conn.commit()
                     outputs.append(

@@ -35,7 +35,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.34"
+APP_VERSION = "1.9.36"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -972,7 +972,7 @@ class PanelApp:
         ttk.Button(vol_toolbar, text="应用筛选", command=self._refresh_volume_tab).pack(side=tk.LEFT)
         self._volume_status_lbl = tk.Label(
             vol_tab,
-            text="在库：ERP 或 stock_volume.csv；在途：Output 下 po.csv（Data-NZ/PO.txt 导出）",
+            text="在库：ERP；在途：po.csv 或刷新时自动执行 Data-NZ/PO.txt（与 SSMS 同库）",
             bg="white", fg=C_MUTED, font=("Segoe UI", 9),
         )
         self._volume_status_lbl.pack(anchor="w", padx=8, pady=(0, 4))

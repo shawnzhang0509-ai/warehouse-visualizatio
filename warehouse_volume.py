@@ -328,6 +328,97 @@ def _run_query(region: str, sql: str, params=None):
             conn.close()
 
 
+def _run_query_dicts(region: str, sql: str, params=None) -> list[dict]:
+    """执行整段 SQL（可含 DECLARE），返回列名→值的字典列表。"""
+    if pyodbc is None:
+        raise RuntimeError("未安装 pyodbc，无法查询 PO")
+    conn = None
+    cur = None
+    try:
+        conn = pyodbc.connect(_connection_string(region), timeout=120)
+        cur = conn.cursor()
+        cur.execute(sql, params or [])
+        if not cur.description:
+            return []
+        columns = [str(col[0]) for col in cur.description]
+        out: list[dict] = []
+        for raw in cur.fetchall():
+            row = {}
+            for idx, name in enumerate(columns):
+                val = raw[idx]
+                if val is not None and hasattr(val, "isoformat"):
+                    val = val.isoformat(sep=" ", timespec="seconds")
+                row[name] = val
+            out.append(row)
+        return out
+    finally:
+        if cur:
+            cur.close()
+        if conn:
+            conn.close()
+
+
+def _region_template_dir(region: str) -> Path:
+    cfg = load_runner_config()
+    section = (cfg.get("regions") or {}).get(normalize_region(region)) or {}
+    rel = (section.get("template_dir") or f"Data-{normalize_region(region)}").strip()
+    path = Path(rel)
+    if not path.is_absolute():
+        path = ROOT_DIR / path
+    return path.resolve()
+
+
+def _read_po_sql_template(region: str) -> tuple[str | None, str | None]:
+    template_dir = _region_template_dir(region)
+    if not template_dir.is_dir():
+        return None, None
+    candidates = []
+    for file_path in template_dir.iterdir():
+        if not file_path.is_file():
+            continue
+        low = file_path.name.lower()
+        if low in ("po.txt", "po.sql") or low == "purchase_orders.txt":
+            candidates.append(file_path)
+    candidates.sort(key=lambda p: (0 if p.suffix.lower() == ".sql" else 1, p.name.lower()))
+    for file_path in candidates:
+        if ".example." in file_path.name.lower():
+            continue
+        for encoding in ("utf-8-sig", "utf-8", "gbk", "latin-1"):
+            try:
+                text = file_path.read_text(encoding=encoding).strip()
+                if text:
+                    return text, file_path.name
+            except Exception:
+                continue
+    return None, None
+
+
+def _write_po_csv_cache(region: str, rows: list[dict]) -> Path | None:
+    if not rows or os.getenv("WAREHOUSE_PO_NO_CACHE", "").strip() in ("1", "true", "yes"):
+        return None
+    out_dir = _region_output_dir(region)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    path = out_dir / "po.csv"
+    columns = list(rows[0].keys())
+    with path.open("w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in columns})
+    return path
+
+
+def _fetch_po_rows_from_template(region: str) -> tuple[list[dict], str | None, str | None]:
+    sql, tpl_name = _read_po_sql_template(region)
+    if not sql:
+        return [], None, "未找到 Data-{0}/PO.txt（请从 PO.example.txt 复制）".format(normalize_region(region))
+    try:
+        rows = _run_query_dicts(region, sql)
+        return rows, tpl_name, None
+    except Exception as exc:
+        return [], tpl_name, str(exc)
+
+
 def _build_channel_aggregate_sql(channel_filters: list[str]) -> str:
     placeholders = ",".join("?" for _ in channel_filters)
     return f"""
@@ -450,7 +541,10 @@ def _po_stats_message(stats: dict[str, int], path: Path | None) -> str | None:
     )
     if raw <= 0:
         return None
-    parts = [f"po.csv 共 {raw} 行"]
+    src = stats.get("data_source") or "po_csv"
+    label = "PO.txt 直查" if src == "po_database" else "po.csv"
+    tpl = stats.get("template")
+    parts = [f"{label} 共 {raw} 行" + (f"（{tpl}）" if tpl else "")]
     if stats.get("skipped_checkin"):
         parts.append(f"已 Check-in 跳过 {stats['skipped_checkin']}")
     if stats.get("skipped_no_sku"):
@@ -468,17 +562,62 @@ def _po_stats_message(stats: dict[str, int], path: Path | None) -> str | None:
 
 def load_po_lines(region: str | None = None) -> tuple[list[dict], str | None, Path | None, dict[str, int]]:
     region = normalize_region(region)
-    path, rows = _read_region_csv(region, PO_FILE_STEMS)
-    empty_stats = {"raw_rows": 0, "skipped_checkin": 0, "skipped_no_sku": 0, "skipped_no_qty": 0, "zero_volume": 0}
-    if path is None:
-        return [], "未找到 Output-{0}/po.csv：请在 Data-{0} 放 PO.txt 并执行 SQL 导出".format(region), None, empty_stats
-    if not rows:
-        return [], f"po.csv 为空（仅有表头？）：{path}", path, empty_stats
-    lines, stats = _parse_po_rows(rows)
-    diag = _po_stats_message(stats, path)
-    err = None
-    if not lines and diag:
-        err = diag
+    empty_stats: dict[str, Any] = {
+        "raw_rows": 0,
+        "skipped_checkin": 0,
+        "skipped_no_sku": 0,
+        "skipped_no_qty": 0,
+        "zero_volume": 0,
+        "data_source": "none",
+        "template": None,
+    }
+    path, csv_rows = _read_region_csv(region, PO_FILE_STEMS)
+    lines: list[dict] = []
+    stats = dict(empty_stats)
+
+    if csv_rows:
+        lines, stats = _parse_po_rows(csv_rows)
+        stats["data_source"] = "po_csv"
+        stats["template"] = None
+
+    need_live_sql = (
+        not csv_rows
+        or not lines
+        or (
+            int(stats.get("raw_rows") or 0) > 0
+            and int(stats.get("skipped_checkin") or 0) >= int(stats.get("raw_rows") or 0)
+        )
+    )
+    sql_err = None
+    sql_rows: list[dict] = []
+    if need_live_sql:
+        sql_rows, tpl_name, sql_err = _fetch_po_rows_from_template(region)
+        if sql_rows:
+            lines, stats = _parse_po_rows(sql_rows)
+            stats["data_source"] = "po_database"
+            stats["template"] = tpl_name
+            cached = _write_po_csv_cache(region, sql_rows)
+            if cached:
+                path = cached
+
+    if not lines:
+        diag = _po_stats_message(stats, path) if int(stats.get("raw_rows") or 0) > 0 else None
+        err_parts = []
+        if path is None and not sql_rows:
+            err_parts.append(
+                f"未找到 Output-{region}/po.csv，且 Data-{region}/PO.txt 未返回数据"
+            )
+        if sql_err:
+            err_parts.append(f"PO.txt 执行失败：{sql_err}")
+        if diag:
+            err_parts.append(diag)
+        if not err_parts:
+            err_parts.append(
+                "无在途行：请确认 SQL 含 VolumeM3 或 VolumeWithBox，且 CheckinDate 为空"
+            )
+        return [], "；".join(err_parts), path, stats
+
+    err = _po_stats_message(stats, path) if int(stats.get("zero_volume") or 0) else None
     return lines, err, path, stats
 
 
@@ -523,7 +662,7 @@ def build_po_report(
     ]
     return {
         "region": region,
-        "source": "po_csv" if path else "none",
+        "source": stats.get("data_source") or ("po_csv" if path else "none"),
         "path": str(path) if path else None,
         "error": err,
         "line_count": len(lines),
