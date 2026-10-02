@@ -408,14 +408,15 @@ def _read_po_sql_template(region: str) -> tuple[str | None, str | None]:
     template_dir = _region_template_dir(region)
     if not template_dir.is_dir():
         return None, None
+    preferred = ("po.sql", "po.txt", "purchase_orders.sql", "purchase_orders.txt")
     candidates = []
     for file_path in template_dir.iterdir():
         if not file_path.is_file():
             continue
-        low = file_path.name.lower()
-        if low in ("po.txt", "po.sql") or low == "purchase_orders.txt":
+        if file_path.name.lower() in preferred:
             candidates.append(file_path)
-    candidates.sort(key=lambda p: (0 if p.suffix.lower() == ".sql" else 1, p.name.lower()))
+    order = {name: i for i, name in enumerate(preferred)}
+    candidates.sort(key=lambda p: order.get(p.name.lower(), 99))
     for file_path in candidates:
         if ".example." in file_path.name.lower():
             continue

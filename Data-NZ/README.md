@@ -12,7 +12,7 @@
 | **storage.sql** | **storage.csv**（**店面后仓** `%Storage%`，勿覆盖 display） |
 | **on_hold.txt** / on_hold.sql | **on_hold.csv**（`StockOnHoldStatus` 冻结库存） |
 | **parts.txt** / parts.sql | **parts.csv**（配件库存） |
-| **PO.txt** / po.sql | **po.csv**（在途采购，容积率页按渠道汇总体积） |
+| **po.sql**（仓库内置，优先） / **PO.txt** | **po.csv**（在途采购；**.sql 优先于 .txt**，同名都输出 po.csv） |
 | **stock_volume.txt** | **stock_volume.csv**（中心仓占用体积明细，容积率页备用） |
 
 `on_hold.txt` / `parts.txt` / **PO.txt** / **stock_volume.txt** **只放你本机**（已加入 `.gitignore`）。仓库里仅有 `*.example.txt` 作参考。
@@ -130,5 +130,12 @@
 ## 注意
 
 - 不要放 **`stock.txt`**：会和 `product_stock_price.sql` 抢 **stock.csv**。容积率备用导出请用 **`stock_volume.txt`** → `stock_volume.csv`。
-- **在途 PO**：`PO.txt` 导出 `po.csv` 后，看板「仓库容积率」左侧会显示 **在库 / 在途 / 合计**（渠道为 SKU 前三位）。`po.csv` 需含 `Sku`、`Quantity`，以及 `VolumeM3` 或 `VolumeWithBox`。
+- **在途 PO**：`PO.txt` 导出 `po.csv` 后，看板「仓库容积率」左侧会显示 **在库 / 在途 / 合计**（渠道为 SKU 前三位）。`po.csv` 需含 `Sku`、`QuantityOrdered`，以及 `VolumeM3` 或 `VolumeWithBox`、`Region`（北岛/南岛）。
+
+### 在途 PO 跑不出数据？
+
+1. **SSMS 有数 ≠ 看板有数**：看板只读 `Output-NZ/po.csv`，必须在 **app.py 执行器**里跑完 `PO.txt` 生成该文件。
+2. **`LIKE '996'` 没有 `%`**：在 SQL Server 里几乎只匹配 SKU 完全等于 `996` 的一条；系列要用 `LIKE '996%'` 或模板里的 `@SkuFilter + '%'`。
+3. **`CheckinDate`（ActualArrivingDate）有值**：看板视为已入库，不算在途。SQL 请加 `AND (c.ActualArrivingDate IS NULL)`，并导出 `VolumeM3` 列。
+4. 刷新容积率页后看状态栏：`po.csv 共 x 行；已 Check-in 跳过 y` 可直接定位问题。
 - 以 `example_` 开头的文件会自动跳过，不执行。
