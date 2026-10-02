@@ -22,3 +22,18 @@ def fetch_primary_result_set(cursor):
     if saw_columns:
         return columns, rows, True
     return [], [], False
+
+
+def drain_cursor(cursor):
+    """消费剩余结果集，避免下一次 execute 读到脏状态。"""
+    try:
+        while True:
+            try:
+                if cursor.description:
+                    cursor.fetchall()
+            except Exception:
+                pass
+            if not cursor.nextset():
+                break
+    except Exception:
+        pass

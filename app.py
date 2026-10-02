@@ -63,7 +63,8 @@ from runner_config import (
     load_runner_config,
     save_runner_config,
 )
-from sql_batch import fetch_primary_result_set
+from po_probe import build_po_row_count_batch, parse_sku_filter, warn_po_sql_patterns
+from sql_batch import drain_cursor, fetch_primary_result_set
 
 ROOT_DIR = Path(__file__).parent
 
@@ -147,6 +148,7 @@ def _odbc_conn_str_from_uri(uri):
         f"PWD={parsed['password']};"
         "Encrypt=yes;"
         "TrustServerCertificate=no;"
+        "MARS_Connection=yes;"
         "Connection Timeout=30;"
     )
 
@@ -283,7 +285,42 @@ def _remove_legacy_xlsx(csv_path, log=None):
         pass
 
 
-def _log_po_zero_diagnostic(cursor, region_key, log_fn):
+def _run_template_fresh_connection(connection_uri, sql):
+    conn = pyodbc.connect(_odbc_conn_str_from_uri(connection_uri), timeout=120)
+    try:
+        cur = conn.cursor()
+        result = _run_single_template(cur, sql)
+        drain_cursor(cur)
+        return result
+    finally:
+        conn.close()
+
+
+def _probe_po_template_row_count(cursor, template_sql):
+    count_sql = build_po_row_count_batch(template_sql)
+    if not count_sql:
+        return None
+    cursor.execute(count_sql)
+    row = cursor.fetchone()
+    drain_cursor(cursor)
+    if not row:
+        return None
+    return int(row[0])
+
+
+def _log_po_zero_diagnostic(cursor, region_key, log_fn, template_sql=None):
+    if template_sql:
+        sku = parse_sku_filter(template_sql)
+        if sku is not None:
+            log_fn(f"[{region_key}] PO 诊断 · 模板 @SkuFilter = '{sku}'")
+        for msg in warn_po_sql_patterns(template_sql):
+            log_fn(f"[{region_key}] PO 诊断 · {msg}")
+        try:
+            probe = _probe_po_template_row_count(cursor, template_sql)
+            if probe is not None:
+                log_fn(f"[{region_key}] PO 诊断 · 按本机 PO 脚本 COUNT = {probe}")
+        except Exception as exc:
+            log_fn(f"[{region_key}] PO 诊断 · 本机 PO 脚本 COUNT 失败：{exc}")
     probes = (
         ("POL QuantityOrdered>0", "SELECT COUNT(*) FROM dbo.PurchaseOrderLines WHERE QuantityOrdered > 0"),
         ("Sku LIKE 996%", "SELECT COUNT(*) FROM dbo.Products WHERE Sku LIKE '996%'"),
@@ -319,6 +356,7 @@ def _log_po_zero_diagnostic(cursor, region_key, log_fn):
 def _run_single_template(cursor, sql):
     cursor.execute(sql)
     columns, rows, has_result_set = fetch_primary_result_set(cursor)
+    drain_cursor(cursor)
     if not has_result_set:
         return {
             "columns": [],
@@ -445,7 +483,29 @@ def execute_region(region_key, region_cfg, log=None, on_template_start=None, on_
                             "若 SSMS 同脚本有数：查 WHERE 是否含 ActualArrivingDate IS NULL（已到港会全滤掉）、"
                             "或 Sku LIKE 是否写成 '996' 缺 %。"
                         )
-                        _log_po_zero_diagnostic(cursor, region_key, _log)
+                        _log_po_zero_diagnostic(
+                            cursor, region_key, _log, template_sql=tpl["sql"],
+                        )
+                        try:
+                            probe_rows = _probe_po_template_row_count(cursor, tpl["sql"])
+                        except Exception:
+                            probe_rows = None
+                        if probe_rows and probe_rows > 0:
+                            _log(
+                                f"[{region_key}] PO：脚本 COUNT={probe_rows} 但首次导出 0 行，"
+                                "正在用独立连接重试…"
+                            )
+                            retry = _run_template_fresh_connection(
+                                region_cfg.get("connection_uri", ""), tpl["sql"],
+                            )
+                            if retry.get("has_result_set") and retry["row_count"] > 0:
+                                _write_csv(paths["csv"], retry["columns"], retry["rows"])
+                                result = retry
+                                outputs[-1]["rows"] = retry["row_count"]
+                                _log(
+                                    f"[{region_key}] PO 已恢复：{tpl_name} -> {paths['csv']} "
+                                    f"({retry['row_count']} 行)"
+                                )
                 else:
                     conn.commit()
                     outputs.append(
