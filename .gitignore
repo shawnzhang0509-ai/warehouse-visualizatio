@@ -5,7 +5,6 @@ Data-NZ/on_hold.sql
 Data-NZ/parts.txt
 Data-NZ/parts.sql
 Data-NZ/PO.txt
-Data-NZ/po.sql
 Data-NZ/stock_volume.txt
 Data-AU/on_hold.txt
 Data-AU/on_hold.sql
@@ -27,3 +26,6 @@ Output-AU/*.xlsx
 Output-CA/latest/
 Output-CA/*.csv
 Output-CA/*.xlsx
+
+main1.py
+main2.py
