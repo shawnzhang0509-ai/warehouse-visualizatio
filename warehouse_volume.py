@@ -64,6 +64,8 @@ CONTAINER_VOLUME_M3 = 69.0
 
 # 无 PO.txt 时 NZ 默认直查（与 SSMS 常见写法一致，含体积列）
 NZ_DEFAULT_PO_SQL = """
+DECLARE @SkuFilter VARCHAR(20) = '';
+
 SELECT
     po.Id AS PurchaseOrderId,
     po.PurchaseOrderCode,
@@ -87,7 +89,8 @@ FROM dbo.PurchaseOrders po
 INNER JOIN dbo.PurchaseOrderLines pol ON pol.PurchaseOrderId = po.Id
 INNER JOIN dbo.Products p ON pol.ProductId = p.Id
 LEFT JOIN dbo.Containers c ON c.PurchaseOrderId = po.Id
-WHERE pol.QuantityOrdered > 0
+WHERE (@SkuFilter = '' OR p.Sku LIKE @SkuFilter + '%')
+  AND pol.QuantityOrdered > 0
 ORDER BY po.POPlacedOnUtc DESC, p.Sku;
 """
 

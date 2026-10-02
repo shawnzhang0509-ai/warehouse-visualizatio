@@ -12,7 +12,7 @@
 | **storage.sql** | **storage.csv**（**店面后仓** `%Storage%`，勿覆盖 display） |
 | **on_hold.txt** / on_hold.sql | **on_hold.csv**（`StockOnHoldStatus` 冻结库存） |
 | **parts.txt** / parts.sql | **parts.csv**（配件库存） |
-| **po.sql**（仓库内置，优先） / **PO.txt** | **po.csv**（在途采购；**.sql 优先于 .txt**，同名都输出 po.csv） |
+| **PO.txt** / po.sql（本机） | **po.csv**（在途采购；**只改本机 SQL，仓库不再内置 po.sql**） |
 | **stock_volume.txt** | **stock_volume.csv**（中心仓占用体积明细，容积率页备用） |
 
 `on_hold.txt` / `parts.txt` / **PO.txt** / **stock_volume.txt** **只放你本机**（已加入 `.gitignore`）。仓库里仅有 `*.example.txt` 作参考。
@@ -134,8 +134,8 @@
 
 ### 在途 PO 跑不出数据？
 
-1. **SSMS 有数 ≠ 看板有数**：看板只读 `Output-NZ/po.csv`，必须在 **app.py 执行器**里跑完 `PO.txt` 生成该文件。
-2. **`LIKE '996'` 没有 `%`**：在 SQL Server 里几乎只匹配 SKU 完全等于 `996` 的一条；系列要用 `LIKE '996%'` 或模板里的 `@SkuFilter + '%'`。
-3. **`CheckinDate`（ActualArrivingDate）有值**：看板视为已入库，不算在途。SQL 请加 `AND (c.ActualArrivingDate IS NULL)`，并导出 `VolumeM3` 列。
-4. 刷新容积率页后看状态栏：`po.csv 共 x 行；已 Check-in 跳过 y` 可直接定位问题。
+1. **SSMS 有数 ≠ 看板有数**：看板读 `Output-NZ/po.csv`（由本机 **PO.txt** 经 **app.py** 导出）。
+2. **程序已支持 `DECLARE @…` + `SELECT` 批处理**（v1.9.39+），无需为执行器改 SQL 结构。
+3. **`LIKE '996'` 没有 `%`**：只匹配 SKU 恰好 `996`；系列用 `LIKE '996%'` 或 `@SkuFilter + '%'`。
+4. 容积率页刷新可看状态栏诊断；PO 导出 0 行时 app 日志有 **PO 诊断** 计数。
 - 以 `example_` 开头的文件会自动跳过，不执行。
