@@ -70,6 +70,7 @@ from po_probe import (
     warn_po_sql_patterns,
 )
 from sql_batch import drain_cursor, fetch_primary_result_set
+from sql_placeholders import apply_sql_placeholders, placeholder_context_for_region, placeholders_in_sql
 
 ROOT_DIR = Path(__file__).parent
 
@@ -290,6 +291,20 @@ def _remove_legacy_xlsx(csv_path, log=None):
         pass
 
 
+def _prepare_template_sql(sql_text, region_key, region_cfg, log_fn):
+    ctx = placeholder_context_for_region(region_key, region_cfg)
+    prepared, notes = apply_sql_placeholders(sql_text, ctx)
+    if placeholders_in_sql(sql_text):
+        if notes:
+            log_fn(f"[{region_key}] SQL 占位符：{'；'.join(notes)}")
+        if placeholders_in_sql(prepared):
+            log_fn(
+                f"[{region_key}] ⚠ SQL 仍含 {{sku}}：请在 region_runner_config 的该地区加 "
+                f'"po_sku_prefix": "130"（前三位），或设环境变量 PO_SKU_PREFIX=130'
+            )
+    return prepared
+
+
 def _run_template_fresh_connection(connection_uri, sql):
     conn = pyodbc.connect(_odbc_conn_str_from_uri(connection_uri), timeout=120)
     try:
@@ -499,11 +514,12 @@ def execute_region(region_key, region_cfg, log=None, on_template_start=None, on_
                 on_template_start(tpl_name)
             _log(f"[{region_key}] 执行模板：{tpl_name}")
             try:
+                sql_text = _prepare_template_sql(tpl["sql"], region_key, region_cfg, _log)
                 po_template = _standard_output_stem(tpl_name) == "po"
                 if po_template:
-                    result = _run_template_fresh_connection(conn_uri, tpl["sql"])
+                    result = _run_template_fresh_connection(conn_uri, sql_text)
                 else:
-                    result = _run_single_template(cursor, tpl["sql"])
+                    result = _run_single_template(cursor, sql_text)
                 if result["has_result_set"]:
                     paths = _output_paths(region_cfg.get("output_dir"), region_key, tpl_name)
                     po_fallback_note = None
@@ -514,7 +530,7 @@ def execute_region(region_key, region_cfg, log=None, on_template_start=None, on_
                             "COUNT 见下方诊断；容积率页在脚本 0 行时会自动改用内置 NZ 查询。"
                         )
                         _log_po_zero_diagnostic(
-                            cursor, region_key, _log, template_sql=tpl["sql"],
+                            cursor, region_key, _log, template_sql=sql_text,
                         )
                         if not _po_export_strict_only():
                             fb_sql = _embedded_po_sql_for_region(region_key)

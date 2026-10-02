@@ -24,6 +24,11 @@ def warn_po_sql_patterns(sql_text: str) -> list[str]:
         warnings.append(
             "WHERE 里用了别名 CheckinDate（SQL Server 不允许）；应写 c.ActualArrivingDate IS NULL"
         )
+    if re.search(r"\{sku\}", sql_text, re.I):
+        warnings.append(
+            "仍含 {sku} 占位符：本仓库需在配置 po_sku_prefix 或环境变量 PO_SKU_PREFIX 替换；"
+            "未替换时 SQL 会按字面量 {sku} 匹配，结果为 0 行"
+        )
     return warnings
 
 

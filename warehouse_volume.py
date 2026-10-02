@@ -24,6 +24,7 @@ except ImportError:
 from panel_data import _pick_fuzzy, _region_output_dir
 from runner_config import load_runner_config
 from sql_batch import fetch_primary_result_set
+from sql_placeholders import apply_sql_placeholders, placeholder_context_for_region
 
 ROOT_DIR = Path(__file__).resolve().parent
 PO_FILE_STEMS = ("po", "po_in_transit", "purchase_orders")
@@ -458,6 +459,7 @@ def _fetch_po_rows_from_template(region: str) -> tuple[list[dict], str | None, s
     sql, tpl_name = _read_po_sql_template(region)
     if sql:
         try:
+            sql, _ = apply_sql_placeholders(sql, placeholder_context_for_region(region))
             rows = _run_query_dicts(region, sql)
             if rows:
                 return rows, tpl_name, None
