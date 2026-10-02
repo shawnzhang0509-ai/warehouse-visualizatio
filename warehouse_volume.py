@@ -588,9 +588,9 @@ def _parse_po_rows(rows: list[dict]) -> tuple[list[dict], dict[str, int]]:
         else:
             stats["zero_volume"] += 1
             stats["volume_fallback_qty"] += 1
-            # 体积未维护时先用件数占位，确保在途列有数（设 WAREHOUSE_PO_STRICT_CHECKIN=1 可恢复严格规则）
-            containers = qty
-            m3 = qty * CONTAINER_VOLUME_M3
+            # 无 VolumeM3/VolumeWithBox 时：数量字段按 m³ 理解，再 ÷69 换算柜（与在库一致）
+            m3 = qty
+            containers = _m3_to_containers(m3)
         lines.append(
             {
                 "sku": sku,
@@ -622,7 +622,9 @@ def _po_stats_message(stats: dict[str, int], path: Path | None) -> str | None:
     if stats.get("skipped_no_qty"):
         parts.append(f"数量≤0 跳过 {stats['skipped_no_qty']}")
     if stats.get("volume_fallback_qty"):
-        parts.append(f"无体积字段 {stats['volume_fallback_qty']} 行已按件数暂代柜数")
+        parts.append(
+            f"无体积字段 {stats['volume_fallback_qty']} 行已按数量÷{int(CONTAINER_VOLUME_M3)} 换算柜"
+        )
     elif stats.get("zero_volume"):
         parts.append(f"在途 {kept} 行但 VolumeM3/VolumeWithBox 为 0 有 {stats['zero_volume']} 行")
     if kept <= 0 and stats.get("skipped_checkin") == raw:

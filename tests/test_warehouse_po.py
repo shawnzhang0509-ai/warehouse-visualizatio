@@ -31,6 +31,11 @@ class WarehousePoTest(unittest.TestCase):
         self.assertEqual(rlines[0]["island"], "南岛")
         self.assertAlmostEqual(rlines[0]["volume_containers"], 1.0, places=2)
 
+        qty_only = [{"Sku": "870-001", "QuantityOrdered": 690, "Region": "北岛"}]
+        qlines, qstats = wv._parse_po_rows(qty_only)
+        self.assertAlmostEqual(qlines[0]["volume_containers"], 10.0, places=2)
+        self.assertEqual(qstats["volume_fallback_qty"], 1)
+
         checked_in = dict(region_rows[0])
         checked_in["CheckinDate"] = "2026-04-01"
         with mock.patch.object(wv, "_po_strict_checkin", return_value=True):
