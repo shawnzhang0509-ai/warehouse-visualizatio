@@ -286,9 +286,11 @@ def _log_po_zero_diagnostic(cursor, region_key, log_fn):
     probes = (
         ("POL QuantityOrdered>0", "SELECT COUNT(*) FROM dbo.PurchaseOrderLines WHERE QuantityOrdered > 0"),
         ("Sku LIKE 996%", "SELECT COUNT(*) FROM dbo.Products WHERE Sku LIKE '996%'"),
-        ("PO+POL join", (
+        ("PO+POL+Products join", (
             "SELECT COUNT(*) FROM dbo.PurchaseOrders po "
-            "INNER JOIN dbo.PurchaseOrderLines pol ON pol.PurchaseOrderId = po.Id"
+            "INNER JOIN dbo.PurchaseOrderLines pol ON pol.PurchaseOrderId = po.Id "
+            "INNER JOIN dbo.Products p ON pol.ProductId = p.Id "
+            "WHERE pol.QuantityOrdered > 0"
         )),
     )
     for label, sql in probes:
@@ -301,17 +303,26 @@ def _log_po_zero_diagnostic(cursor, region_key, log_fn):
             log_fn(f"[{region_key}] PO 诊断 · {label} 失败：{exc}")
 
 
+def _cursor_to_result_set(cursor):
+    """DECLARE + SELECT 批处理时，第一个“结果集”常无列；跳到真正的 SELECT。"""
+    while cursor.description is None:
+        if not cursor.nextset():
+            return None
+    return cursor
+
+
 def _run_single_template(cursor, sql):
     cursor.execute(sql)
-    if not cursor.description:
+    active = _cursor_to_result_set(cursor)
+    if active is None:
         return {
             "columns": [],
             "rows": [],
             "row_count": max(cursor.rowcount, 0),
             "has_result_set": False,
         }
-    columns = [col[0] for col in cursor.description]
-    rows = cursor.fetchall()
+    columns = [col[0] for col in active.description]
+    rows = active.fetchall()
     return {
         "columns": columns,
         "rows": rows,

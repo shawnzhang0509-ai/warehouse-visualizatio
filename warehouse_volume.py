@@ -64,8 +64,6 @@ CONTAINER_VOLUME_M3 = 69.0
 
 # 无 PO.txt 时 NZ 默认直查（与 SSMS 常见写法一致，含体积列）
 NZ_DEFAULT_PO_SQL = """
-DECLARE @SkuFilter VARCHAR(20) = '';
-
 SELECT
     po.Id AS PurchaseOrderId,
     po.PurchaseOrderCode,
@@ -89,8 +87,7 @@ FROM dbo.PurchaseOrders po
 INNER JOIN dbo.PurchaseOrderLines pol ON pol.PurchaseOrderId = po.Id
 INNER JOIN dbo.Products p ON pol.ProductId = p.Id
 LEFT JOIN dbo.Containers c ON c.PurchaseOrderId = po.Id
-WHERE (@SkuFilter = '' OR p.Sku LIKE @SkuFilter + '%')
-  AND pol.QuantityOrdered > 0
+WHERE pol.QuantityOrdered > 0
 ORDER BY po.POPlacedOnUtc DESC, p.Sku;
 """
 
@@ -364,6 +361,13 @@ def _run_query(region: str, sql: str, params=None):
             conn.close()
 
 
+def _advance_cursor_to_select(cursor):
+    while cursor.description is None:
+        if not cursor.nextset():
+            return False
+    return True
+
+
 def _run_query_dicts(region: str, sql: str, params=None) -> list[dict]:
     """执行整段 SQL（可含 DECLARE），返回列名→值的字典列表。"""
     if pyodbc is None:
@@ -374,7 +378,7 @@ def _run_query_dicts(region: str, sql: str, params=None) -> list[dict]:
         conn = pyodbc.connect(_connection_string(region), timeout=120)
         cur = conn.cursor()
         cur.execute(sql, params or [])
-        if not cur.description:
+        if not _advance_cursor_to_select(cur):
             return []
         columns = [str(col[0]) for col in cur.description]
         out: list[dict] = []

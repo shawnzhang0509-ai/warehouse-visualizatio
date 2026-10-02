@@ -1,8 +1,6 @@
 -- 在途 PO → Output-NZ/po.csv（仓库内置，优先于本机 PO.txt）
 -- 本机 PO.txt 若与 po.sql 同输出 po.csv，执行器会优先用本文件（.sql > .txt）
--- 只查 996 系列：把下面 @SkuFilter 改成 '996'；查全部留空 ''
-
-DECLARE @SkuFilter VARCHAR(20) = '';
+-- 只查 996 系列：取消下面 WHERE 一行注释，并注释掉「查全部」那行
 
 SELECT
     po.Id AS PurchaseOrderId,
@@ -27,6 +25,6 @@ FROM dbo.PurchaseOrders po
 INNER JOIN dbo.PurchaseOrderLines pol ON pol.PurchaseOrderId = po.Id
 INNER JOIN dbo.Products p ON pol.ProductId = p.Id
 LEFT JOIN dbo.Containers c ON c.PurchaseOrderId = po.Id
-WHERE (@SkuFilter = '' OR p.Sku LIKE @SkuFilter + '%')
-  AND pol.QuantityOrdered > 0
+WHERE pol.QuantityOrdered > 0
+  -- AND p.Sku LIKE '996%'
 ORDER BY po.POPlacedOnUtc DESC, p.Sku;
