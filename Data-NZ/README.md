@@ -15,7 +15,10 @@
 | **PO.txt** / po.sql（本机） | **po.csv**（在途采购；**只改本机 SQL，仓库不再内置 po.sql**） |
 | **stock_volume.txt** | **stock_volume.csv**（中心仓占用体积明细，容积率页备用） |
 
-`on_hold.txt` / `parts.txt` / **PO.txt** / **stock_volume.txt** **只放你本机**（已加入 `.gitignore`）。仓库里仅有 `*.example.txt` 作参考。
+`on_hold.txt` / `parts.txt` / **`po.sql` 或 PO.txt** / **stock_volume.txt** **只放你本机**（已 `.gitignore`，**Git 不会更新你的 PO SQL**）。仓库里仅有 `*.example.txt` 作参考。
+
+**`git pull` 提示 po.sql 冲突时**（远程已删除仓库版 po.sql）：先备份 `Data-NZ\po.sql`，再执行  
+`git rm --cached Data-NZ/po.sql`（若提示不存在可忽略）→ `git pull origin main` → 把备份拷回 `Data-NZ\po.sql`（此后为未跟踪文件，pull 不会再动它）。
 | weekly_sales.sql | weekly_sales.csv |
 
 **两个 stock 模板请一起执行（两库）。** 看板启动时会读 `stock.csv` + `stock_discontinued.csv`，状态栏会显示 `stock.csv + stock_discontinued.csv（两库）`。只导出一个文件时，停产=「全部」会缺数据。
