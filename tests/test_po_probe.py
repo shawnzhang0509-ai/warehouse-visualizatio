@@ -1,4 +1,9 @@
-from po_probe import build_po_row_count_batch, parse_sku_filter, warn_po_sql_patterns
+from po_probe import (
+    build_po_row_count_batch,
+    parse_sku_filter,
+    po_template_filter_hints,
+    warn_po_sql_patterns,
+)
 
 
 def test_parse_sku_filter():
@@ -8,7 +13,12 @@ def test_parse_sku_filter():
 
 def test_warn_like_sku_filter_without_percent():
     sql = "WHERE p.Sku LIKE @SkuFilter AND pol.QuantityOrdered > 0"
-    assert warn_po_sql_patterns(sql)
+    assert len(warn_po_sql_patterns(sql)) == 1
+
+
+def test_filter_hints_arrival_null():
+    sql = "WHERE c.ActualArrivingDate IS NULL"
+    assert "到货日为空" in "".join(po_template_filter_hints(sql))
 
 
 def test_build_count_batch_keeps_declare():

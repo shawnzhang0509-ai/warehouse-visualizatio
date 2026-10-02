@@ -63,7 +63,12 @@ from runner_config import (
     load_runner_config,
     save_runner_config,
 )
-from po_probe import build_po_row_count_batch, parse_sku_filter, warn_po_sql_patterns
+from po_probe import (
+    build_po_row_count_batch,
+    parse_sku_filter,
+    po_template_filter_hints,
+    warn_po_sql_patterns,
+)
 from sql_batch import drain_cursor, fetch_primary_result_set
 
 ROOT_DIR = Path(__file__).parent
@@ -296,6 +301,29 @@ def _run_template_fresh_connection(connection_uri, sql):
         conn.close()
 
 
+def _po_export_strict_only():
+    return os.getenv("WAREHOUSE_PO_EXPORT_STRICT", "").strip().lower() in ("1", "true", "yes")
+
+
+def _embedded_po_sql_for_region(region_key):
+    if (region_key or "").upper() != "NZ":
+        return None
+    from warehouse_volume import NZ_DEFAULT_PO_SQL
+
+    return NZ_DEFAULT_PO_SQL.strip()
+
+
+def _log_connection_context(cursor, region_key, log_fn):
+    try:
+        cursor.execute("SELECT DB_NAME() AS db_name, @@SERVERNAME AS server_name")
+        row = cursor.fetchone()
+        drain_cursor(cursor)
+        if row:
+            log_fn(f"[{region_key}] PO 诊断 · 当前连接库={row[0]}  服务器={row[1]}")
+    except Exception as exc:
+        log_fn(f"[{region_key}] PO 诊断 · 连接信息失败：{exc}")
+
+
 def _probe_po_template_row_count(cursor, template_sql):
     count_sql = build_po_row_count_batch(template_sql)
     if not count_sql:
@@ -315,12 +343,27 @@ def _log_po_zero_diagnostic(cursor, region_key, log_fn, template_sql=None):
             log_fn(f"[{region_key}] PO 诊断 · 模板 @SkuFilter = '{sku}'")
         for msg in warn_po_sql_patterns(template_sql):
             log_fn(f"[{region_key}] PO 诊断 · {msg}")
+        hints = po_template_filter_hints(template_sql)
+        if hints:
+            log_fn(f"[{region_key}] PO 诊断 · 模板特征：{'；'.join(hints)}")
         try:
             probe = _probe_po_template_row_count(cursor, template_sql)
             if probe is not None:
                 log_fn(f"[{region_key}] PO 诊断 · 按本机 PO 脚本 COUNT = {probe}")
         except Exception as exc:
             log_fn(f"[{region_key}] PO 诊断 · 本机 PO 脚本 COUNT 失败：{exc}")
+        embedded = _embedded_po_sql_for_region(region_key)
+        if embedded:
+            try:
+                fb_cnt = _probe_po_template_row_count(cursor, embedded)
+                if fb_cnt is not None:
+                    log_fn(
+                        f"[{region_key}] PO 诊断 · 内置 NZ 查询 COUNT = {fb_cnt}"
+                        "（容积率页在 po.txt 为 0 时会自动用这条）"
+                    )
+            except Exception as exc:
+                log_fn(f"[{region_key}] PO 诊断 · 内置 NZ COUNT 失败：{exc}")
+    _log_connection_context(cursor, region_key, log_fn)
     probes = (
         ("POL QuantityOrdered>0", "SELECT COUNT(*) FROM dbo.PurchaseOrderLines WHERE QuantityOrdered > 0"),
         ("Sku LIKE 996%", "SELECT COUNT(*) FROM dbo.Products WHERE Sku LIKE '996%'"),
@@ -447,7 +490,8 @@ def execute_region(region_key, region_cfg, log=None, on_template_start=None, on_
     fail_count = 0
 
     try:
-        conn = pyodbc.connect(_odbc_conn_str_from_uri(region_cfg.get("connection_uri", "")), timeout=30)
+        conn_uri = region_cfg.get("connection_uri", "")
+        conn = pyodbc.connect(_odbc_conn_str_from_uri(conn_uri), timeout=30)
         cursor = conn.cursor()
         for tpl in templates:
             tpl_name = tpl["name"]
@@ -455,9 +499,38 @@ def execute_region(region_key, region_cfg, log=None, on_template_start=None, on_
                 on_template_start(tpl_name)
             _log(f"[{region_key}] 执行模板：{tpl_name}")
             try:
-                result = _run_single_template(cursor, tpl["sql"])
+                po_template = _standard_output_stem(tpl_name) == "po"
+                if po_template:
+                    result = _run_template_fresh_connection(conn_uri, tpl["sql"])
+                else:
+                    result = _run_single_template(cursor, tpl["sql"])
                 if result["has_result_set"]:
                     paths = _output_paths(region_cfg.get("output_dir"), region_key, tpl_name)
+                    po_fallback_note = None
+                    if paths["standard_name"] == "po" and result["row_count"] == 0:
+                        cols_preview = ", ".join(result["columns"][:8]) if result["columns"] else "（无列）"
+                        _log(
+                            f"[{region_key}] ⚠ 本机 PO 脚本 0 行：列={cols_preview}。"
+                            "COUNT 见下方诊断；容积率页在脚本 0 行时会自动改用内置 NZ 查询。"
+                        )
+                        _log_po_zero_diagnostic(
+                            cursor, region_key, _log, template_sql=tpl["sql"],
+                        )
+                        if not _po_export_strict_only():
+                            fb_sql = _embedded_po_sql_for_region(region_key)
+                            if fb_sql:
+                                _log(
+                                    f"[{region_key}] PO：本机脚本无数据，改用内置 NZ 查询写 po.csv…"
+                                )
+                                fb = _run_template_fresh_connection(conn_uri, fb_sql)
+                                if fb.get("has_result_set") and fb["row_count"] > 0:
+                                    result = fb
+                                    po_fallback_note = "内置NZ_PO"
+                        else:
+                            _log(
+                                f"[{region_key}] 已设 WAREHOUSE_PO_EXPORT_STRICT=1，"
+                                "不会用内置查询兜底 po.csv。"
+                            )
                     _write_csv(paths["csv"], result["columns"], result["rows"])
                     _remove_legacy_xlsx(paths["csv"], log=lambda m: _log(f"[{region_key}] {m}"))
                     outputs.append(
@@ -468,7 +541,16 @@ def execute_region(region_key, region_cfg, log=None, on_template_start=None, on_
                             "status": "success",
                         }
                     )
-                    _log(f"[{region_key}] 成功：{tpl_name} -> {paths['csv']} ({result['row_count']} 行)")
+                    if po_fallback_note:
+                        _log(
+                            f"[{region_key}] 成功：{tpl_name} -> {paths['csv']} "
+                            f"({result['row_count']} 行，来源={po_fallback_note}；未修改本机 po.txt)"
+                        )
+                    else:
+                        _log(
+                            f"[{region_key}] 成功：{tpl_name} -> {paths['csv']} "
+                            f"({result['row_count']} 行)"
+                        )
                     if paths["standard_name"] == "display" and result["row_count"] < 10:
                         _log(
                             f"[{region_key}] ⚠ 警告：display 只有 {result['row_count']} 行，"
@@ -476,36 +558,6 @@ def execute_region(region_key, region_cfg, log=None, on_template_start=None, on_
                         )
                     if paths["standard_name"] == "stock" and result["row_count"] < 10:
                         _log(f"[{region_key}] ⚠ 警告：stock 只有 {result['row_count']} 行，请检查库存 SQL。")
-                    if paths["standard_name"] == "po" and result["row_count"] == 0:
-                        cols_preview = ", ".join(result["columns"][:8]) if result["columns"] else "（无列）"
-                        _log(
-                            f"[{region_key}] ⚠ po.csv 0 行：导出列={cols_preview}。"
-                            "若 SSMS 同脚本有数：查 WHERE 是否含 ActualArrivingDate IS NULL（已到港会全滤掉）、"
-                            "或 Sku LIKE 是否写成 '996' 缺 %。"
-                        )
-                        _log_po_zero_diagnostic(
-                            cursor, region_key, _log, template_sql=tpl["sql"],
-                        )
-                        try:
-                            probe_rows = _probe_po_template_row_count(cursor, tpl["sql"])
-                        except Exception:
-                            probe_rows = None
-                        if probe_rows and probe_rows > 0:
-                            _log(
-                                f"[{region_key}] PO：脚本 COUNT={probe_rows} 但首次导出 0 行，"
-                                "正在用独立连接重试…"
-                            )
-                            retry = _run_template_fresh_connection(
-                                region_cfg.get("connection_uri", ""), tpl["sql"],
-                            )
-                            if retry.get("has_result_set") and retry["row_count"] > 0:
-                                _write_csv(paths["csv"], retry["columns"], retry["rows"])
-                                result = retry
-                                outputs[-1]["rows"] = retry["row_count"]
-                                _log(
-                                    f"[{region_key}] PO 已恢复：{tpl_name} -> {paths['csv']} "
-                                    f"({retry['row_count']} 行)"
-                                )
                 else:
                     conn.commit()
                     outputs.append(
