@@ -23,6 +23,7 @@ except ImportError:
 
 from panel_data import _pick_fuzzy, _region_output_dir
 from runner_config import load_runner_config
+from sql_batch import fetch_primary_result_set
 
 ROOT_DIR = Path(__file__).resolve().parent
 PO_FILE_STEMS = ("po", "po_in_transit", "purchase_orders")
@@ -364,13 +365,6 @@ def _run_query(region: str, sql: str, params=None):
             conn.close()
 
 
-def _advance_cursor_to_select(cursor):
-    while cursor.description is None:
-        if not cursor.nextset():
-            return False
-    return True
-
-
 def _run_query_dicts(region: str, sql: str, params=None) -> list[dict]:
     """执行整段 SQL（可含 DECLARE），返回列名→值的字典列表。"""
     if pyodbc is None:
@@ -381,11 +375,12 @@ def _run_query_dicts(region: str, sql: str, params=None) -> list[dict]:
         conn = pyodbc.connect(_connection_string(region), timeout=120)
         cur = conn.cursor()
         cur.execute(sql, params or [])
-        if not _advance_cursor_to_select(cur):
+        columns, raw_rows, has_result_set = fetch_primary_result_set(cur)
+        if not has_result_set:
             return []
-        columns = [str(col[0]) for col in cur.description]
+        columns = [str(c) for c in columns]
         out: list[dict] = []
-        for raw in cur.fetchall():
+        for raw in raw_rows:
             row = {}
             for idx, name in enumerate(columns):
                 val = raw[idx]

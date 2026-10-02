@@ -63,6 +63,7 @@ from runner_config import (
     load_runner_config,
     save_runner_config,
 )
+from sql_batch import fetch_primary_result_set
 
 ROOT_DIR = Path(__file__).parent
 
@@ -286,12 +287,24 @@ def _log_po_zero_diagnostic(cursor, region_key, log_fn):
     probes = (
         ("POL QuantityOrdered>0", "SELECT COUNT(*) FROM dbo.PurchaseOrderLines WHERE QuantityOrdered > 0"),
         ("Sku LIKE 996%", "SELECT COUNT(*) FROM dbo.Products WHERE Sku LIKE '996%'"),
+        (
+            "Sku LIKE '996' 无 %（常误写成完全匹配）",
+            "SELECT COUNT(*) FROM dbo.Products WHERE Sku LIKE '996'",
+        ),
         ("PO+POL+Products join", (
             "SELECT COUNT(*) FROM dbo.PurchaseOrders po "
             "INNER JOIN dbo.PurchaseOrderLines pol ON pol.PurchaseOrderId = po.Id "
             "INNER JOIN dbo.Products p ON pol.ProductId = p.Id "
             "WHERE pol.QuantityOrdered > 0"
         )),
+        (
+            "在途：JOIN 柜且 ActualArrivingDate IS NULL",
+            "SELECT COUNT(*) FROM dbo.PurchaseOrders po "
+            "INNER JOIN dbo.PurchaseOrderLines pol ON pol.PurchaseOrderId = po.Id "
+            "INNER JOIN dbo.Products p ON pol.ProductId = p.Id "
+            "LEFT JOIN dbo.Containers c ON c.PurchaseOrderId = po.Id "
+            "WHERE pol.QuantityOrdered > 0 AND c.ActualArrivingDate IS NULL",
+        ),
     )
     for label, sql in probes:
         try:
@@ -303,26 +316,16 @@ def _log_po_zero_diagnostic(cursor, region_key, log_fn):
             log_fn(f"[{region_key}] PO 诊断 · {label} 失败：{exc}")
 
 
-def _cursor_to_result_set(cursor):
-    """DECLARE + SELECT 批处理时，第一个“结果集”常无列；跳到真正的 SELECT。"""
-    while cursor.description is None:
-        if not cursor.nextset():
-            return None
-    return cursor
-
-
 def _run_single_template(cursor, sql):
     cursor.execute(sql)
-    active = _cursor_to_result_set(cursor)
-    if active is None:
+    columns, rows, has_result_set = fetch_primary_result_set(cursor)
+    if not has_result_set:
         return {
             "columns": [],
             "rows": [],
             "row_count": max(cursor.rowcount, 0),
             "has_result_set": False,
         }
-    columns = [col[0] for col in active.description]
-    rows = active.fetchall()
     return {
         "columns": columns,
         "rows": rows,
@@ -436,9 +439,11 @@ def execute_region(region_key, region_cfg, log=None, on_template_start=None, on_
                     if paths["standard_name"] == "stock" and result["row_count"] < 10:
                         _log(f"[{region_key}] ⚠ 警告：stock 只有 {result['row_count']} 行，请检查库存 SQL。")
                     if paths["standard_name"] == "po" and result["row_count"] == 0:
+                        cols_preview = ", ".join(result["columns"][:8]) if result["columns"] else "（无列）"
                         _log(
-                            f"[{region_key}] ⚠ po.csv 0 行：请检查本机 PO.txt 的 WHERE（如 LIKE 要带 %），"
-                            f"程序已支持 DECLARE+SELECT 批处理。"
+                            f"[{region_key}] ⚠ po.csv 0 行：导出列={cols_preview}。"
+                            "若 SSMS 同脚本有数：查 WHERE 是否含 ActualArrivingDate IS NULL（已到港会全滤掉）、"
+                            "或 Sku LIKE 是否写成 '996' 缺 %。"
                         )
                         _log_po_zero_diagnostic(cursor, region_key, _log)
                 else:
