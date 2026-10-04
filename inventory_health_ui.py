@@ -83,13 +83,14 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
     app._ih_chart_frame = chart_frame
 
     cols = (
-        "priority", "sku", "channel", "stockout", "days", "demand_m3",
+        "priority", "sku", "channel", "demand_src", "stockout", "days", "demand_m3",
         "inv_m3", "transit", "quadrant",
     )
     app._ih_tree = ttk.Treeview(table_frame, columns=cols, show="headings", height=16)
     headings = {
         "priority": ("P", 36), "sku": ("SKU", 88), "channel": ("渠道", 48),
-        "stockout": ("缺货%", 56), "days": ("库存天", 56), "demand_m3": ("m³/天", 64),
+        "demand_src": ("需求来源", 72), "stockout": ("缺货%", 56), "days": ("库存天", 56),
+        "demand_m3": ("m³/天", 64),
         "inv_m3": ("在库m³", 64), "transit": ("在途m³", 64), "quadrant": ("象限", 120),
     }
     for c, (t, w) in headings.items():
@@ -167,6 +168,7 @@ def _apply_report(app, report, th):
                 row.get("priority"),
                 row.get("sku"),
                 row.get("channel"),
+                row.get("demand_source"),
                 row.get("stockout_rate_pct"),
                 row.get("theoretical_days_label"),
                 row.get("avg_daily_demand_m3"),

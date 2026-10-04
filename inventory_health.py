@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import panel_data as pd
+from sales_demand import load_sales_demand_index
 
 try:
     import warehouse_volume as wv
@@ -81,6 +82,7 @@ class InventoryHealthRow:
     quadrant: str
     incomplete: list[str] = field(default_factory=list)
     bubble_m3_day: float = 0.0
+    demand_source: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -104,11 +106,27 @@ class InventoryHealthRow:
             "quadrant": self.quadrant,
             "incomplete": self.incomplete,
             "bubble_m3_day": self.bubble_m3_day,
+            "demand_source": self.demand_source,
         }
 
 
 def _pick(row: dict, keys: list[str]):
     return pd._pick(row, keys)
+
+
+def _lookup_sales_demand(index, norm: str, channel: str, branch: str):
+    if not index:
+        return None
+    channel = (channel or "").upper()
+    branch = (branch or "").strip()
+    for reg in (branch, ""):
+        hit = index.get((norm, channel, reg))
+        if hit:
+            return hit
+    for key, rec in index.items():
+        if key[0] == norm and key[1] == channel:
+            return rec
+    return None
 
 
 def _to_float(val, default=None):
@@ -282,6 +300,7 @@ def build_inventory_health_report(
     th = thresholds or HealthThresholds()
     region_key = str(region or pd.default_region() or "NZ").strip().upper()
     bundle = pd.get_region_bundle(region_key)
+    demand_index, sales_warns = load_sales_demand_index(region_key)
     weekly_rows, weekly_path, weekly_warn = _load_weekly_sales(region_key)
     sales_buckets, span_days, d_min, d_max = _sales_aggregates(weekly_rows, lookback_days)
 
@@ -289,8 +308,8 @@ def build_inventory_health_report(
     po_by_sku = _load_po_by_sku(region_key)
 
     rows_out: list[InventoryHealthRow] = []
-    warnings: list[str] = []
-    if weekly_warn:
+    warnings: list[str] = list(sales_warns)
+    if weekly_warn and not demand_index:
         warnings.append(weekly_warn)
 
     channel_f = channel.strip().upper()
@@ -330,29 +349,39 @@ def build_inventory_health_report(
         inv_value = inv_units * price if price is not None and inv_units > 0 else None
         transit_m3 = float(po_by_sku.get(norm, 0.0))
 
-        # 销售：优先匹配分店桶，否则汇总该 SKU 所有分店
-        sale = sales_buckets.get((norm, ch, branch_f)) if branch_f else None
-        if sale is None:
-            qty_sum = 0.0
-            stockouts: list[float] = []
-            for (n, c, b), bucket in sales_buckets.items():
-                if n != norm or c != ch:
-                    continue
-                if branch_f and b != branch_f:
-                    continue
-                qty_sum += bucket["qty"]
-                stockouts.extend(bucket["stockout"])
-            avg_daily = qty_sum / span_days if span_days > 0 else 0.0
-            stockout_vals = stockouts
+        demand_source = ""
+        stockout_vals: list[float] = []
+        demand_rec = _lookup_sales_demand(demand_index, norm, ch, branch_f)
+        if demand_rec and demand_rec.avg_daily_units > 0:
+            avg_daily = demand_rec.avg_daily_units
+            demand_source = demand_rec.demand_source
+            if demand_rec.unit_volume_m3 is not None and unit_vol is None:
+                unit_vol = demand_rec.unit_volume_m3
+            if demand_rec.stockout_rate_pct is not None:
+                stockout_vals = [demand_rec.stockout_rate_pct / 100.0]
         else:
-            avg_daily = sale["qty"] / span_days if span_days > 0 else 0.0
-            stockout_vals = sale["stockout"]
+            sale = sales_buckets.get((norm, ch, branch_f)) if branch_f else None
+            if sale is None:
+                qty_sum = 0.0
+                for (n, c, b), bucket in sales_buckets.items():
+                    if n != norm or c != ch:
+                        continue
+                    if branch_f and b != branch_f:
+                        continue
+                    qty_sum += bucket["qty"]
+                    stockout_vals.extend(bucket["stockout"])
+                avg_daily = qty_sum / span_days if span_days > 0 else 0.0
+                demand_source = f"weekly_sales/{span_days}d"
+            else:
+                avg_daily = sale["qty"] / span_days if span_days > 0 else 0.0
+                stockout_vals = sale["stockout"]
+                demand_source = f"weekly_sales/{span_days}d"
 
         incomplete: list[str] = []
         if unit_vol is None:
-            incomplete.append("缺少单件体积(PriceRadarVolume/VolumeWithBox)")
+            incomplete.append("缺少单件体积(PriceRadarVolume/VolumeWithBox/体积系数)")
         if avg_daily <= 0:
-            incomplete.append("无销售历史(weekly_sales)")
+            incomplete.append("无销量(sales 8-30/15/30 或 weekly_sales)")
 
         stockout_pct: float | None = None
         stockout_source = "missing"
@@ -397,6 +426,7 @@ def build_inventory_health_report(
                 quadrant=quad,
                 incomplete=incomplete,
                 bubble_m3_day=round(bubble, 4),
+                demand_source=demand_source,
             )
         )
 
@@ -423,9 +453,11 @@ def build_inventory_health_report(
                 f"否则用 {int(th.cover_days_proxy)} 天需求覆盖代理（非历史缺货天数）"
             ),
             "formulas": {
-                "avg_daily_demand_m3": "日均件数 × 单件体积(m³)",
+                "avg_daily_demand_m3": "采用需求(件/天) × 单件体积(m³)；或 sales 窗口销量÷天数",
                 "theoretical_days": "在库体积(m³) ÷ 日均需求体积(m³/天)",
+                "stocking_volume": "备货体积(m³) = 采用需求 × 体积系数（与供应链决策一致）",
             },
+            "sales_demand_rows": len(demand_index),
         },
         "warnings": warnings,
     }
