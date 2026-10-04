@@ -21,6 +21,22 @@
 **`git pull` 提示 po.sql 冲突时**（远程已删除仓库版 po.sql）：先备份 `Data-NZ\po.sql`，再执行  
 `git rm --cached Data-NZ/po.sql`（若提示不存在可忽略）→ `git pull origin main` → 把备份拷回 `Data-NZ\po.sql`（此后为未跟踪文件，pull 不会再动它）。
 
+### `checkout` 失败：`stock.txt would be overwritten` / 一堆 `CONFLICT`
+
+常见原因：**`checkout` 没成功**，但下一行 **`git pull origin cursor/inventory-health-e23a` 仍然执行**，等于在 **main** 上把远程分支 merge 进来 → `app.py` 等冲突。
+
+在 **PowerShell** 里**一行一行**执行（不要 `>>` 连着三条；`checkout` 失败就不要 pull 该分支）：
+
+```powershell
+git merge --abort
+git status
+Move-Item -Force Data-NZ\stock.txt Data-NZ\stock.txt.my-backup
+git fetch origin
+git checkout cursor/inventory-health-e23a
+```
+
+`checkout` 成功后若提示 *Already up to date*，**不必**再 `pull origin cursor/inventory-health-e23a`。库存请用 **`product_stock_price.sql`**，不要用 `stock.txt`（已 `.gitignore`，与 main 一致）。
+
 **两个 stock 模板请一起执行（两库）。** 看板启动时会读 `stock.csv` + `stock_discontinued.csv`，状态栏会显示 `stock.csv + stock_discontinued.csv（两库）`。只导出一个文件时，停产=「全部」会缺数据。
 
 **产品图** 依赖 `ImageUrl` 列（SQL 已含）。若看板提示「无 ImageUrl」，请用本目录最新 `product_stock_price.sql` / `stock_discontinued.sql` 重新导出。
