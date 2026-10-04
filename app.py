@@ -26,7 +26,20 @@ STANDARD_OUTPUT_NAMES = {
     "display": "display",
     "store_display": "display",
     "display_list": "display",
+    "po": "po",
+    "purchase_orders": "po",
+    "sales_8-30": "sales 8-30",
+    "sales_8_30": "sales 8-30",
+    "sales8-30": "sales 8-30",
+    "sales_15": "sales 15",
+    "sales15": "sales 15",
+    "sales_30": "sales 30",
+    "sales30": "sales 30",
+    "weekly_sales": "weekly_sales",
 }
+
+from sql_batch import drain_cursor, fetch_primary_result_set
+from sql_placeholders import apply_sql_placeholders, placeholder_context_for_region, placeholders_in_sql
 
 try:
     import tkinter as tk
@@ -238,8 +251,14 @@ def _load_sql_templates(template_dir):
 
 
 def _standard_output_stem(sql_file_name):
-    stem = Path(sql_file_name).stem.replace(" ", "_").lower()
-    return STANDARD_OUTPUT_NAMES.get(stem, stem)
+    raw_stem = Path(sql_file_name).stem
+    norm = raw_stem.replace(" ", "_").lower()
+    mapped = STANDARD_OUTPUT_NAMES.get(norm) or STANDARD_OUTPUT_NAMES.get(raw_stem.lower())
+    if mapped:
+        return mapped
+    if raw_stem.lower().startswith("sales"):
+        return raw_stem
+    return norm
 
 
 def _output_paths(output_dir, region_key, sql_file_name, batch_label):
@@ -296,23 +315,49 @@ def _publish_latest(output_dir, standard_name, csv_path, xlsx_path):
     return published
 
 
+def _prepare_template_sql(sql_text, region_key, region_cfg, log_fn):
+    ctx = placeholder_context_for_region(region_key, region_cfg)
+    prepared, notes = apply_sql_placeholders(sql_text, ctx)
+    if placeholders_in_sql(sql_text) and notes:
+        log_fn(f"[{region_key}] SQL 占位符：{'；'.join(notes)}")
+    return prepared
+
+
 def _run_single_template(cursor, sql):
     cursor.execute(sql)
-    if not cursor.description:
+    columns, rows, has_result_set = fetch_primary_result_set(cursor)
+    drain_cursor(cursor)
+    if not has_result_set:
         return {
             "columns": [],
             "rows": [],
             "row_count": max(cursor.rowcount, 0),
             "has_result_set": False,
         }
-    columns = [col[0] for col in cursor.description]
-    rows = cursor.fetchall()
     return {
         "columns": columns,
         "rows": rows,
         "row_count": len(rows),
         "has_result_set": True,
     }
+
+
+def _mirror_flat_csv(output_dir, template_name, csv_path, log_fn, region_key):
+    """把 sales / po 等也复制到 Output 根目录，方便看板与库存健康读取。"""
+    stem = Path(template_name).stem
+    low = stem.lower()
+    if not (low.startswith("sales") or low in ("po", "purchase_orders", "weekly_sales")):
+        return
+    root = _resolve_path(output_dir)
+    if root is None or not csv_path or not Path(csv_path).is_file():
+        return
+    flat_name = _standard_output_stem(template_name)
+    target = root / f"{flat_name}.csv"
+    try:
+        target.write_bytes(Path(csv_path).read_bytes())
+        log_fn(f"[{region_key}] 已同步：{target.name}")
+    except OSError as exc:
+        log_fn(f"[{region_key}] 同步 {target.name} 失败：{exc}")
 
 
 def _drivers():
@@ -397,7 +442,8 @@ def execute_region(region_key, region_cfg, log=None):
             tpl_name = tpl["name"]
             _log(f"[{region_key}] 执行模板：{tpl_name}")
             try:
-                result = _run_single_template(cursor, tpl["sql"])
+                sql_text = _prepare_template_sql(tpl["sql"], region_key, region_cfg, _log)
+                result = _run_single_template(cursor, sql_text)
                 if result["has_result_set"]:
                     paths = _output_paths(region_cfg.get("output_dir"), region_key, tpl_name, batch_label)
                     _write_csv(paths["csv"], result["columns"], result["rows"])
@@ -420,6 +466,7 @@ def execute_region(region_key, region_cfg, log=None):
                     )
                     extra = f"，Excel: {paths['xlsx']}" if xlsx_ok else "（未安装 openpyxl，仅导出 CSV）"
                     latest_hint = f"，latest: {', '.join(latest_files)}" if latest_files else ""
+                    _mirror_flat_csv(region_cfg.get("output_dir"), tpl_name, paths["csv"], _log, region_key)
                     _log(f"[{region_key}] 成功：{tpl_name} -> {paths['csv']}{extra}{latest_hint} ({result['row_count']} 行)")
                 else:
                     conn.commit()
