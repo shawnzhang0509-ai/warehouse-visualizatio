@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 import tkinter as tk
@@ -136,6 +137,9 @@ def render_inventory_health(app, force=False):
                 consumption_days=float(app._ih_days_th.get() or ih.DEFAULT_DAYS_Y),
                 cover_days_proxy=float(app._ih_cover_proxy.get() or ih.DEFAULT_COVER_DAYS_PROXY),
             )
+            def bump(msg):
+                app.after(0, lambda m=msg: app._ih_status.configure(text=f"库存健康：{m}"))
+
             report = ih.build_inventory_health_report(
                 region,
                 channel=app._ih_channel_var.get(),
@@ -144,6 +148,7 @@ def render_inventory_health(app, force=False):
                 branch=app._ih_branch_var.get(),
                 group_by=app._ih_group_var.get() or "sku",
                 thresholds=th,
+                progress=bump,
             )
             elapsed = time.perf_counter() - t0
             app.after(0, lambda r=report, e=elapsed: _finish_report(app, r, th, e, MAX_TABLE_ROWS))
@@ -167,12 +172,29 @@ def _fail_report(app, message: str):
 
 def _finish_report(app, report, th, elapsed_sec, max_table_rows):
     try:
-        _apply_report(app, report, th, elapsed_sec, max_table_rows)
+        _apply_report(app, report, th, elapsed_sec, max_table_rows, draw_chart=False)
     finally:
         app._ih_busy = False
+    app.after(80, lambda: _apply_chart(app, report, th))
 
 
-def _apply_report(app, report, th, elapsed_sec=0.0, max_table_rows=600):
+def _apply_chart(app, report, th):
+    try:
+        app._ih_status.configure(text=str(app._ih_status.cget("text")) + " · 绘制气泡图…")
+        if app._ih_chart_widget:
+            app._ih_chart_widget.destroy()
+        for w in app._ih_chart_frame.winfo_children():
+            w.destroy()
+        app._ih_chart_widget, _fig = ihc.render_bubble_chart(
+            app._ih_chart_frame, report, th.__dict__,
+        )
+    except Exception as exc:
+        app._ih_status.configure(
+            text=str(app._ih_status.cget("text")) + f" · 气泡图跳过：{exc}",
+        )
+
+
+def _apply_report(app, report, th, elapsed_sec=0.0, max_table_rows=600, draw_chart=True):
     app._ih_report = report
     s = report.get("summary") or {}
     cards = app._ih_card_labels
@@ -194,9 +216,13 @@ def _apply_report(app, report, th, elapsed_sec=0.0, max_table_rows=600):
     display_rows = rows_sorted[: max(1, int(max_table_rows or 600))]
     timing = f" · 计算 {elapsed_sec:.1f}s" if elapsed_sec else ""
     trunc = f" · 表格 {len(display_rows)}/{total_rows}" if total_rows > len(display_rows) else ""
+    prof = meta.get("timings_sec") or {}
+    prof_txt = ""
+    if prof:
+        prof_txt = " · " + " ".join(f"{k}={v}s" for k, v in prof.items())
     app._ih_status.configure(
-        text=f"{report.get('region')} · {s.get('sku_count', 0)} 点{timing}{trunc} · "
-        f"销量跨度 {meta.get('sales_span_days')} 天 · {warns or meta.get('stockout_note', '')[:100]}",
+        text=f"{report.get('region')} · {s.get('sku_count', 0)} 点{timing}{trunc}{prof_txt} · "
+        f"销量跨度 {meta.get('sales_span_days')} 天 · {warns or meta.get('stockout_note', '')[:80]}",
     )
 
     for iid in app._ih_tree.get_children():
@@ -220,10 +246,5 @@ def _apply_report(app, report, th, elapsed_sec=0.0, max_table_rows=600):
             tags=tag,
         )
 
-    if app._ih_chart_widget:
-        app._ih_chart_widget.destroy()
-    for w in app._ih_chart_frame.winfo_children():
-        w.destroy()
-    app._ih_chart_widget, _fig = ihc.render_bubble_chart(
-        app._ih_chart_frame, report, th.__dict__,
-    )
+    if draw_chart:
+        _apply_chart(app, report, th)

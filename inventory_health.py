@@ -1,6 +1,4 @@
-"""库存健康 / 库存错配气泡图 — 仅读本地 Output/Data CSV（stock、sales、po.csv），不连接数据库。
-
-库存健康 / 库存错配气泡图 — 基于现有 Output CSV（stock、weekly_sales、po）。
+"""库存健康 / 库存错配气泡图 — 仅读本地 Output/Data CSV（stock、sales、po.csv），不连数据库。
 
 字段映射（不臆造列名，模糊匹配 panel_data 惯例）：
 - SKU / 名称 / 分类：stock.csv → Sku, ProductName, ProductFamily
@@ -164,10 +162,18 @@ def _to_float(val, default=None):
 
 
 def _weekly_sales_path(region: str) -> Path | None:
-    bundle = pd.get_region_bundle(region)
-    data_dir = Path(bundle.get("data_dir") or "")
-    found = pd._find_region_data_file(data_dir, WEEKLY_STEMS)
+    _stock, _disp, _src, data_dir = pd.resolve_sources(region)
+    found = pd._find_region_data_file(Path(data_dir), WEEKLY_STEMS)
     return Path(found) if found else None
+
+
+def _load_stock_rows_region(region_key: str) -> tuple[list[dict], Path | None]:
+    """只读 stock.csv，不加载 parts/on_hold 等看板大表。"""
+    stock_path, _display_path, _source, _data_dir = pd.resolve_sources(region_key)
+    path = Path(stock_path)
+    if not path.is_file():
+        return [], path
+    return pd._read_table(path), path
 
 
 def _parse_week_date(row: dict) -> tuple[date | None, date | None]:
@@ -327,12 +333,29 @@ def build_inventory_health_report(
     group_by: str = "sku",
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     thresholds: HealthThresholds | None = None,
+    progress: Any = None,
 ) -> dict[str, Any]:
+    import time as _time
+
+    def _bump(msg: str):
+        if callable(progress):
+            progress(msg)
+
     th = thresholds or HealthThresholds()
     region_key = str(region or pd.default_region() or "NZ").strip().upper()
+    timings: dict[str, float] = {}
+    t_phase = _time.perf_counter()
+
+    _bump("读 stock.csv…")
+    stock_raw, stock_path = _load_stock_rows_region(region_key)
+    timings["stock_csv"] = _time.perf_counter() - t_phase
+    t_phase = _time.perf_counter()
+
     _stock_p, _disp_p, _src, data_dir = pd.resolve_sources(region_key)
-    bundle = pd.get_region_bundle(region_key)
+    _bump("读 sales 8-30/15/30…")
     demand_index, sales_warns = load_sales_demand_index(region_key, data_dir=data_dir)
+    timings["sales_demand"] = _time.perf_counter() - t_phase
+    t_phase = _time.perf_counter()
     demand_by_sc = _demand_by_sku_channel(demand_index)
     always_weekly = os.getenv("INVENTORY_HEALTH_ALWAYS_WEEKLY", "").strip().lower() in ("1", "true", "yes")
     if demand_index and not always_weekly:
@@ -343,14 +366,16 @@ def build_inventory_health_report(
         weekly_rows, weekly_path, weekly_warn = _load_weekly_sales(region_key)
         sales_buckets, span_days, d_min, d_max = _sales_aggregates(weekly_rows, lookback_days)
         warnings_weekly_skip = ""
+    timings["weekly_sales"] = _time.perf_counter() - t_phase
+    t_phase = _time.perf_counter()
 
-    stock_raw = bundle.get("stock_raw_rows")
-    if not stock_raw:
-        stock_path = bundle.get("stock_path") or _stock_p
-        if stock_path and Path(stock_path).is_file():
-            stock_raw = pd._read_table(stock_path)
-    stock_raw = stock_raw or []
+    _bump("读 po.csv（在途）…")
     po_by_sku = _load_po_by_sku(region_key)
+    timings["po_csv"] = _time.perf_counter() - t_phase
+    t_phase = _time.perf_counter()
+
+    _bump("汇总 SKU 指标…")
+    stock_raw = stock_raw or []
 
     rows_out: list[InventoryHealthRow] = []
     warnings: list[str] = list(sales_warns)
@@ -481,6 +506,9 @@ def build_inventory_health_report(
     if group_by and group_by != "sku":
         rows_out = _aggregate_rows(rows_out, group_by, th)
 
+    timings["aggregate"] = _time.perf_counter() - t_phase
+    _bump("完成，刷新界面…")
+
     summary = _summarize(rows_out, th)
     return {
         "region": region_key,
@@ -492,6 +520,9 @@ def build_inventory_health_report(
             "cover_days_proxy": th.cover_days_proxy,
         },
         "meta": {
+            "stock_path": str(stock_path) if stock_path else None,
+            "timings_sec": {k: round(v, 2) for k, v in timings.items()},
+            "po_sku_count": len(po_by_sku),
             "weekly_sales_path": str(weekly_path) if weekly_path else None,
             "sales_span_days": span_days,
             "sales_date_min": str(d_min) if d_min else None,
