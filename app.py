@@ -2,6 +2,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -241,12 +242,82 @@ def _read_sql_file(path):
     raise RuntimeError(f"读取 SQL 文件失败: {path} ({last_err})")
 
 
-def _load_sql_templates(template_dir):
-    templates = []
+_NON_SQL_CONFIG_FILES = frozenset(
+    {
+        "po_channel_prefixes.txt",
+        "channel_prefixes.txt",
+    }
+)
+
+
+def _is_stub_sql(sql_text):
+    """识别占位 SQL（如 SELECT GETDATE()），避免覆盖真实导出。"""
+    lines = []
+    for line in sql_text.splitlines():
+        text = line.strip()
+        if not text or text.startswith("--"):
+            continue
+        lines.append(text)
+    body = " ".join(lines).lower().rstrip(";").strip()
+    return body in ("select getdate() as run_time", "select getdate()")
+
+
+def _should_skip_template(file_path, sql_text):
+    name = file_path.name.lower()
+    if name in _NON_SQL_CONFIG_FILES:
+        return True
+    if name.startswith("example_"):
+        return True
+    if name.endswith(".example") or ".example." in name:
+        return True
+    if _is_stub_sql(sql_text):
+        return True
+    return False
+
+
+def _template_priority(file_path):
+    """同输出文件时优先 .sql，其次 .txt。"""
+    ext = file_path.suffix.lower()
+    if ext == ".sql":
+        return 0
+    if ext == ".txt":
+        return 1
+    return 2
+
+
+def _load_sql_templates(template_dir, log=None):
+    """读取 Data-{region}/ 下 .sql / .txt；跳过配置/示例；同名输出只保留优先级最高的一份。"""
+    by_output = {}
     for file_path in _list_txt_templates(template_dir):
         sql_text = _read_sql_file(file_path)
-        if sql_text:
-            templates.append({"name": file_path.name, "sql": sql_text})
+        if not sql_text:
+            continue
+        if _should_skip_template(file_path, sql_text):
+            if callable(log):
+                log(f"跳过：{file_path.name}（配置/占位模板，不执行）")
+            continue
+        output_stem = _standard_output_stem(file_path.name)
+        tpl = {"name": file_path.name, "sql": sql_text, "path": file_path}
+        existing = by_output.get(output_stem)
+        if existing is None:
+            by_output[output_stem] = tpl
+            continue
+        new_pri = _template_priority(file_path)
+        old_pri = _template_priority(existing["path"])
+        if new_pri < old_pri:
+            if callable(log):
+                log(
+                    f"跳过：{existing['name']}（与 {file_path.name} 输出同一文件，"
+                    f"优先使用 {file_path.suffix.lower()}）"
+                )
+            by_output[output_stem] = tpl
+        elif callable(log):
+            log(
+                f"跳过：{file_path.name}（与 {existing['name']} 输出同一文件，"
+                f"优先使用 {existing['path'].suffix.lower()}）"
+            )
+    templates = [{"name": t["name"], "sql": t["sql"]} for t in by_output.values()]
+    templates.sort(key=lambda t: t["name"].lower())
     return templates
 
 
@@ -285,18 +356,36 @@ def _write_csv(path, columns, rows):
             writer.writerow(list(row))
 
 
+_ILLEGAL_XLSX_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+
+
+def _xlsx_cell_value(value):
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return _ILLEGAL_XLSX_CHAR_RE.sub("", value)
+    return value
+
+
 def _write_xlsx(path, columns, rows):
     if Workbook is None:
         return False
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "data"
-    if columns:
-        ws.append(list(columns))
-    for row in rows:
-        ws.append(["" if value is None else value for value in row])
-    wb.save(path)
-    return True
+    try:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "data"
+        if columns:
+            ws.append([_xlsx_cell_value(c) for c in columns])
+        for row in rows:
+            ws.append([_xlsx_cell_value(value) for value in row])
+        wb.save(path)
+        return True
+    except Exception:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
 
 
 def _publish_latest(output_dir, standard_name, csv_path, xlsx_path):
@@ -410,7 +499,7 @@ def execute_region(region_key, region_cfg, log=None):
     label = _region_label(region_key, region_cfg)
     started_at = _utc_iso()
     _log(f"[{region_key}] 开始执行：{label}")
-    templates = _load_sql_templates(region_cfg.get("template_dir"))
+    templates = _load_sql_templates(region_cfg.get("template_dir"), log=_log)
     if not templates:
         _log(f"[{region_key}] 未找到可执行的 txt 模板。")
         return {
@@ -448,6 +537,11 @@ def execute_region(region_key, region_cfg, log=None):
                     paths = _output_paths(region_cfg.get("output_dir"), region_key, tpl_name, batch_label)
                     _write_csv(paths["csv"], result["columns"], result["rows"])
                     xlsx_ok = _write_xlsx(paths["xlsx"], result["columns"], result["rows"])
+                    if not xlsx_ok and Workbook is not None:
+                        _log(
+                            f"[{region_key}] 提示：{tpl_name} 的 Excel 未生成（含非法字符或 openpyxl 限制），"
+                            f"CSV 已写入 {paths['csv'].name}"
+                        )
                     latest_files = _publish_latest(
                         region_cfg.get("output_dir"),
                         paths["standard_name"],
