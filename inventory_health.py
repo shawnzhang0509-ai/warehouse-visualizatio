@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import panel_data as pd
-from sales_demand import load_sales_demand_index
+from sales_demand import collapse_demand_by_sku_channel, load_sales_demand_index
 
 try:
     import warehouse_volume as wv
@@ -148,14 +148,8 @@ def _lookup_sales_demand(index, norm: str, channel: str, branch: str):
 
 
 def _demand_by_sku_channel(index) -> dict[tuple[str, str], Any]:
-    """O(1) 查找：每个 SKU×渠道 保留日均需求最高的一条（避免对每个 SKU 扫全表）。"""
-    out: dict[tuple[str, str], Any] = {}
-    for (norm, ch, _reg), rec in (index or {}).items():
-        key = (norm, (ch or "").upper())
-        prev = out.get(key)
-        if prev is None or (rec.avg_daily_units or 0) > (prev.avg_daily_units or 0):
-            out[key] = rec
-    return out
+    """O(1) 查找：SKU×渠道（前三位）汇总日均需求。"""
+    return collapse_demand_by_sku_channel(index)
 
 
 def _weekly_totals_by_sku_channel(
@@ -375,8 +369,9 @@ def build_inventory_health_report(
     timings["sales_demand"] = _time.perf_counter() - t_phase
     t_phase = _time.perf_counter()
     demand_by_sc = _demand_by_sku_channel(demand_index)
+    demand_has_units = any((rec.avg_daily_units or 0) > 0 for rec in demand_index.values())
     always_weekly = os.getenv("INVENTORY_HEALTH_ALWAYS_WEEKLY", "").strip().lower() in ("1", "true", "yes")
-    if demand_index and not always_weekly:
+    if demand_index and demand_has_units and not always_weekly:
         weekly_rows, weekly_path, weekly_warn = [], None, None
         sales_buckets, span_days, d_min, d_max = {}, max(1, int(lookback_days or DEFAULT_LOOKBACK_DAYS)), None, None
         warnings_weekly_skip = "已用 sales 8-30/15/30，跳过 weekly_sales 大表以加速"
@@ -619,6 +614,7 @@ def _aggregate_rows(rows: list[InventoryHealthRow], group_by: str, th: HealthThr
                 quadrant=_quadrant(stockout, th_days, th),
                 incomplete=[],
                 bubble_m3_day=round(demand, 4),
+                demand_source="渠道汇总" if demand else "",
             )
         )
     return out

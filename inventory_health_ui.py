@@ -154,7 +154,8 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
 
     formula = tk.Label(
         tab,
-        text="日均需求体积 = 日均件数 × 单件体积；理论库存天数 = 在库体积 ÷ 日均需求体积",
+        text="渠道 = SKU 前三位（与 po_channel_prefixes.txt / PO {sku} 一致）；"
+        "汇总选 channel 按渠道聚合；选具体渠道后自动刷新",
         bg="white", fg="#64748b", font=("Segoe UI", 8),
         wraplength=900, justify=tk.LEFT,
     )
@@ -251,7 +252,8 @@ def _apply_report(app, report, th, elapsed_sec=0.0, max_table_rows=600, draw_cha
     s = report.get("summary") or {}
     cards = app._ih_card_labels
     cards["inv_m3"].configure(text=str(s.get("total_inventory_volume_m3", "—")))
-    cards["demand_m3"].configure(text=str(s.get("total_avg_daily_demand_m3", "—")))
+    _dm = s.get("total_avg_daily_demand_m3")
+    cards["demand_m3"].configure(text=str(_dm) if _dm is not None else "—")
     cards["days"].configure(text=str(s.get("overall_theoretical_days", "—")))
     cards["stockout"].configure(text=str(s.get("overall_stockout_rate_pct", "—")))
     cards["high_so"].configure(text=str(s.get("high_stockout_sku_count", "—")))
@@ -279,21 +281,28 @@ def _apply_report(app, report, th, elapsed_sec=0.0, max_table_rows=600, draw_cha
 
     for iid in app._ih_tree.get_children():
         app._ih_tree.delete(iid)
+    def _cell(val):
+        if val is None:
+            return "—"
+        if isinstance(val, float) and val != val:
+            return "—"
+        return val
+
     for row in display_rows:
         tag = ("mismatch",) if row.get("quadrant") == "Inventory Mismatch" else ()
         app._ih_tree.insert(
             "", "end",
             values=(
-                row.get("priority"),
-                row.get("sku"),
-                row.get("channel"),
-                row.get("demand_source"),
-                row.get("stockout_rate_pct"),
-                row.get("theoretical_days_label"),
-                row.get("avg_daily_demand_m3"),
-                row.get("inventory_volume_m3"),
-                row.get("transit_volume_m3"),
-                row.get("quadrant"),
+                _cell(row.get("priority")),
+                _cell(row.get("sku")),
+                _cell(row.get("channel")),
+                _cell(row.get("demand_source")) or "—",
+                _cell(row.get("stockout_rate_pct")),
+                _cell(row.get("theoretical_days_label")),
+                _cell(row.get("avg_daily_demand_m3")),
+                _cell(row.get("inventory_volume_m3")),
+                _cell(row.get("transit_volume_m3")),
+                _cell(row.get("quadrant")),
             ),
             tags=tag,
         )

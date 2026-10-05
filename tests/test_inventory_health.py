@@ -42,10 +42,14 @@ class InventoryHealthCalcTest(unittest.TestCase):
             "data_dir": "/tmp",
             "stock_raw_rows": stock_rows,
         }
-        with mock.patch.object(ih.pd, "get_region_bundle", return_value=bundle):
-            with mock.patch.object(ih, "_load_weekly_sales", return_value=(weekly, mock.Mock(), None)):
-                with mock.patch.object(ih, "_load_po_by_sku", return_value={"130001": 69.0}):
-                    report = ih.build_inventory_health_report("NZ", thresholds=ih.HealthThresholds(cover_days_proxy=14))
+        with mock.patch.object(ih, "_load_stock_rows_region", return_value=(stock_rows, None)):
+            with mock.patch.object(ih.pd, "resolve_sources", return_value=(None, None, "mock", "/tmp")):
+                with mock.patch.object(ih, "load_sales_demand_index", return_value=({}, [])):
+                    with mock.patch.object(ih, "_load_weekly_sales", return_value=(weekly, mock.Mock(), None)):
+                        with mock.patch.object(ih, "_load_po_by_sku", return_value={"130001": 69.0}):
+                            report = ih.build_inventory_health_report(
+                                "NZ", thresholds=ih.HealthThresholds(cover_days_proxy=14)
+                            )
         rows = report["rows"]
         self.assertEqual(len(rows), 1)
         r = rows[0]
