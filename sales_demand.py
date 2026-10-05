@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import panel_data as pd
-from channel_prefixes import normalize_sku_channel_code
+from channel_prefixes import normalize_sku_channel_code, parse_named_channel_folder
 
 WINDOWS = (
     (
@@ -365,7 +365,12 @@ def _load_per_channel_sales_dirs(
             ):
                 loaded = True
             continue
-        ch_hint = re.match(r"^(\d{3})", name)
+        parsed_folder = parse_named_channel_folder(name)
+        if parsed_folder:
+            _fam, sub_code = parsed_folder
+            ch_hint = re.match(r"^(\d{3})$", sub_code)
+        else:
+            ch_hint = re.match(r"^(\d{3})", name)
         if not ch_hint:
             continue
         for window, days, stems in WINDOWS:

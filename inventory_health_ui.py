@@ -11,7 +11,13 @@ from tkinter import ttk
 import panel_data as pd
 import inventory_health as ih
 import inventory_health_chart as ihc
-from channel_prefixes import load_region_po_channel_prefixes
+from channel_prefixes import (
+    list_merged_channel_filter_options,
+    load_channel_families_file,
+    load_region_po_channel_prefixes,
+    merge_channel_family_maps,
+    scan_channel_families_from_dirs,
+)
 
 
 def _ui_after(app, delay_ms: int, callback):
@@ -45,7 +51,17 @@ def _populate_ih_channel_combo(app):
             p for p in prefixes
             if ih._channel_matches_owner(f"{p}-000", p, owner, rows)
         ]
-    values = ["全部"] + prefixes
+    _stock, _disp, _src, data_dir = pd.resolve_sources(region)
+    from pathlib import Path
+
+    fam_path = Path(data_dir) / "channel_families.csv"
+    families = merge_channel_family_maps(
+        scan_channel_families_from_dirs(data_dir),
+        load_channel_families_file(fam_path if fam_path.is_file() else None),
+    )
+    app._ih_channel_families = families
+    merged = list_merged_channel_filter_options(prefixes, families)
+    values = ["全部"] + merged
     if getattr(app, "_ih_channel_combo", None) is not None:
         app._ih_channel_combo["values"] = values
 
@@ -192,7 +208,19 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
             getattr(app, "_ih_thresholds", {}),
         ),
     )
-    app._ih_outlier_btn.pack(side=tk.LEFT)
+    app._ih_outlier_btn.pack(side=tk.LEFT, padx=(0, 6))
+    app._ih_family_btn = ttk.Button(
+        chart_tool,
+        text="分渠道图",
+        state=tk.DISABLED,
+        command=lambda: ihc.open_family_subchannels_chart(
+            app.root,
+            getattr(app, "_ih_report", None) or {},
+            getattr(app, "_ih_selected_family", None),
+            getattr(app, "_ih_thresholds", {}),
+        ),
+    )
+    app._ih_family_btn.pack(side=tk.LEFT)
     chart_frame = tk.Frame(chart_wrap, bg="white")
     chart_frame.pack(fill=tk.BOTH, expand=True)
     table_frame = tk.Frame(panes, bg="white")
@@ -240,9 +268,17 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
         sel = app._ih_tree.selection()
         if not sel:
             ihc.highlight_chart_link(app, None)
+            app._ih_selected_family = None
+            if getattr(app, "_ih_family_btn", None):
+                app._ih_family_btn.configure(state=tk.DISABLED)
             return
         link = app._ih_row_link.get(sel[0], "")
         ihc.highlight_chart_link(app, link or None)
+        families = getattr(app, "_ih_channel_families", None) or {}
+        app._ih_selected_family = link if link in families else None
+        if getattr(app, "_ih_family_btn", None):
+            state = tk.NORMAL if app._ih_selected_family else tk.DISABLED
+            app._ih_family_btn.configure(state=state)
 
     app._ih_tree.bind("<<TreeviewSelect>>", _on_ih_tree_select)
 
@@ -261,8 +297,8 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
 
     formula = tk.Label(
         tab,
-        text="渠道 = SKU 前三位；负责人来自 channel_owners.csv；NZ 可选南北岛（北=Carbine+Walls 在库、南=Gerald Connelly，"
-        "销量按 sales Region，在途按 po 南北岛）；气泡按象限着色（橙=缺货高周转低）；主图 0–150 天",
+        text="渠道 = SKU 前三位；Output 下 河北_321 类文件夹自动合并为「河北」等省渠道，点表格行后可用「分渠道图」；"
+        "NZ 可选南北岛；气泡按象限着色；主图 0–150 天",
         bg="white", fg="#64748b", font=("Segoe UI", 8),
         wraplength=900, justify=tk.LEFT,
     )

@@ -5,6 +5,146 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent
 
+# V4 渠道子目录：河北_321、山东_446（省名_三位渠道号）
+_NAMED_CHANNEL_FOLDER_RE = re.compile(r"^([\u4e00-\u9fff]+)_(\d{3})$")
+_PLAIN_CHANNEL_FOLDER_RE = re.compile(r"^(\d{3})$")
+
+
+def parse_named_channel_folder(name: str) -> tuple[str, str] | None:
+    """文件夹名 → (省/族名, 三位子渠道)，如 河北_321 → ('河北','321')。"""
+    text = (name or "").strip()
+    m = _NAMED_CHANNEL_FOLDER_RE.match(text)
+    if m:
+        return m.group(1), m.group(2)
+    m2 = _PLAIN_CHANNEL_FOLDER_RE.match(text)
+    if m2:
+        return "", m2.group(1)
+    m3 = re.match(r"^(\d{3})", text)
+    if m3:
+        return "", m3.group(1)
+    return None
+
+
+def scan_channel_families_from_dirs(data_dir: Path | str | None) -> dict[str, list[str]]:
+    """扫描 Output 下 河北_321 类目录，得到 { '河北': ['321','352',...] }。"""
+    base = Path(data_dir or "")
+    if not base.is_dir():
+        return {}
+    subs: dict[str, set[str]] = {}
+    for child in base.iterdir():
+        if not child.is_dir():
+            continue
+        parsed = parse_named_channel_folder(child.name)
+        if not parsed or not parsed[0]:
+            continue
+        fam, sub = parsed
+        subs.setdefault(fam, set()).add(sub)
+    return {fam: sorted(codes, key=lambda c: int(c) if c.isdigit() else c) for fam, codes in subs.items()}
+
+
+def load_channel_families_file(path: Path | None) -> dict[str, list[str]]:
+    """可选 channel_families.csv：family,sub_channel 或 河北_321。"""
+    if path is None or not Path(path).is_file():
+        return {}
+    out: dict[str, set[str]] = {}
+    for row in _read_families_table(path):
+        fam = str(row.get("family") or row.get("族") or row.get("省") or "").strip()
+        sub = str(row.get("sub_channel") or row.get("sub") or row.get("渠道") or "").strip()
+        line = str(row.get("folder") or row.get("目录") or "").strip()
+        if line and "_" in line:
+            parsed = parse_named_channel_folder(line.replace(" ", ""))
+            if parsed and parsed[0]:
+                fam, sub = parsed
+        if not sub:
+            sub = parse_channel_line(line or fam) or ""
+        if fam and sub:
+            out.setdefault(fam, set()).add(sub.zfill(3) if sub.isdigit() else sub[:3])
+    return {k: sorted(v, key=lambda c: int(c) if c.isdigit() else c) for k, v in out.items()}
+
+
+def _read_families_table(path: Path) -> list[dict]:
+    import panel_data as pd
+
+    rows = pd._read_table(path) if path.suffix.lower() == ".csv" else []
+    if rows:
+        return rows
+    text = path.read_text(encoding="utf-8-sig", errors="replace")
+    out: list[dict] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "," in line:
+            parts = [p.strip() for p in line.split(",", 1)]
+            if len(parts) == 2:
+                out.append({"family": parts[0], "sub_channel": parts[1]})
+                continue
+        parsed = parse_named_channel_folder(line)
+        if parsed and parsed[0]:
+            out.append({"family": parsed[0], "sub_channel": parsed[1]})
+    return out
+
+
+def merge_channel_family_maps(*maps: dict[str, list[str]]) -> dict[str, list[str]]:
+    merged: dict[str, set[str]] = {}
+    for m in maps:
+        for fam, subs in (m or {}).items():
+            merged.setdefault(fam, set()).update(subs)
+    return {k: sorted(v, key=lambda c: int(c) if c.isdigit() else c) for k, v in merged.items()}
+
+
+def sub_to_family_map(families: dict[str, list[str]]) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for fam, subs in (families or {}).items():
+        for sub in subs:
+            out[str(sub).zfill(3) if str(sub).isdigit() else str(sub)] = fam
+    return out
+
+
+def channel_group_key(sub_channel: str, sub_to_family: dict[str, str]) -> str:
+    """汇总用渠道键：子渠道 321 在族内则显示 河北，否则仍为 321。"""
+    sub = normalize_sku_channel_code(sub_channel, "") or str(sub_channel or "").strip()
+    if not sub:
+        return ""
+    return sub_to_family.get(sub, sub)
+
+
+def list_merged_channel_filter_options(
+    prefixes: list[str],
+    families: dict[str, list[str]],
+) -> list[str]:
+    """下拉：全部 + 省族 + 未归并的三位渠道。"""
+    covered = sub_to_family_map(families)
+    singles = [p for p in prefixes if p not in covered]
+    fams = sorted(families.keys())
+    return fams + singles
+
+
+def resolve_channel_filter(
+    text: str,
+    families: dict[str, list[str]],
+) -> tuple[str, set[str]] | None:
+    """
+    筛选渠道：'河北' → 族内所有三位号；'321' → {321}。
+    返回 (mode, allowed_subs) 或 None=全部。
+    """
+    raw = str(text or "").strip()
+    if not raw or raw in ("全部", "ALL", "*"):
+        return None
+    if raw in families:
+        return ("family", set(families[raw]))
+    code = normalize_sku_channel_code(raw, "") or normalize_channel_filter_digits(raw)
+    if code:
+        return ("sub", {code})
+    return ("sub", {raw})
+
+
+def normalize_channel_filter_digits(channel: str) -> str:
+    digits = re.sub(r"\D", "", str(channel or ""))
+    if len(digits) >= 3:
+        return digits[:3]
+    return digits.zfill(3) if digits else ""
+
 
 def normalize_sku_channel_code(channel: str | None, sku: str | None = "") -> str:
     """三位渠道号：996 / 996.0 / '996' → '996'；缺省从 SKU 前三位取。"""

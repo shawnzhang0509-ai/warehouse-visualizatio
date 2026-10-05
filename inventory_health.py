@@ -20,7 +20,15 @@ from pathlib import Path
 from typing import Any
 
 import panel_data as pd
-from channel_prefixes import normalize_sku_channel_code
+from channel_prefixes import (
+    channel_group_key,
+    load_channel_families_file,
+    merge_channel_family_maps,
+    normalize_sku_channel_code,
+    resolve_channel_filter,
+    scan_channel_families_from_dirs,
+    sub_to_family_map,
+)
 from sales_demand import (
     collapse_demand_by_sku_channel,
     load_sales_demand_index,
@@ -144,12 +152,17 @@ class InventoryHealthRow:
     bubble_m3_day: float = 0.0
     demand_source: str = ""
 
+    channel_family: str = ""
+    sub_channel: str = ""
+
     def as_dict(self) -> dict[str, Any]:
         return {
             "sku": self.sku,
             "name": self.name,
             "category": self.category,
             "channel": self.channel,
+            "channel_family": self.channel_family,
+            "sub_channel": self.sub_channel,
             "branch": self.branch,
             "stockout_rate_pct": self.stockout_rate_pct,
             "stockout_source": self.stockout_source,
@@ -434,6 +447,12 @@ def build_inventory_health_report(
     t_phase = _time.perf_counter()
 
     _stock_p, _disp_p, _src, data_dir = pd.resolve_sources(region_key)
+    fam_path = Path(data_dir) / "channel_families.csv"
+    channel_families = merge_channel_family_maps(
+        scan_channel_families_from_dirs(data_dir),
+        load_channel_families_file(fam_path if fam_path.is_file() else None),
+    )
+    sub_to_fam = sub_to_family_map(channel_families)
     owner_cfg, _owner_path = pd.load_channel_owner_config(region_key, data_dir=data_dir)
     _bump("读 sales 8-30/15/30…")
     demand_index, sales_warns = load_sales_demand_index(region_key, data_dir=data_dir)
@@ -485,6 +504,7 @@ def build_inventory_health_report(
     if weekly_warn and not demand_index:
         warnings.append(weekly_warn)
 
+    channel_filter = resolve_channel_filter(channel, channel_families)
     channel_f = normalize_channel_filter(channel)
     category_f = category.strip().lower()
     sku_f = sku_filter.strip().lower()
@@ -502,7 +522,11 @@ def build_inventory_health_report(
             continue
         norm = pd.sku_join_key(code)
         ch = channel_from_sku(code)
-        if channel_f and ch != channel_f:
+        if channel_filter is not None:
+            _mode, allowed = channel_filter
+            if ch not in allowed:
+                continue
+        elif channel_f and ch != channel_f:
             continue
         if not _channel_matches_owner(code, ch, owner_f, owner_cfg):
             continue
@@ -581,13 +605,17 @@ def build_inventory_health_report(
         quad = _quadrant(stockout_pct, th_days, th)
         pri = _priority(stockout_pct, demand_m3, th_days, th)
         bubble = demand_m3 or 0.0
+        fam = sub_to_fam.get(ch, "")
+        grp = channel_group_key(ch, sub_to_fam)
 
         rows_out.append(
             InventoryHealthRow(
                 sku=code,
                 name=str(_pick(raw, pd.NAME_KEYS) or "").strip(),
                 category=cat,
-                channel=ch,
+                channel=grp,
+                channel_family=fam,
+                sub_channel=ch,
                 branch=branch_f or "（全渠道/分店合计）",
                 stockout_rate_pct=round(stockout_pct, 2) if stockout_pct is not None else None,
                 stockout_source=stockout_source,
@@ -608,8 +636,9 @@ def build_inventory_health_report(
             )
         )
 
+    rows_detail = list(rows_out)
     if group_by and group_by != "sku":
-        rows_out = _aggregate_rows(rows_out, group_by, th)
+        rows_out = _aggregate_rows(rows_out, group_by, th, sub_to_fam=sub_to_fam)
 
     with_demand = sum(1 for r in rows_out if (r.avg_daily_units or 0) > 0)
     island_note = f" · 南北岛={island_f or '全国'}" if pd.island_stock_supported(region_key) else ""
@@ -624,6 +653,8 @@ def build_inventory_health_report(
     return {
         "region": region_key,
         "rows": [r.as_dict() for r in rows_out],
+        "rows_detail": [r.as_dict() for r in rows_detail],
+        "channel_families": channel_families,
         "summary": summary,
         "thresholds": {
             "stockout_pct": th.stockout_pct,
@@ -655,7 +686,13 @@ def build_inventory_health_report(
     }
 
 
-def _aggregate_rows(rows: list[InventoryHealthRow], group_by: str, th: HealthThresholds) -> list[InventoryHealthRow]:
+def _aggregate_rows(
+    rows: list[InventoryHealthRow],
+    group_by: str,
+    th: HealthThresholds,
+    *,
+    sub_to_fam: dict[str, str] | None = None,
+) -> list[InventoryHealthRow]:
     key_field = {
         "channel": "channel",
         "category": "category",
@@ -667,7 +704,8 @@ def _aggregate_rows(rows: list[InventoryHealthRow], group_by: str, th: HealthThr
     groups: dict[str, list[InventoryHealthRow]] = defaultdict(list)
     for r in rows:
         if group_by == "channel":
-            k = r.channel
+            sub = r.sub_channel or r.channel
+            k = channel_group_key(sub, sub_to_fam or {})
         elif group_by == "category":
             k = r.category
         else:
@@ -702,6 +740,8 @@ def _aggregate_rows(rows: list[InventoryHealthRow], group_by: str, th: HealthThr
                 name=f"{group_by} 汇总 · {len(items)} SKU",
                 category=rep.category,
                 channel=rep.channel if group_by != "channel" else label,
+                channel_family=label if (sub_to_fam and label in set(sub_to_fam.values())) else "",
+                sub_channel="",
                 branch=rep.branch,
                 stockout_rate_pct=round(stockout, 2) if stockout is not None else None,
                 stockout_source="aggregated",
