@@ -40,7 +40,11 @@ def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, fl
         lbl.pack(fill=tk.BOTH, expand=True)
         return lbl, None
 
-    rows = [r for r in (report.get("rows") or []) if r.get("stockout_rate_pct") is not None]
+    rows = [
+        r for r in (report.get("rows") or [])
+        if (r.get("avg_daily_demand_m3") or r.get("bubble_m3_day") or 0) > 0
+        or (r.get("inventory_volume_m3") or 0) > 0
+    ]
     rows.sort(key=lambda r: float(r.get("bubble_m3_day") or r.get("avg_daily_demand_m3") or 0), reverse=True)
     if len(rows) > 900:
         rows = rows[:900]

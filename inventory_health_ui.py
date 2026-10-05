@@ -10,6 +10,7 @@ from tkinter import ttk
 
 import inventory_health as ih
 import inventory_health_chart as ihc
+from channel_prefixes import load_region_po_channel_prefixes
 
 
 def _ui_after(app, delay_ms: int, callback):
@@ -21,10 +22,21 @@ def _ui_after(app, delay_ms: int, callback):
         callback()
 
 
+def _populate_ih_channel_combo(app):
+    region = app._current_region() if hasattr(app, "_current_region") else "NZ"
+    prefixes = load_region_po_channel_prefixes(region)
+    values = ["全部"] + prefixes
+    if getattr(app, "_ih_channel_combo", None) is not None:
+        app._ih_channel_combo["values"] = values
+
+
 def _snapshot_ih_filters(app) -> dict:
     """在主线程读取 Tk 变量；后台线程调用 StringVar.get() 在 Windows 上会死锁。"""
+    ch = app._ih_channel_var.get()
+    if str(ch).strip() in ("全部", ""):
+        ch = ""
     return {
-        "channel": app._ih_channel_var.get(),
+        "channel": ch,
         "category": app._ih_category_var.get(),
         "sku": app._ih_sku_var.get(),
         "branch": app._ih_branch_var.get(),
@@ -45,11 +57,11 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
     app._ih_chart_frame = None
     app._ih_chart_widget = None
 
-    app._ih_channel_var = tk.StringVar(value="")
+    app._ih_channel_var = tk.StringVar(value="全部")
     app._ih_category_var = tk.StringVar(value="")
     app._ih_sku_var = tk.StringVar(value="")
     app._ih_branch_var = tk.StringVar(value="")
-    app._ih_group_var = tk.StringVar(value="sku")
+    app._ih_group_var = tk.StringVar(value="channel")
     app._ih_stockout_th = tk.StringVar(value=str(ih.DEFAULT_STOCKOUT_X))
     app._ih_days_th = tk.StringVar(value=str(ih.DEFAULT_DAYS_Y))
     app._ih_cover_proxy = tk.StringVar(value=str(ih.DEFAULT_COVER_DAYS_PROXY))
@@ -57,8 +69,16 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
     toolbar = tk.Frame(tab, bg="white")
     toolbar.pack(fill=tk.X, padx=6, pady=6)
     ttk.Button(toolbar, text="刷新", command=lambda: app._render_inventory_health(force=True)).pack(side=tk.LEFT, padx=(0, 8))
-    ttk.Label(toolbar, text="渠道").pack(side=tk.LEFT)
-    ttk.Entry(toolbar, width=8, textvariable=app._ih_channel_var).pack(side=tk.LEFT, padx=4)
+    ttk.Label(toolbar, text="渠道(前三位)").pack(side=tk.LEFT)
+    app._ih_channel_combo = ttk.Combobox(
+        toolbar, width=8, textvariable=app._ih_channel_var, state="readonly",
+    )
+    app._ih_channel_combo.pack(side=tk.LEFT, padx=4)
+    _populate_ih_channel_combo(app)
+    app._ih_channel_combo.bind(
+        "<<ComboboxSelected>>",
+        lambda _e: app._render_inventory_health(force=True),
+    )
     ttk.Label(toolbar, text="分类").pack(side=tk.LEFT)
     ttk.Entry(toolbar, width=10, textvariable=app._ih_category_var).pack(side=tk.LEFT, padx=4)
     ttk.Label(toolbar, text="SKU").pack(side=tk.LEFT)
@@ -66,10 +86,15 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
     ttk.Label(toolbar, text="分店").pack(side=tk.LEFT)
     ttk.Entry(toolbar, width=10, textvariable=app._ih_branch_var).pack(side=tk.LEFT, padx=4)
     ttk.Label(toolbar, text="汇总").pack(side=tk.LEFT, padx=(8, 0))
-    ttk.Combobox(
+    app._ih_group_combo = ttk.Combobox(
         toolbar, width=10, state="readonly", textvariable=app._ih_group_var,
-        values=("sku", "channel", "category"),
-    ).pack(side=tk.LEFT, padx=4)
+        values=("channel", "sku", "category"),
+    )
+    app._ih_group_combo.pack(side=tk.LEFT, padx=4)
+    app._ih_group_combo.bind(
+        "<<ComboboxSelected>>",
+        lambda _e: app._render_inventory_health(force=True),
+    )
     ttk.Label(toolbar, text="缺货线%").pack(side=tk.LEFT, padx=(8, 0))
     ttk.Entry(toolbar, width=5, textvariable=app._ih_stockout_th).pack(side=tk.LEFT, padx=2)
     ttk.Label(toolbar, text="天数线").pack(side=tk.LEFT)
@@ -138,6 +163,7 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
 
 def render_inventory_health(app, force=False):
     region = app._current_region() if hasattr(app, "_current_region") else "NZ"
+    _populate_ih_channel_combo(app)
 
     now = time.time()
     if getattr(app, "_ih_busy", False):

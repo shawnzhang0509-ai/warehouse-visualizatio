@@ -53,6 +53,24 @@ DEFAULT_DAYS_Y = float(os.getenv("INVENTORY_HEALTH_DAYS_Y", "60") or "60")
 DEFAULT_COVER_DAYS_PROXY = float(os.getenv("INVENTORY_HEALTH_COVER_DAYS", "14") or "14")
 
 
+def normalize_channel_filter(channel: str) -> str:
+    """渠道筛选：SKU 前三位数字，与 po_channel_prefixes / sku_prefix 一致。"""
+    text = str(channel or "").strip().upper()
+    if not text or text in ("全部", "ALL", "*", "—", "-"):
+        return ""
+    digits = re.sub(r"\D", "", text)
+    if len(digits) >= 3:
+        return digits[:3]
+    if digits:
+        return digits.zfill(3)
+    return text[:3]
+
+
+def channel_from_sku(code: str) -> str:
+    """渠道 = SKU 前三位（107-381 → 107），与看板 SKU 前三位汇总一致。"""
+    return pd.sku_prefix(code)
+
+
 @dataclass
 class HealthThresholds:
     stockout_pct: float = DEFAULT_STOCKOUT_X
@@ -384,7 +402,7 @@ def build_inventory_health_report(
     if weekly_warn and not demand_index:
         warnings.append(weekly_warn)
 
-    channel_f = channel.strip().upper()
+    channel_f = normalize_channel_filter(channel)
     category_f = category.strip().lower()
     sku_f = sku_filter.strip().lower()
     branch_f = branch.strip()
@@ -399,7 +417,7 @@ def build_inventory_health_report(
         if not code:
             continue
         norm = pd._norm_code(code)
-        ch = pd.sku_prefix(code)
+        ch = channel_from_sku(code)
         if channel_f and ch != channel_f:
             continue
         cat = str(_pick(raw, pd.FAMILY_KEYS) or "未分类").strip()
