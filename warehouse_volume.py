@@ -634,6 +634,16 @@ def _po_stats_message(stats: dict[str, int], path: Path | None) -> str | None:
     return "；".join(parts)
 
 
+def load_po_lines_from_csv(region: str | None = None) -> tuple[list[dict], Path | None]:
+    """只读 Output-{region}/po.csv，不连数据库（库存健康等批量场景用）。"""
+    region = normalize_region(region)
+    path, csv_rows = _read_region_csv(region, PO_FILE_STEMS)
+    if not csv_rows:
+        return [], path
+    lines, _stats = _parse_po_rows(csv_rows)
+    return lines, path
+
+
 def load_po_lines(region: str | None = None) -> tuple[list[dict], str | None, Path | None, dict[str, int]]:
     region = normalize_region(region)
     empty_stats: dict[str, Any] = {

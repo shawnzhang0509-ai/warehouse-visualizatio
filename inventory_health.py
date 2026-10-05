@@ -296,10 +296,15 @@ def _priority(stockout: float | None, demand_m3: float | None, days: float | Non
 
 
 def _load_po_by_sku(region: str) -> dict[str, float]:
+    """在途体积：默认只读 po.csv，避免 load_po_lines() 再次连库跑 PO SQL（会卡数分钟）。"""
     if wv is None:
         return {}
+    use_db = os.getenv("INVENTORY_HEALTH_PO_FROM_DB", "").strip().lower() in ("1", "true", "yes")
     try:
-        lines, err, _path, _stats = wv.load_po_lines(region)
+        if use_db:
+            lines, _err, _path, _stats = wv.load_po_lines(region)
+        else:
+            lines, _path = wv.load_po_lines_from_csv(region)
     except Exception:
         return {}
     out: dict[str, float] = defaultdict(float)
@@ -330,14 +335,23 @@ def build_inventory_health_report(
     bundle = pd.get_region_bundle(region_key)
     demand_index, sales_warns = load_sales_demand_index(region_key)
     demand_by_sc = _demand_by_sku_channel(demand_index)
-    weekly_rows, weekly_path, weekly_warn = _load_weekly_sales(region_key)
-    sales_buckets, span_days, d_min, d_max = _sales_aggregates(weekly_rows, lookback_days)
+    always_weekly = os.getenv("INVENTORY_HEALTH_ALWAYS_WEEKLY", "").strip().lower() in ("1", "true", "yes")
+    if demand_index and not always_weekly:
+        weekly_rows, weekly_path, weekly_warn = [], None, None
+        sales_buckets, span_days, d_min, d_max = {}, max(1, int(lookback_days or DEFAULT_LOOKBACK_DAYS)), None, None
+        warnings_weekly_skip = "已用 sales 8-30/15/30，跳过 weekly_sales 大表以加速"
+    else:
+        weekly_rows, weekly_path, weekly_warn = _load_weekly_sales(region_key)
+        sales_buckets, span_days, d_min, d_max = _sales_aggregates(weekly_rows, lookback_days)
+        warnings_weekly_skip = ""
 
     stock_raw = bundle.get("stock_raw_rows") or []
     po_by_sku = _load_po_by_sku(region_key)
 
     rows_out: list[InventoryHealthRow] = []
     warnings: list[str] = list(sales_warns)
+    if warnings_weekly_skip:
+        warnings.append(warnings_weekly_skip)
     if weekly_warn and not demand_index:
         warnings.append(weekly_warn)
 

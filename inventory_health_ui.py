@@ -115,6 +115,10 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
 def render_inventory_health(app, force=False):
     region = app._current_region() if hasattr(app, "_current_region") else "NZ"
 
+    if getattr(app, "_ih_busy", False):
+        app._ih_status.configure(text="仍在计算中，请稍候…（勿重复点刷新）")
+        return
+
     MAX_TABLE_ROWS = 600
 
     def work():
@@ -135,15 +139,29 @@ def render_inventory_health(app, force=False):
                 thresholds=th,
             )
             elapsed = time.perf_counter() - t0
-            app.after(0, lambda: _apply_report(app, report, th, elapsed, MAX_TABLE_ROWS))
+            app.after(0, lambda r=report, e=elapsed: _finish_report(app, r, th, e, MAX_TABLE_ROWS))
         except Exception as exc:
-            app.after(0, lambda: app._ih_status.configure(text=f"库存健康加载失败：{exc}"))
+            err = str(exc)
+            app.after(0, lambda msg=err: _fail_report(app, msg))
 
     if force or not getattr(app, "_ih_report", None):
+        app._ih_busy = True
         app._ih_status.configure(
-            text="正在计算库存健康指标…（首次会读 stock + sales + weekly_sales，约几秒～半分钟）",
+            text="正在计算库存健康指标…（读 stock + sales + po.csv，通常 10～40 秒）",
         )
         threading.Thread(target=work, daemon=True).start()
+
+
+def _fail_report(app, message: str):
+    app._ih_busy = False
+    app._ih_status.configure(text=f"库存健康加载失败：{message}")
+
+
+def _finish_report(app, report, th, elapsed_sec, max_table_rows):
+    try:
+        _apply_report(app, report, th, elapsed_sec, max_table_rows)
+    finally:
+        app._ih_busy = False
 
 
 def _apply_report(app, report, th, elapsed_sec=0.0, max_table_rows=600):
