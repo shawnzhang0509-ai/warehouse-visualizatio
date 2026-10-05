@@ -1,4 +1,6 @@
-"""看板：有货未展示（in-stock but not displayed）分析面板。
+"""【可选】浏览器版看板（Flask，localhost:5000）。日常请用桌面版 panel_app.py / start_panel.bat。
+
+看板：有货未展示（in-stock but not displayed）分析面板。
 
 核心逻辑
 --------
