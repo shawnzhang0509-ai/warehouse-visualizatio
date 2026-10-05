@@ -7,6 +7,8 @@ import random
 from collections import defaultdict
 from typing import Any
 
+from channel_prefixes import family_for_channel_link
+
 try:
     import matplotlib
 
@@ -204,7 +206,7 @@ def bind_chart_interaction(app, canvas, fig, meta):
         if callable(cb):
             cb(key)
         families = getattr(app, "_ih_channel_families", None) or {}
-        app._ih_selected_family = key if key in families else None
+        app._ih_selected_family = family_for_channel_link(key, families)
         btn = getattr(app, "_ih_family_btn", None)
         if btn is not None:
             btn.configure(
@@ -212,6 +214,25 @@ def bind_chart_interaction(app, canvas, fig, meta):
             )
 
     fig.canvas.mpl_connect("pick_event", _on_pick)
+
+    def _on_tk_dblclick(_event=None):
+        key = meta.get("selected_key") or ""
+        families = getattr(app, "_ih_channel_families", None) or {}
+        fam = family_for_channel_link(key, families)
+        if not fam:
+            return
+        app._ih_selected_family = fam
+        open_family_subchannels_chart(
+            app.root,
+            getattr(app, "_ih_report", None) or {},
+            fam,
+            getattr(app, "_ih_thresholds", {}) or {},
+        )
+
+    try:
+        canvas.get_tk_widget().bind("<Double-Button-1>", _on_tk_dblclick)
+    except Exception:
+        pass
 
 
 def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, float]):

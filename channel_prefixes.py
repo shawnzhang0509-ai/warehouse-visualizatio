@@ -1,6 +1,8 @@
 """从 po_channel_prefixes.txt 读取渠道前三位（支持 河北_378 / 378）。"""
 
+import os
 import re
+from collections import defaultdict
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent
@@ -107,6 +109,93 @@ def channel_group_key(sub_channel: str, sub_to_family: dict[str, str]) -> str:
     if not sub:
         return ""
     return sub_to_family.get(sub, sub)
+
+
+def load_channel_families_from_po_prefixes(path: Path | None) -> dict[str, list[str]]:
+    """po_channel_prefixes.txt 每行 河北_321 或 河北_321_备注 → 合并为省渠道。"""
+    if path is None or not Path(path).is_file():
+        return {}
+    text = ""
+    for encoding in ("utf-8-sig", "utf-8", "gbk"):
+        try:
+            text = Path(path).read_text(encoding=encoding)
+            break
+        except Exception:
+            text = ""
+    if not text:
+        return {}
+    subs: dict[str, set[str]] = defaultdict(set)
+    for line in text.splitlines():
+        raw = (line or "").strip()
+        if not raw or raw.startswith("#"):
+            continue
+        token = re.split(r"[\s,，\t]+", raw, maxsplit=1)[0].strip()
+        parsed = parse_named_channel_folder(token)
+        if parsed and parsed[0]:
+            subs[parsed[0]].add(parsed[1])
+    return {
+        fam: sorted(codes, key=lambda c: int(c) if c.isdigit() else c)
+        for fam, codes in subs.items()
+    }
+
+
+def channel_family_scan_dirs(region_key: str, data_dir: Path | str | None) -> list[Path]:
+    """销量/渠道文件夹可能出现的位置（Output 根、latest、时间戳子目录、Data 模板目录）。"""
+    seen: list[Path] = []
+    d = Path(data_dir or "")
+    if d.is_dir():
+        seen.append(d.resolve())
+        latest = d / "latest"
+        if latest.is_dir():
+            seen.append(latest.resolve())
+        for child in sorted(d.iterdir()):
+            if not child.is_dir():
+                continue
+            if re.fullmatch(r"\d{8}_\d{6}", child.name):
+                seen.append(child.resolve())
+    extra = os.getenv("INVENTORY_SALES_ROOT", "").strip()
+    if extra:
+        p = Path(extra)
+        if p.is_dir():
+            seen.append(p.resolve())
+    try:
+        tpl = po_channel_prefixes_path(region_key).parent
+        if tpl.is_dir():
+            seen.append(tpl.resolve())
+    except Exception:
+        pass
+    out: list[Path] = []
+    for p in seen:
+        if p not in out:
+            out.append(p)
+    return out
+
+
+def load_channel_families_for_region(
+    region_key: str,
+    data_dir: Path | str | None,
+) -> dict[str, list[str]]:
+    maps: list[dict[str, list[str]]] = []
+    for scan_dir in channel_family_scan_dirs(region_key, data_dir):
+        maps.append(scan_channel_families_from_dirs(scan_dir))
+    maps.append(load_channel_families_from_po_prefixes(po_channel_prefixes_path(region_key)))
+    fam_csv = Path(data_dir or "") / "channel_families.csv"
+    maps.append(load_channel_families_file(fam_csv if fam_csv.is_file() else None))
+    return merge_channel_family_maps(*maps)
+
+
+def family_for_channel_link(link: str, families: dict[str, list[str]]) -> str | None:
+    """表格/气泡上的 河北 或 321 → 可下钻的省名。"""
+    key = str(link or "").strip()
+    if not key or not families:
+        return None
+    if key in families:
+        return key
+    code = normalize_sku_channel_code(key, "") or key
+    for fam, subs in families.items():
+        if code in subs or key in subs:
+            return fam
+    return None
 
 
 def list_merged_channel_filter_options(

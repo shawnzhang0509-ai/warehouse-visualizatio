@@ -13,7 +13,11 @@ from pathlib import Path
 from typing import Any
 
 import panel_data as pd
-from channel_prefixes import normalize_sku_channel_code, parse_named_channel_folder
+from channel_prefixes import (
+    channel_family_scan_dirs,
+    normalize_sku_channel_code,
+    parse_named_channel_folder,
+)
 
 WINDOWS = (
     (
@@ -451,18 +455,12 @@ def load_sales_demand_index(
     if data_dir is None:
         _s, _d, _src, data_dir = pd.resolve_sources(region_key)
     data_dir = Path(data_dir or "")
-    search_dirs: list[Path] = [data_dir]
-    try:
-        from runner_config import load_runner_config
-
-        reg = (load_runner_config().get("regions") or {}).get(region_key) or {}
-        tpl = Path(str(reg.get("template_dir") or f"Data-{region_key}"))
-        if not tpl.is_absolute():
-            tpl = Path(__file__).resolve().parent / tpl
-        if tpl.is_dir():
-            search_dirs.append(tpl)
-    except Exception:
-        pass
+    search_dirs: list[Path] = []
+    for sd in channel_family_scan_dirs(region_key, data_dir):
+        if sd not in search_dirs:
+            search_dirs.append(sd)
+    if not search_dirs and data_dir.is_dir():
+        search_dirs.append(data_dir)
     warnings: list[str] = []
     acc: dict[tuple[str, str, str], dict[str, Any]] = {}
 
@@ -504,7 +502,9 @@ def load_sales_demand_index(
         for row in rows:
             _merge_row(acc, row, None, None)
 
-    subdir_loaded = _load_per_channel_sales_dirs(data_dir, acc, warnings)
+    subdir_loaded = False
+    for sd in search_dirs:
+        subdir_loaded = _load_per_channel_sales_dirs(sd, acc, warnings) or subdir_loaded
     loaded_any = loaded_any or subdir_loaded
 
     if not loaded_any:

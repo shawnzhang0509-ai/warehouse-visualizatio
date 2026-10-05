@@ -12,11 +12,10 @@ import panel_data as pd
 import inventory_health as ih
 import inventory_health_chart as ihc
 from channel_prefixes import (
+    family_for_channel_link,
     list_merged_channel_filter_options,
-    load_channel_families_file,
+    load_channel_families_for_region,
     load_region_po_channel_prefixes,
-    merge_channel_family_maps,
-    scan_channel_families_from_dirs,
 )
 
 
@@ -52,13 +51,7 @@ def _populate_ih_channel_combo(app):
             if ih._channel_matches_owner(f"{p}-000", p, owner, rows)
         ]
     _stock, _disp, _src, data_dir = pd.resolve_sources(region)
-    from pathlib import Path
-
-    fam_path = Path(data_dir) / "channel_families.csv"
-    families = merge_channel_family_maps(
-        scan_channel_families_from_dirs(data_dir),
-        load_channel_families_file(fam_path if fam_path.is_file() else None),
-    )
+    families = load_channel_families_for_region(region, data_dir)
     app._ih_channel_families = families
     merged = list_merged_channel_filter_options(prefixes, families)
     values = ["全部"] + merged
@@ -275,7 +268,7 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
         link = app._ih_row_link.get(sel[0], "")
         ihc.highlight_chart_link(app, link or None)
         families = getattr(app, "_ih_channel_families", None) or {}
-        app._ih_selected_family = link if link in families else None
+        app._ih_selected_family = family_for_channel_link(link, families)
         if getattr(app, "_ih_family_btn", None):
             state = tk.NORMAL if app._ih_selected_family else tk.DISABLED
             app._ih_family_btn.configure(state=state)
@@ -391,8 +384,10 @@ def _apply_chart(app, report, th):
         for w in app._ih_chart_frame.winfo_children():
             w.destroy()
         app._ih_thresholds = th.__dict__
+        chart_report = dict(report)
+        chart_report["rows"] = ih.rows_for_family_chart(report, th)
         app._ih_chart_widget, _fig, chart_meta, canvas = ihc.render_bubble_chart(
-            app._ih_chart_frame, report, th.__dict__,
+            app._ih_chart_frame, chart_report, th.__dict__,
         )
         if canvas is not None and _fig is not None:
             ihc.bind_chart_interaction(app, canvas, _fig, chart_meta)
@@ -421,8 +416,13 @@ def _apply_report(app, report, th, elapsed_sec=0.0, max_table_rows=600, draw_cha
 
     meta = report.get("meta") or {}
     warns = "; ".join(report.get("warnings") or [])
+    gb = (report.get("meta") or {}).get("group_by") or "channel"
+    if report.get("channel_families") and gb == "channel":
+        table_rows = ih.rows_for_family_chart(report, th)
+    else:
+        table_rows = report.get("rows") or []
     rows_sorted = sorted(
-        report.get("rows") or [],
+        table_rows,
         key=lambda r: (r.get("priority", 9), -(r.get("bubble_m3_day") or 0)),
     )
     total_rows = len(rows_sorted)

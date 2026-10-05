@@ -22,11 +22,9 @@ from typing import Any
 import panel_data as pd
 from channel_prefixes import (
     channel_group_key,
-    load_channel_families_file,
-    merge_channel_family_maps,
+    load_channel_families_for_region,
     normalize_sku_channel_code,
     resolve_channel_filter,
-    scan_channel_families_from_dirs,
     sub_to_family_map,
 )
 from sales_demand import (
@@ -447,11 +445,7 @@ def build_inventory_health_report(
     t_phase = _time.perf_counter()
 
     _stock_p, _disp_p, _src, data_dir = pd.resolve_sources(region_key)
-    fam_path = Path(data_dir) / "channel_families.csv"
-    channel_families = merge_channel_family_maps(
-        scan_channel_families_from_dirs(data_dir),
-        load_channel_families_file(fam_path if fam_path.is_file() else None),
-    )
+    channel_families = load_channel_families_for_region(region_key, data_dir)
     sub_to_fam = sub_to_family_map(channel_families)
     owner_cfg, _owner_path = pd.load_channel_owner_config(region_key, data_dir=data_dir)
     _bump("读 sales 8-30/15/30…")
@@ -645,6 +639,11 @@ def build_inventory_health_report(
     warnings.append(
         f"日均需求命中 {with_demand}/{len(rows_out)} 行（渠道={channel_f or '全部'}{island_note}）",
     )
+    if channel_families:
+        fam_bits = [
+            f"{fam}×{len(subs)}" for fam, subs in sorted(channel_families.items())
+        ]
+        warnings.append(f"渠道族已合并: {', '.join(fam_bits)}（点「分渠道图」或双击省气泡下钻）")
 
     timings["aggregate"] = _time.perf_counter() - t_phase
     _bump("完成，刷新界面…")
@@ -681,9 +680,64 @@ def build_inventory_health_report(
             "sales_demand_rows": len(demand_index),
             "sales_demand_rows_scoped": len(demand_index_scoped),
             "island_scope": island_f or None,
+            "group_by": group_by,
         },
         "warnings": warnings,
     }
+
+
+def rows_for_family_chart(
+    report: dict[str, Any],
+    thresholds: HealthThresholds | None = None,
+) -> list[dict[str, Any]]:
+    """主图：有渠道族时始终按省/族汇总（河北、山东），避免仍显示 hundreds 个三位号。"""
+    families = report.get("channel_families") or {}
+    if not families:
+        return list(report.get("rows") or [])
+    detail = report.get("rows_detail") or []
+    if not detail:
+        return list(report.get("rows") or [])
+    sub_map = sub_to_family_map(families)
+    th = thresholds or HealthThresholds(
+        stockout_pct=float((report.get("thresholds") or {}).get("stockout_pct") or DEFAULT_STOCKOUT_X),
+        consumption_days=float((report.get("thresholds") or {}).get("consumption_days") or DEFAULT_DAYS_Y),
+        cover_days_proxy=float((report.get("thresholds") or {}).get("cover_days_proxy") or DEFAULT_COVER_DAYS_PROXY),
+    )
+    sku_rows: list[InventoryHealthRow] = []
+    for d in detail:
+        sub = str(d.get("sub_channel") or channel_from_sku(str(d.get("sku") or ""))).strip()
+        if not sub:
+            continue
+        sku_rows.append(
+            InventoryHealthRow(
+                sku=str(d.get("sku") or ""),
+                name=str(d.get("name") or ""),
+                category=str(d.get("category") or ""),
+                channel=channel_group_key(sub, sub_map),
+                branch=str(d.get("branch") or ""),
+                stockout_rate_pct=d.get("stockout_rate_pct"),
+                stockout_source=str(d.get("stockout_source") or ""),
+                avg_daily_units=float(d.get("avg_daily_units") or 0),
+                unit_volume_m3=d.get("unit_volume_m3"),
+                avg_daily_demand_m3=d.get("avg_daily_demand_m3"),
+                inventory_units=float(d.get("inventory_units") or 0),
+                inventory_volume_m3=d.get("inventory_volume_m3"),
+                transit_volume_m3=float(d.get("transit_volume_m3") or 0),
+                theoretical_days=d.get("theoretical_days"),
+                theoretical_days_label=str(d.get("theoretical_days_label") or ""),
+                inventory_value=d.get("inventory_value"),
+                priority=int(d.get("priority") or 9),
+                quadrant=str(d.get("quadrant") or ""),
+                bubble_m3_day=float(d.get("bubble_m3_day") or 0),
+                demand_source=str(d.get("demand_source") or ""),
+                channel_family=sub_map.get(sub, ""),
+                sub_channel=sub,
+            )
+        )
+    if not sku_rows:
+        return list(report.get("rows") or [])
+    agg = _aggregate_rows(sku_rows, "channel", th, sub_to_fam=sub_map)
+    return [r.as_dict() for r in agg]
 
 
 def _aggregate_rows(

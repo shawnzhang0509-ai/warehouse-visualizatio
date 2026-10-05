@@ -4,7 +4,9 @@ import tempfile
 
 from channel_prefixes import (
     channel_group_key,
+    family_for_channel_link,
     list_merged_channel_filter_options,
+    load_channel_families_from_po_prefixes,
     parse_named_channel_folder,
     resolve_channel_filter,
     scan_channel_families_from_dirs,
@@ -27,6 +29,20 @@ class ChannelFamiliesTest(unittest.TestCase):
             fam = scan_channel_families_from_dirs(base)
             self.assertEqual(set(fam["河北"]), {"321", "352"})
             self.assertNotIn("996", fam)
+
+    def test_po_prefixes_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "po_channel_prefixes.txt"
+            path.write_text("河北_321\n河北_352\n山东_446\n378\n", encoding="utf-8")
+            fam = load_channel_families_from_po_prefixes(path)
+            self.assertEqual(set(fam["河北"]), {"321", "352"})
+            self.assertEqual(fam["山东"], ["446"])
+            self.assertNotIn("378", fam)
+
+    def test_family_for_link(self):
+        families = {"河北": ["321", "352"]}
+        self.assertEqual(family_for_channel_link("河北", families), "河北")
+        self.assertEqual(family_for_channel_link("321", families), "河北")
 
     def test_group_and_filter(self):
         families = {"河北": ["321", "352"], "山东": ["446"]}
