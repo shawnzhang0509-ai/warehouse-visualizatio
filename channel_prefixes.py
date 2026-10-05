@@ -213,17 +213,80 @@ def load_channel_families_from_txt(path: Path | None) -> dict[str, list[str]]:
     }
 
 
+def bundled_channel_families_path(region_key: str) -> Path:
+    """仓库内 Data-{region}/channel_families.txt（与 panel 安装目录同级）。"""
+    return ROOT_DIR / f"Data-{str(region_key or 'NZ').strip().upper()}" / "channel_families.txt"
+
+
+def _nz_channel_families_embedded() -> dict[str, list[str]]:
+    """安装目录缺文件时的兜底（与 Data-NZ/channel_families.txt 同步维护）。"""
+    lines = """
+山东_446
+山东_447
+山东_451
+山东_999
+河北_321
+河北_352
+河北_378
+河北_382
+河北_875
+河北_877
+"""
+    subs: dict[str, set[str]] = defaultdict(set)
+    for line in lines.splitlines():
+        parsed = parse_named_channel_folder(line.strip())
+        if parsed and parsed[0]:
+            subs[parsed[0]].add(parsed[1])
+    return {
+        fam: sorted(codes, key=lambda c: int(c) if c.isdigit() else c)
+        for fam, codes in subs.items()
+    }
+
+
+def load_bundled_channel_families(region_key: str) -> dict[str, list[str]]:
+    rk = str(region_key or "NZ").strip().upper()
+    path = bundled_channel_families_path(rk)
+    loaded = load_channel_families_from_txt(path if path.is_file() else None)
+    if loaded:
+        return loaded
+    if rk == "NZ":
+        return _nz_channel_families_embedded()
+    return {}
+
+
+def sync_channel_families_to_output(region_key: str, data_dir: Path | str | None) -> Path | None:
+    """把 Data-NZ/channel_families.txt 同步到 Output（用户只更新仓库也能生效）。"""
+    import shutil
+
+    src = bundled_channel_families_path(region_key)
+    if not src.is_file():
+        return None
+    dst = Path(data_dir or "") / "channel_families.txt"
+    if not dst.parent.is_dir():
+        return None
+    try:
+        if not dst.is_file() or src.stat().st_mtime > dst.stat().st_mtime:
+            shutil.copy2(src, dst)
+    except OSError:
+        return src
+    return dst if dst.is_file() else src
+
+
 def load_channel_families_for_region(
     region_key: str,
     data_dir: Path | str | None,
 ) -> dict[str, list[str]]:
+    rk = str(region_key or "NZ").strip().upper()
+    sync_channel_families_to_output(rk, data_dir)
     maps: list[dict[str, list[str]]] = []
-    for scan_dir in channel_family_scan_dirs(region_key, data_dir):
+    maps.append(load_bundled_channel_families(rk))
+    for scan_dir in channel_family_scan_dirs(rk, data_dir):
         maps.append(scan_channel_families_from_dirs(scan_dir))
-    maps.append(load_channel_families_from_po_prefixes(po_channel_prefixes_path(region_key)))
-    for fam_path in channel_families_txt_paths(region_key, data_dir):
+    maps.append(load_channel_families_from_po_prefixes(po_channel_prefixes_path(rk)))
+    for fam_path in channel_families_txt_paths(rk, data_dir):
         maps.append(load_channel_families_from_txt(fam_path))
-    return merge_channel_family_maps(*maps)
+    merged = merge_channel_family_maps(*maps)
+    return merged
 
 
 def family_for_channel_link(link: str, families: dict[str, list[str]]) -> str | None:

@@ -643,7 +643,13 @@ def build_inventory_health_report(
         fam_bits = [
             f"{fam}×{len(subs)}" for fam, subs in sorted(channel_families.items())
         ]
-        warnings.append(f"渠道族已合并: {', '.join(fam_bits)}（点「分渠道图」或双击省气泡下钻）")
+        warnings.append(
+            f"渠道族: {', '.join(fam_bits)} — 主图应显示省名；无则检查 Data-NZ/channel_families.txt"
+        )
+    elif region_key == "NZ":
+        warnings.append(
+            "未加载 channel_families（无河北/山东合并）；请 git pull 并确认 Data-NZ/channel_families.txt 存在",
+        )
 
     timings["aggregate"] = _time.perf_counter() - t_phase
     _bump("完成，刷新界面…")
@@ -737,7 +743,14 @@ def rows_for_family_chart(
     if not sku_rows:
         return list(report.get("rows") or [])
     agg = _aggregate_rows(sku_rows, "channel", th, sub_to_fam=sub_map)
-    return [r.as_dict() for r in agg]
+    out = [r.as_dict() for r in agg]
+    # 主图优先展示省渠道（河北/山东），其余三位号单独成点
+    family_labels = set(families.keys())
+    family_rows = [r for r in out if str(r.get("channel") or "") in family_labels]
+    other_rows = [r for r in out if str(r.get("channel") or "") not in family_labels]
+    if family_rows:
+        return family_rows + other_rows
+    return out
 
 
 def _aggregate_rows(
