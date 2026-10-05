@@ -1,4 +1,6 @@
-"""库存健康 / 库存错配气泡图 — 基于现有 Output CSV（stock、weekly_sales、po）。
+"""库存健康 / 库存错配气泡图 — 仅读本地 Output/Data CSV（stock、sales、po.csv），不连接数据库。
+
+库存健康 / 库存错配气泡图 — 基于现有 Output CSV（stock、weekly_sales、po）。
 
 字段映射（不臆造列名，模糊匹配 panel_data 惯例）：
 - SKU / 名称 / 分类：stock.csv → Sku, ProductName, ProductFamily
@@ -296,15 +298,11 @@ def _priority(stockout: float | None, demand_m3: float | None, days: float | Non
 
 
 def _load_po_by_sku(region: str) -> dict[str, float]:
-    """在途体积：默认只读 po.csv，避免 load_po_lines() 再次连库跑 PO SQL（会卡数分钟）。"""
+    """在途体积：只读 Output-{region}/po.csv，绝不连数据库。"""
     if wv is None:
         return {}
-    use_db = os.getenv("INVENTORY_HEALTH_PO_FROM_DB", "").strip().lower() in ("1", "true", "yes")
     try:
-        if use_db:
-            lines, _err, _path, _stats = wv.load_po_lines(region)
-        else:
-            lines, _path = wv.load_po_lines_from_csv(region)
+        lines, _path = wv.load_po_lines_from_csv(region)
     except Exception:
         return {}
     out: dict[str, float] = defaultdict(float)
@@ -332,8 +330,9 @@ def build_inventory_health_report(
 ) -> dict[str, Any]:
     th = thresholds or HealthThresholds()
     region_key = str(region or pd.default_region() or "NZ").strip().upper()
+    _stock_p, _disp_p, _src, data_dir = pd.resolve_sources(region_key)
     bundle = pd.get_region_bundle(region_key)
-    demand_index, sales_warns = load_sales_demand_index(region_key)
+    demand_index, sales_warns = load_sales_demand_index(region_key, data_dir=data_dir)
     demand_by_sc = _demand_by_sku_channel(demand_index)
     always_weekly = os.getenv("INVENTORY_HEALTH_ALWAYS_WEEKLY", "").strip().lower() in ("1", "true", "yes")
     if demand_index and not always_weekly:
@@ -345,7 +344,12 @@ def build_inventory_health_report(
         sales_buckets, span_days, d_min, d_max = _sales_aggregates(weekly_rows, lookback_days)
         warnings_weekly_skip = ""
 
-    stock_raw = bundle.get("stock_raw_rows") or []
+    stock_raw = bundle.get("stock_raw_rows")
+    if not stock_raw:
+        stock_path = bundle.get("stock_path") or _stock_p
+        if stock_path and Path(stock_path).is_file():
+            stock_raw = pd._read_table(stock_path)
+    stock_raw = stock_raw or []
     po_by_sku = _load_po_by_sku(region_key)
 
     rows_out: list[InventoryHealthRow] = []

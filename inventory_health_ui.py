@@ -115,9 +115,16 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
 def render_inventory_health(app, force=False):
     region = app._current_region() if hasattr(app, "_current_region") else "NZ"
 
+    now = time.time()
     if getattr(app, "_ih_busy", False):
-        app._ih_status.configure(text="仍在计算中，请稍候…（勿重复点刷新）")
-        return
+        since = float(getattr(app, "_ih_busy_since", now) or now)
+        if force or (now - since) > 90:
+            app._ih_busy = False
+        else:
+            app._ih_status.configure(
+                text=f"仍在计算中…（{int(now - since)}s）仅读本地 CSV，不查数据库；超过 90s 可再点刷新",
+            )
+            return
 
     MAX_TABLE_ROWS = 600
 
@@ -146,8 +153,9 @@ def render_inventory_health(app, force=False):
 
     if force or not getattr(app, "_ih_report", None):
         app._ih_busy = True
+        app._ih_busy_since = time.time()
         app._ih_status.configure(
-            text="正在计算库存健康指标…（读 stock + sales + po.csv，通常 10～40 秒）",
+            text="正在计算库存健康…（仅读 Output-NZ 下 stock / sales / po.csv，不连 SQL）",
         )
         threading.Thread(target=work, daemon=True).start()
 

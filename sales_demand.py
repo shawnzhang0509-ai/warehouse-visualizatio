@@ -141,14 +141,19 @@ def _merge_row(
         slot["row"] = row
 
 
-def load_sales_demand_index(region: str | None = None) -> tuple[dict[tuple[str, str, str], SalesDemandRecord], list[str]]:
+def load_sales_demand_index(
+    region: str | None = None,
+    *,
+    data_dir: Path | str | None = None,
+) -> tuple[dict[tuple[str, str, str], SalesDemandRecord], list[str]]:
     """
-    读取 Data/Output 下 sales 8-30 / 15 / 30 文本或合并表。
+    读取 Data/Output 下 sales 8-30 / 15 / 30 文本或合并表（仅 CSV，不连库）。
     返回 (index, warnings)。
     """
     region_key = str(region or pd.default_region() or "NZ").strip().upper()
-    bundle = pd.get_region_bundle(region_key)
-    data_dir = Path(bundle.get("data_dir") or "")
+    if data_dir is None:
+        _s, _d, _src, data_dir = pd.resolve_sources(region_key)
+    data_dir = Path(data_dir or "")
     search_dirs: list[Path] = [data_dir]
     try:
         from runner_config import load_runner_config
