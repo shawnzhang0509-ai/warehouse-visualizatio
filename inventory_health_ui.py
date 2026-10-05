@@ -11,7 +11,12 @@ from tkinter import ttk
 import panel_data as pd
 import inventory_health as ih
 import inventory_health_chart as ihc
-from channel_prefixes import load_region_po_channel_prefixes
+from channel_prefixes import (
+    family_for_channel_link,
+    list_merged_channel_filter_options,
+    load_channel_families_for_region,
+    load_region_po_channel_prefixes,
+)
 
 
 def _ui_after(app, delay_ms: int, callback):
@@ -45,7 +50,11 @@ def _populate_ih_channel_combo(app):
             p for p in prefixes
             if ih._channel_matches_owner(f"{p}-000", p, owner, rows)
         ]
-    values = ["全部"] + prefixes
+    _stock, _disp, _src, data_dir = pd.resolve_sources(region)
+    families = load_channel_families_for_region(region, data_dir)
+    app._ih_channel_families = families
+    merged = list_merged_channel_filter_options(prefixes, families)
+    values = ["全部"] + merged
     if getattr(app, "_ih_channel_combo", None) is not None:
         app._ih_channel_combo["values"] = values
 
@@ -60,7 +69,7 @@ def _snapshot_ih_filters(app) -> dict:
         "category": app._ih_category_var.get(),
         "sku": app._ih_sku_var.get(),
         "branch": app._ih_branch_var.get(),
-        "group_by": app._ih_group_var.get() or "sku",
+        "group_by": app._ih_group_var.get() or "channel",
         "owner": app._ih_owner_var.get() if hasattr(app, "_ih_owner_var") else "",
         "island_scope": (
             app._ih_island_var.get()
@@ -192,7 +201,19 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
             getattr(app, "_ih_thresholds", {}),
         ),
     )
-    app._ih_outlier_btn.pack(side=tk.LEFT)
+    app._ih_outlier_btn.pack(side=tk.LEFT, padx=(0, 6))
+    app._ih_family_btn = ttk.Button(
+        chart_tool,
+        text="分渠道图",
+        state=tk.DISABLED,
+        command=lambda: ihc.open_family_subchannels_chart(
+            app.root,
+            getattr(app, "_ih_report", None) or {},
+            getattr(app, "_ih_selected_family", None),
+            getattr(app, "_ih_thresholds", {}),
+        ),
+    )
+    app._ih_family_btn.pack(side=tk.LEFT)
     chart_frame = tk.Frame(chart_wrap, bg="white")
     chart_frame.pack(fill=tk.BOTH, expand=True)
     table_frame = tk.Frame(panes, bg="white")
@@ -240,9 +261,17 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
         sel = app._ih_tree.selection()
         if not sel:
             ihc.highlight_chart_link(app, None)
+            app._ih_selected_family = None
+            if getattr(app, "_ih_family_btn", None):
+                app._ih_family_btn.configure(state=tk.DISABLED)
             return
         link = app._ih_row_link.get(sel[0], "")
         ihc.highlight_chart_link(app, link or None)
+        families = getattr(app, "_ih_channel_families", None) or {}
+        app._ih_selected_family = family_for_channel_link(link, families)
+        if getattr(app, "_ih_family_btn", None):
+            state = tk.NORMAL if app._ih_selected_family else tk.DISABLED
+            app._ih_family_btn.configure(state=state)
 
     app._ih_tree.bind("<<TreeviewSelect>>", _on_ih_tree_select)
 
@@ -261,8 +290,8 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
 
     formula = tk.Label(
         tab,
-        text="渠道 = SKU 前三位；负责人来自 channel_owners.csv；NZ 可选南北岛（北=Carbine+Walls 在库、南=Gerald Connelly，"
-        "销量按 sales Region，在途按 po 南北岛）；气泡按象限着色（橙=缺货高周转低）；主图 0–150 天",
+        text="省渠道：po_channel_prefixes.txt 写 河北_321 或 Output 下同名文件夹 → 主图显示河北/山东；"
+        "单击选中、双击省气泡或点「分渠道图」下钻子渠道；汇总=渠道",
         bg="white", fg="#64748b", font=("Segoe UI", 8),
         wraplength=900, justify=tk.LEFT,
     )
@@ -314,7 +343,7 @@ def render_inventory_health(app, force=False):
                 branch=snap.get("branch") or "",
                 owner=owner,
                 island_scope=island,
-                group_by=snap.get("group_by") or "sku",
+                group_by=snap.get("group_by") or "channel",
                 thresholds=th,
                 progress=bump,
             )
@@ -355,8 +384,10 @@ def _apply_chart(app, report, th):
         for w in app._ih_chart_frame.winfo_children():
             w.destroy()
         app._ih_thresholds = th.__dict__
+        chart_report = dict(report)
+        chart_report["rows"] = ih.rows_for_family_chart(report, th)
         app._ih_chart_widget, _fig, chart_meta, canvas = ihc.render_bubble_chart(
-            app._ih_chart_frame, report, th.__dict__,
+            app._ih_chart_frame, chart_report, th.__dict__,
         )
         if canvas is not None and _fig is not None:
             ihc.bind_chart_interaction(app, canvas, _fig, chart_meta)
@@ -372,6 +403,8 @@ def _apply_chart(app, report, th):
 
 def _apply_report(app, report, th, elapsed_sec=0.0, max_table_rows=600, draw_chart=True):
     app._ih_report = report
+    if report.get("channel_families"):
+        app._ih_channel_families = report["channel_families"]
     s = report.get("summary") or {}
     cards = app._ih_card_labels
     cards["inv_m3"].configure(text=str(s.get("total_inventory_volume_m3", "—")))
@@ -385,8 +418,12 @@ def _apply_report(app, report, th, elapsed_sec=0.0, max_table_rows=600, draw_cha
 
     meta = report.get("meta") or {}
     warns = "; ".join(report.get("warnings") or [])
+    if report.get("channel_families"):
+        table_rows = ih.rows_for_family_chart(report, th)
+    else:
+        table_rows = report.get("rows") or []
     rows_sorted = sorted(
-        report.get("rows") or [],
+        table_rows,
         key=lambda r: (r.get("priority", 9), -(r.get("bubble_m3_day") or 0)),
     )
     total_rows = len(rows_sorted)

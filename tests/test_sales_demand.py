@@ -1,6 +1,11 @@
 import unittest
 
-from sales_demand import _pick_applied_daily, _qty_for_window
+from sales_demand import (
+    SalesDemandRecord,
+    _pick_applied_daily,
+    _qty_for_window,
+    scope_demand_index_for_island,
+)
 
 
 class SalesDemandTest(unittest.TestCase):
@@ -28,6 +33,23 @@ class SalesDemandTest(unittest.TestCase):
         daily, src = _pick_applied_daily(row, {})
         self.assertAlmostEqual(daily, 0.42)
         self.assertIn("8-30", src)
+
+    def test_island_scope_fallback_when_no_region_column(self):
+        rec = SalesDemandRecord(
+            sku="130-001",
+            channel="130",
+            region="",
+            avg_daily_units=2.0,
+            demand_source="8-30天",
+            qty_windows={},
+            unit_volume_m3=None,
+            stockout_rate_pct=None,
+            raw_name="",
+        )
+        index = {("130001", "130", ""): rec}
+        scoped, note = scope_demand_index_for_island(index, "北岛")
+        self.assertEqual(len(scoped), 1)
+        self.assertIn("全国", note or "")
 
     def test_v4_max_windows(self):
         from sales_demand import _pick_applied_daily

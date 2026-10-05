@@ -13,7 +13,11 @@ from pathlib import Path
 from typing import Any
 
 import panel_data as pd
-from channel_prefixes import normalize_sku_channel_code
+from channel_prefixes import (
+    channel_family_scan_dirs,
+    normalize_sku_channel_code,
+    parse_named_channel_folder,
+)
 
 WINDOWS = (
     (
@@ -38,10 +42,16 @@ V4_DAILY_DEMAND_KEYS = [
     "avg_daily_demand_3checkins_avg",
     "singleavgdailydemand",
     "singleavgdailysales",
+    "singleavg",
+    "single_avg",
     "avgdailysales",
     "avgdailydemand",
     "avg_daily_sales",
     "avg_dailysales",
+]
+PO_SHAPED_KEYS = [
+    "checkindate", "check_in_date", "containernumber", "container_number",
+    "purchaseorder", "purchase_order", "sourcetype", "source_type",
 ]
 V4_WINDOW_DEMAND_KEYS = {
     "8-30": ["需求_8_30天", "需求_8-30天", "demand_8_30", "demand_8-30"],
@@ -51,7 +61,10 @@ V4_WINDOW_DEMAND_KEYS = {
 SAMPLE_QTY_KEYS = ["sampleqty", "sample_qty", "样品销量", "样本销量"]
 SAMPLE_DAYS_KEYS = ["sampledays", "sample_days", "样本天数", "sampleday"]
 DEMAND_SOURCE_KEYS = ["demandsource", "demand_source", "需求来源", "采用来源"]
-REGION_KEYS = ["region", "地区", "island", "南北岛", "destinationregion"]
+REGION_KEYS = [
+    "region", "地区", "island", "南北岛", "destinationregion",
+    "destination_region", "merge_regions", "shippedtoport", "shipped_to_port",
+]
 CHANNEL_KEYS = ["channel", "渠道", "sku_prefix"] + pd.CHANNEL_KEYS
 
 
@@ -61,9 +74,15 @@ def normalize_demand_island(text: str | None) -> str:
     if not raw:
         return ""
     low = raw.lower().replace(" ", "")
-    if raw in ("北岛", "北", "North", "NI", "North Island", "NorthIsland") or "north" in low:
+    if raw in (
+        "北岛", "北", "North", "NI", "North Island", "NorthIsland",
+        "NorthIslandTotal", "北岛合计",
+    ) or "north" in low or low in ("ni", "northisland"):
         return "北岛"
-    if raw in ("南岛", "南", "South", "SI", "South Island", "SouthIsland") or "south" in low:
+    if raw in (
+        "南岛", "南", "South", "SI", "South Island", "SouthIsland",
+        "SouthIslandTotal", "南岛合计",
+    ) or "south" in low or low in ("si", "southisland"):
         return "南岛"
     if "南" in raw:
         return "南岛"
@@ -86,6 +105,55 @@ def filter_demand_index_by_island(
         if reg == scope:
             out[key] = rec
     return out
+
+
+def demand_index_has_island_labels(index: dict[tuple[str, str, str], Any]) -> bool:
+    for rec in (index or {}).values():
+        if normalize_demand_island(getattr(rec, "region", "") or ""):
+            return True
+    return False
+
+
+def sample_demand_region_labels(index: dict[tuple[str, str, str], Any], limit: int = 6) -> list[str]:
+    seen: list[str] = []
+    for rec in (index or {}).values():
+        raw = str(getattr(rec, "region", "") or "").strip() or "(空)"
+        if raw not in seen:
+            seen.append(raw)
+        if len(seen) >= limit:
+            break
+    return seen
+
+
+def scope_demand_index_for_island(
+    index: dict[tuple[str, str, str], Any],
+    island_scope: str,
+) -> tuple[dict[tuple[str, str, str], Any], str | None]:
+    """
+    按南北岛筛销量；若 CSV 完全无地区列（V4 渠道子目录常见），回退全国销量并提示。
+    在库/在途仍由 inventory_health 按岛筛。
+    """
+    scope = normalize_demand_island(island_scope)
+    if not scope:
+        return dict(index or {}), None
+    matched = filter_demand_index_by_island(index, scope)
+    if matched:
+        return matched, None
+    if not index:
+        return {}, f"无 sales 导出；南北岛={scope} 仅筛在库/在途"
+    if not demand_index_has_island_labels(index):
+        samples = ", ".join(sample_demand_region_labels(index))
+        return dict(index), (
+            f"销量未分南北岛（Region 示例: {samples}），日均需求暂用全国合计；"
+            f"在库/在途仍按{scope}。请在 sales 导出加 Region 或放 Output-NZ/北岛/渠道号/ 下"
+        )
+    samples = ", ".join(sample_demand_region_labels(index, 8))
+    return {}, (
+        f"销量有地区列但未匹配{scope}（见到: {samples}）。"
+        "请核对导出是否为 北岛/南岛 或 North/South Island"
+    )
+
+
 SKU_KEYS = pd.CODE_KEYS
 NAME_KEYS = pd.NAME_KEYS
 
@@ -210,17 +278,65 @@ def _pick_applied_daily(row: dict, windows_state: dict[str, float]) -> tuple[flo
     return best_val, best_src
 
 
+def _read_sales_table(path: Path | str) -> list[dict]:
+    """库存健康读销量：优先 CSV；同目录 xlsx 便于 Excel 另存为。"""
+    path = Path(path)
+    if path.suffix.lower() == ".csv":
+        return pd._read_table(path)
+    if path.suffix.lower() == ".xlsx":
+        reader = getattr(pd, "_read_xlsx_rows", None)
+        if callable(reader):
+            return reader(path)
+    return []
+
+
+def _headers_look_like_sales_demand(rows: list[dict]) -> bool:
+    if not rows:
+        return False
+    sample = {str(k).strip().lower() for k in rows[0]}
+    joined = "".join(sorted(sample))
+    if not any(k in sample for k in ("sku", "productcode", "itemcode", "编码")):
+        return False
+    demand_markers = (
+        "8-30", "8_30", "830", "15", "30", "采用", "applieddemand",
+        "avgdaily", "singleavg", "dailydemand", "日均需求", "sales",
+    )
+    return any(m in joined for m in demand_markers)
+
+
+def _warn_po_shaped_sales(path: Path, rows: list[dict], warnings: list[str]) -> None:
+    if not rows:
+        return
+    po_hits = 0
+    zero_demand = 0
+    for row in rows[:500]:
+        if any(_pick(row, [k]) for k in PO_SHAPED_KEYS):
+            po_hits += 1
+        if (_precomputed_daily_units(row) or 0) <= 0:
+            zero_demand += 1
+    n = min(len(rows), 500)
+    if po_hits >= max(3, n // 2) and zero_demand >= max(3, n * 4 // 5):
+        warnings.append(
+            f"⚠ {path.name} 含 CheckinDate/Container/PurchaseOrder 等列且日均需求多为 0，"
+            "像 po.csv 在途表而非销量；请用 supplychain/V4 导出 sales 8-30/15/30（或带 Region 的销量宽表）",
+        )
+
+
 def _find_sales_file_in_dir(folder: Path, stems: tuple[str, ...]) -> Path | None:
     folder = Path(folder)
     if not folder.is_dir():
         return None
     for stem in stems:
-        for ext in (".csv", ".txt"):
+        for ext in (".csv", ".txt", ".xlsx"):
             candidate = folder / f"{stem}{ext}"
             if candidate.is_file():
                 return candidate
     stem_set = {s.lower().replace("_", " ").replace("-", " ") for s in stems}
-    for candidate in sorted(folder.glob("*.csv")) + sorted(folder.glob("*.txt")):
+    for candidate in (
+        sorted(folder.glob("*.csv"))
+        + sorted(folder.glob("*.txt"))
+        + sorted(folder.glob("*.xlsx"))
+    ):
         norm = candidate.stem.lower().replace("_", " ").replace("-", " ")
         if norm in stem_set:
             return candidate
@@ -233,8 +349,10 @@ def _load_per_channel_sales_dirs(
     data_dir: Path,
     acc: dict[tuple[str, str, str], dict[str, Any]],
     warnings: list[str],
+    *,
+    default_region: str = "",
 ) -> bool:
-    """V4 渠道子目录：Output-NZ/996/Sales 8-30.csv 等。"""
+    """V4 渠道子目录：Output-NZ/996/Sales 8-30.csv 或 Output-NZ/北岛/996/…"""
     loaded = False
     if not data_dir.is_dir():
         return False
@@ -244,25 +362,39 @@ def _load_per_channel_sales_dirs(
         name = child.name
         if name in ("latest", "config", "_config") or re.fullmatch(r"\d{8}_\d{6}", name):
             continue
-        ch_hint = re.match(r"^(\d{3})", name)
+        island_from_dir = normalize_demand_island(name)
+        if island_from_dir:
+            if _load_per_channel_sales_dirs(
+                child, acc, warnings, default_region=island_from_dir,
+            ):
+                loaded = True
+            continue
+        parsed_folder = parse_named_channel_folder(name)
+        if parsed_folder:
+            _fam, sub_code = parsed_folder
+            ch_hint = re.match(r"^(\d{3})$", sub_code)
+        else:
+            ch_hint = re.match(r"^(\d{3})", name)
         if not ch_hint:
             continue
         for window, days, stems in WINDOWS:
             path = _find_sales_file_in_dir(child, stems)
             if not path:
                 continue
-            rows = pd._read_table(path)
+            rows = _read_sales_table(path)
             if not rows:
                 continue
             loaded = True
-            warnings.append(f"已读 {name}/{path.name}（{len(rows)} 行）")
+            region_tag = default_region or ""
+            tag = f"{region_tag}/{name}" if region_tag else name
+            warnings.append(f"已读 {tag}/{path.name}（{len(rows)} 行）")
             for row in rows:
                 if not _pick(row, CHANNEL_KEYS) and not _pick(row, SKU_KEYS):
                     continue
                 if not _pick(row, CHANNEL_KEYS):
                     row = dict(row)
                     row.setdefault("渠道", ch_hint.group(1))
-                _merge_row(acc, row, window, days)
+                _merge_row(acc, row, window, days, default_region=default_region)
     return loaded
 
 
@@ -271,6 +403,8 @@ def _merge_row(
     row: dict,
     window: str | None,
     window_days: int | None,
+    *,
+    default_region: str = "",
 ):
     sku = str(_pick(row, SKU_KEYS) or "").strip()
     if not sku:
@@ -280,6 +414,8 @@ def _merge_row(
         sku,
     ) or pd.sku_prefix(sku)
     region = str(_pick(row, REGION_KEYS) or "").strip()
+    if not region and default_region:
+        region = default_region
     key = _norm_key(sku, channel, region)
     slot = acc.setdefault(
         key,
@@ -319,18 +455,12 @@ def load_sales_demand_index(
     if data_dir is None:
         _s, _d, _src, data_dir = pd.resolve_sources(region_key)
     data_dir = Path(data_dir or "")
-    search_dirs: list[Path] = [data_dir]
-    try:
-        from runner_config import load_runner_config
-
-        reg = (load_runner_config().get("regions") or {}).get(region_key) or {}
-        tpl = Path(str(reg.get("template_dir") or f"Data-{region_key}"))
-        if not tpl.is_absolute():
-            tpl = Path(__file__).resolve().parent / tpl
-        if tpl.is_dir():
-            search_dirs.append(tpl)
-    except Exception:
-        pass
+    search_dirs: list[Path] = []
+    for sd in channel_family_scan_dirs(region_key, data_dir):
+        if sd not in search_dirs:
+            search_dirs.append(sd)
+    if not search_dirs and data_dir.is_dir():
+        search_dirs.append(data_dir)
     warnings: list[str] = []
     acc: dict[tuple[str, str, str], dict[str, Any]] = {}
 
@@ -347,31 +477,50 @@ def load_sales_demand_index(
         if not path or not Path(path).is_file():
             continue
         loaded_any = True
-        rows = pd._read_table(path)
+        rows = _read_sales_table(path)
         warnings.append(f"已读 {Path(path).name}（{len(rows)} 行）")
+        _warn_po_shaped_sales(Path(path), rows, warnings)
         for row in rows:
             _merge_row(acc, row, window, days)
 
-    # 合并宽表（单文件含多窗口列）
-    for stems in (("sales", "sales_merged", "sales_channel"),):
-        path = _find(stems)
+    # 合并宽表（单文件含多窗口列或 V4 日均需求列 + Region）
+    for stems in (
+        "sales", "sales_merged", "sales_channel",
+        "aggregate_sales", "sales_demand", "sales_export",
+    ):
+        path = _find((stems,))
         if not path or not Path(path).is_file():
             continue
         if any(Path(path).name.lower().startswith(s.split()[0]) for s, _, _ in WINDOWS):
             continue
-        rows = pd._read_table(path)
-        if not rows:
-            continue
-        sample = {str(k).lower() for k in rows[0]}
-        if not any(w in "".join(sample) for w in ("8-30", "15", "30", "采用")):
+        rows = _read_sales_table(path)
+        if not rows or not _headers_look_like_sales_demand(rows):
             continue
         loaded_any = True
         warnings.append(f"已读宽表 {Path(path).name}")
+        _warn_po_shaped_sales(Path(path), rows, warnings)
         for row in rows:
             _merge_row(acc, row, None, None)
 
-    subdir_loaded = _load_per_channel_sales_dirs(data_dir, acc, warnings)
+    subdir_loaded = False
+    for sd in search_dirs:
+        subdir_loaded = _load_per_channel_sales_dirs(sd, acc, warnings) or subdir_loaded
     loaded_any = loaded_any or subdir_loaded
+
+    if not loaded_any:
+        # 根目录任意 *sales*.csv/xlsx（含 Region + AvgDailyDemand）
+        for candidate in sorted(data_dir.glob("*sales*.*")):
+            if candidate.suffix.lower() not in (".csv", ".xlsx"):
+                continue
+            rows = _read_sales_table(candidate)
+            if not _headers_look_like_sales_demand(rows):
+                continue
+            loaded_any = True
+            warnings.append(f"已读 {candidate.name}（{len(rows)} 行）")
+            _warn_po_shaped_sales(candidate, rows, warnings)
+            for row in rows:
+                _merge_row(acc, row, None, None)
+            break
 
     if not loaded_any:
         return {}, ["未找到 sales 8-30 / 15 / 30 导出（Output 根目录或渠道子文件夹）"]
@@ -408,6 +557,14 @@ def load_sales_demand_index(
             stockout_rate_pct=so_pct,
             raw_name=slot.get("name") or "",
         )
+    with_units = sum(1 for r in out.values() if (r.avg_daily_units or 0) > 0)
+    if out and with_units == 0:
+        warnings.append(
+            f"已加载 {len(out)} 条销量行，但 AvgDailyDemand/采用需求/窗口销量均为 0；"
+            "请检查 SQL 是否导出了真实销量（不是 PO 在途行）",
+        )
+    elif out:
+        warnings.append(f"销量有效日均>0：{with_units}/{len(out)} 条")
     return out, warnings
 
 
