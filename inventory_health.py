@@ -129,6 +129,34 @@ def _lookup_sales_demand(index, norm: str, channel: str, branch: str):
     return None
 
 
+def _demand_by_sku_channel(index) -> dict[tuple[str, str], Any]:
+    """O(1) 查找：每个 SKU×渠道 保留日均需求最高的一条（避免对每个 SKU 扫全表）。"""
+    out: dict[tuple[str, str], Any] = {}
+    for (norm, ch, _reg), rec in (index or {}).items():
+        key = (norm, (ch or "").upper())
+        prev = out.get(key)
+        if prev is None or (rec.avg_daily_units or 0) > (prev.avg_daily_units or 0):
+            out[key] = rec
+    return out
+
+
+def _weekly_totals_by_sku_channel(
+    buckets: dict[tuple[str, str, str], dict],
+    branch_f: str,
+) -> dict[tuple[str, str], dict]:
+    """按 SKU×渠道 汇总 weekly_sales（分店可选），避免对每个 SKU 遍历 9 万行桶。"""
+    out: dict[tuple[str, str], dict] = defaultdict(lambda: {"qty": 0.0, "stockout": []})
+    branch_f = (branch_f or "").strip()
+    for (norm, ch, branch), bucket in buckets.items():
+        if branch_f and branch != branch_f:
+            continue
+        key = (norm, ch)
+        slot = out[key]
+        slot["qty"] += float(bucket.get("qty") or 0.0)
+        slot["stockout"].extend(bucket.get("stockout") or [])
+    return dict(out)
+
+
 def _to_float(val, default=None):
     return pd._to_float(val) if val is not None else default
 
@@ -301,6 +329,7 @@ def build_inventory_health_report(
     region_key = str(region or pd.default_region() or "NZ").strip().upper()
     bundle = pd.get_region_bundle(region_key)
     demand_index, sales_warns = load_sales_demand_index(region_key)
+    demand_by_sc = _demand_by_sku_channel(demand_index)
     weekly_rows, weekly_path, weekly_warn = _load_weekly_sales(region_key)
     sales_buckets, span_days, d_min, d_max = _sales_aggregates(weekly_rows, lookback_days)
 
@@ -318,6 +347,7 @@ def build_inventory_health_report(
     branch_f = branch.strip()
     supplier_f = supplier.strip().lower()
     brand_f = brand.strip().lower()
+    weekly_by_sc = _weekly_totals_by_sku_channel(sales_buckets, branch_f)
 
     for raw in stock_raw:
         if pd._is_discontinued(_pick(raw, pd.DISCONTINUE_KEYS)):
@@ -352,6 +382,8 @@ def build_inventory_health_report(
         demand_source = ""
         stockout_vals: list[float] = []
         demand_rec = _lookup_sales_demand(demand_index, norm, ch, branch_f)
+        if demand_rec is None:
+            demand_rec = demand_by_sc.get((norm, ch))
         if demand_rec and demand_rec.avg_daily_units > 0:
             avg_daily = demand_rec.avg_daily_units
             demand_source = demand_rec.demand_source
@@ -362,14 +394,12 @@ def build_inventory_health_report(
         else:
             sale = sales_buckets.get((norm, ch, branch_f)) if branch_f else None
             if sale is None:
-                qty_sum = 0.0
-                for (n, c, b), bucket in sales_buckets.items():
-                    if n != norm or c != ch:
-                        continue
-                    if branch_f and b != branch_f:
-                        continue
-                    qty_sum += bucket["qty"]
-                    stockout_vals.extend(bucket["stockout"])
+                tot = weekly_by_sc.get((norm, ch))
+                if tot:
+                    qty_sum = float(tot.get("qty") or 0.0)
+                    stockout_vals = list(tot.get("stockout") or [])
+                else:
+                    qty_sum = 0.0
                 avg_daily = qty_sum / span_days if span_days > 0 else 0.0
                 demand_source = f"weekly_sales/{span_days}d"
             else:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import tkinter as tk
 from tkinter import ttk
 
@@ -114,8 +115,11 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
 def render_inventory_health(app, force=False):
     region = app._current_region() if hasattr(app, "_current_region") else "NZ"
 
+    MAX_TABLE_ROWS = 600
+
     def work():
         try:
+            t0 = time.perf_counter()
             th = ih.HealthThresholds(
                 stockout_pct=float(app._ih_stockout_th.get() or ih.DEFAULT_STOCKOUT_X),
                 consumption_days=float(app._ih_days_th.get() or ih.DEFAULT_DAYS_Y),
@@ -130,16 +134,19 @@ def render_inventory_health(app, force=False):
                 group_by=app._ih_group_var.get() or "sku",
                 thresholds=th,
             )
-            app.after(0, lambda: _apply_report(app, report, th))
+            elapsed = time.perf_counter() - t0
+            app.after(0, lambda: _apply_report(app, report, th, elapsed, MAX_TABLE_ROWS))
         except Exception as exc:
             app.after(0, lambda: app._ih_status.configure(text=f"库存健康加载失败：{exc}"))
 
     if force or not getattr(app, "_ih_report", None):
-        app._ih_status.configure(text="正在计算库存健康指标…")
+        app._ih_status.configure(
+            text="正在计算库存健康指标…（首次会读 stock + sales + weekly_sales，约几秒～半分钟）",
+        )
         threading.Thread(target=work, daemon=True).start()
 
 
-def _apply_report(app, report, th):
+def _apply_report(app, report, th, elapsed_sec=0.0, max_table_rows=600):
     app._ih_report = report
     s = report.get("summary") or {}
     cards = app._ih_card_labels
@@ -153,14 +160,22 @@ def _apply_report(app, report, th):
 
     meta = report.get("meta") or {}
     warns = "; ".join(report.get("warnings") or [])
+    rows_sorted = sorted(
+        report.get("rows") or [],
+        key=lambda r: (r.get("priority", 9), -(r.get("bubble_m3_day") or 0)),
+    )
+    total_rows = len(rows_sorted)
+    display_rows = rows_sorted[: max(1, int(max_table_rows or 600))]
+    timing = f" · 计算 {elapsed_sec:.1f}s" if elapsed_sec else ""
+    trunc = f" · 表格 {len(display_rows)}/{total_rows}" if total_rows > len(display_rows) else ""
     app._ih_status.configure(
-        text=f"{report.get('region')} · {s.get('sku_count', 0)} 点 · "
-        f"销量跨度 {meta.get('sales_span_days')} 天 · {warns or meta.get('stockout_note', '')[:120]}",
+        text=f"{report.get('region')} · {s.get('sku_count', 0)} 点{timing}{trunc} · "
+        f"销量跨度 {meta.get('sales_span_days')} 天 · {warns or meta.get('stockout_note', '')[:100]}",
     )
 
     for iid in app._ih_tree.get_children():
         app._ih_tree.delete(iid)
-    for row in sorted(report.get("rows") or [], key=lambda r: (r.get("priority", 9), -(r.get("bubble_m3_day") or 0))):
+    for row in display_rows:
         tag = ("mismatch",) if row.get("quadrant") == "Inventory Mismatch" else ()
         app._ih_tree.insert(
             "", "end",
