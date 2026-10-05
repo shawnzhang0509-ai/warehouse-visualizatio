@@ -202,16 +202,12 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
         ),
     )
     app._ih_outlier_btn.pack(side=tk.LEFT, padx=(0, 6))
+    app._ih_drilldown = None
     app._ih_family_btn = ttk.Button(
         chart_tool,
         text="分渠道图",
         state=tk.DISABLED,
-        command=lambda: ihc.open_family_subchannels_chart(
-            app.root,
-            getattr(app, "_ih_report", None) or {},
-            getattr(app, "_ih_selected_family", None),
-            getattr(app, "_ih_thresholds", {}),
-        ),
+        command=lambda: ihc.run_inventory_health_drilldown(app),
     )
     app._ih_family_btn.pack(side=tk.LEFT)
     chart_frame = tk.Frame(chart_wrap, bg="white")
@@ -267,11 +263,7 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
             return
         link = app._ih_row_link.get(sel[0], "")
         ihc.highlight_chart_link(app, link or None)
-        families = getattr(app, "_ih_channel_families", None) or {}
-        app._ih_selected_family = family_for_channel_link(link, families)
-        if getattr(app, "_ih_family_btn", None):
-            state = tk.NORMAL if app._ih_selected_family else tk.DISABLED
-            app._ih_family_btn.configure(state=state)
+        ihc.sync_inventory_health_drilldown_btn(app, link)
 
     app._ih_tree.bind("<<TreeviewSelect>>", _on_ih_tree_select)
 
@@ -290,8 +282,8 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
 
     formula = tk.Label(
         tab,
-        text="省渠道：po_channel_prefixes.txt 写 河北_321 或 Output 下同名文件夹 → 主图显示河北/山东；"
-        "单击选中、双击省气泡或点「分渠道图」下钻子渠道；汇总=渠道",
+        text="河北/山东子渠道合并为省气泡，其余三位号仍单独显示；选中河北/山东点「分渠道图」或双击下钻。"
+        "若主图只有「其他」一个点，请升级到 v1.9.52+ 或勿设 INVENTORY_HEALTH_ROLLUP_OTHERS=1",
         bg="white", fg="#64748b", font=("Segoe UI", 8),
         wraplength=900, justify=tk.LEFT,
     )

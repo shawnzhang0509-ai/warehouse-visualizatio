@@ -737,13 +737,39 @@ def _rollup_row_dicts(items: list[dict[str, Any]], label: str, th: HealthThresho
     }
 
 
+def rollup_other_channels_on_main_chart() -> bool:
+    """默认不把非省渠道压成「其他」；设 INVENTORY_HEALTH_ROLLUP_OTHERS=1 可恢复合并。"""
+    import os
+
+    return os.getenv("INVENTORY_HEALTH_ROLLUP_OTHERS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def rows_for_other_channels(
+    report: dict[str, Any],
+    thresholds: HealthThresholds | None = None,
+) -> list[dict[str, Any]]:
+    """非河北/山东的三位渠道列表（下钻「其他」或看明细表用）。"""
+    families = report.get("channel_families") or {}
+    if not families:
+        return list(report.get("rows") or [])
+    fam_labels = set(families.keys())
+    rows = rows_for_family_chart(report, thresholds, main_view=False)
+    return [r for r in rows if str(r.get("channel") or "") not in fam_labels]
+
+
 def rows_for_family_chart(
     report: dict[str, Any],
     thresholds: HealthThresholds | None = None,
     *,
-    main_view: bool = True,
+    main_view: bool | None = None,
 ) -> list[dict[str, Any]]:
-    """主图：有渠道族时按省汇总（河北、山东）；main_view 时其余三位号合并为「其他」。"""
+    """主图：河北/山东子渠道合并为省；其余三位号默认仍单独成点。"""
+    if main_view is None:
+        main_view = rollup_other_channels_on_main_chart()
     families = report.get("channel_families") or {}
     if not families:
         return list(report.get("rows") or [])

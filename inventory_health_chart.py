@@ -14,14 +14,101 @@ try:
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    from matplotlib import font_manager
     from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
     from matplotlib.figure import Figure
 
     HAS_MPL = True
 except ImportError:
     HAS_MPL = False
+    font_manager = None
     FigureCanvasTkAgg = None
     Figure = None
+
+OTHERS_ROLLUP_LABEL = "其他"
+_CJK_FONT_CONFIGURED = False
+
+
+def _configure_matplotlib_cjk() -> None:
+    """气泡图标注中文（河北/山东等）；Windows 优先微软雅黑。"""
+    global _CJK_FONT_CONFIGURED
+    if not HAS_MPL or _CJK_FONT_CONFIGURED:
+        return
+    import os
+    import sys
+
+    candidates: list[str] = []
+    if sys.platform == "win32":
+        windir = os.environ.get("WINDIR", r"C:\Windows")
+        candidates.extend(
+            [
+                os.path.join(windir, "Fonts", "msyh.ttc"),
+                os.path.join(windir, "Fonts", "msyhbd.ttc"),
+                os.path.join(windir, "Fonts", "simhei.ttf"),
+                os.path.join(windir, "Fonts", "simsun.ttc"),
+            ]
+        )
+    candidates.extend(
+        [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+        ]
+    )
+    for path in candidates:
+        if not os.path.isfile(path):
+            continue
+        try:
+            font_manager.fontManager.addfont(path)
+            name = font_manager.FontProperties(fname=path).get_name()
+            matplotlib.rcParams["font.sans-serif"] = [name] + list(
+                matplotlib.rcParams.get("font.sans-serif", [])
+            )
+            matplotlib.rcParams["axes.unicode_minus"] = False
+            _CJK_FONT_CONFIGURED = True
+            return
+        except Exception:
+            continue
+    for name in (
+        "Microsoft YaHei",
+        "SimHei",
+        "PingFang SC",
+        "Noto Sans CJK SC",
+        "WenQuanYi Micro Hei",
+        "Arial Unicode MS",
+    ):
+        try:
+            font_manager.findfont(name, fallback_to_default=False)
+            matplotlib.rcParams["font.sans-serif"] = [name] + list(
+                matplotlib.rcParams.get("font.sans-serif", [])
+            )
+            matplotlib.rcParams["axes.unicode_minus"] = False
+            _CJK_FONT_CONFIGURED = True
+            return
+        except Exception:
+            continue
+    matplotlib.rcParams["axes.unicode_minus"] = False
+    _CJK_FONT_CONFIGURED = True
+
+
+def sync_inventory_health_drilldown_btn(app, link_key: str | None) -> None:
+    """选中气泡/表格行时：河北/山东 → 分渠道图；合并的「其他」→ 其他渠道图。"""
+    btn = getattr(app, "_ih_family_btn", None)
+    if btn is None:
+        return
+    families = getattr(app, "_ih_channel_families", None) or {}
+    key = str(link_key or "").strip()
+    fam = family_for_channel_link(key, families) if key else None
+    app._ih_selected_family = fam
+    if fam:
+        app._ih_drilldown = ("family", fam)
+        btn.configure(state="normal", text="分渠道图")
+    elif key == OTHERS_ROLLUP_LABEL:
+        app._ih_drilldown = ("other", None)
+        btn.configure(state="normal", text="其他渠道图")
+    else:
+        app._ih_drilldown = None
+        btn.configure(state="disabled", text="分渠道图")
 
 
 QUADRANT_LABELS = {
@@ -205,34 +292,31 @@ def bind_chart_interaction(app, canvas, fig, meta):
         cb = getattr(app, "_ih_select_tree_by_link", None)
         if callable(cb):
             cb(key)
-        families = getattr(app, "_ih_channel_families", None) or {}
-        app._ih_selected_family = family_for_channel_link(key, families)
-        btn = getattr(app, "_ih_family_btn", None)
-        if btn is not None:
-            btn.configure(
-                state="normal" if app._ih_selected_family else "disabled",
-            )
+        sync_inventory_health_drilldown_btn(app, key)
 
     fig.canvas.mpl_connect("pick_event", _on_pick)
 
     def _on_tk_dblclick(_event=None):
-        key = meta.get("selected_key") or ""
-        families = getattr(app, "_ih_channel_families", None) or {}
-        fam = family_for_channel_link(key, families)
-        if not fam:
-            return
-        app._ih_selected_family = fam
-        open_family_subchannels_chart(
-            app.root,
-            getattr(app, "_ih_report", None) or {},
-            fam,
-            getattr(app, "_ih_thresholds", {}) or {},
-        )
+        run_inventory_health_drilldown(app)
 
     try:
         canvas.get_tk_widget().bind("<Double-Button-1>", _on_tk_dblclick)
     except Exception:
         pass
+
+
+def run_inventory_health_drilldown(app) -> None:
+    """双击气泡或点「分渠道图 / 其他渠道图」。"""
+    mode = getattr(app, "_ih_drilldown", None)
+    report = getattr(app, "_ih_report", None) or {}
+    th = getattr(app, "_ih_thresholds", {}) or {}
+    root = getattr(app, "root", None)
+    if not root or not mode:
+        return
+    if mode[0] == "family" and mode[1]:
+        open_family_subchannels_chart(root, report, mode[1], th)
+    elif mode[0] == "other":
+        open_other_channels_chart(root, report, th)
 
 
 def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, float]):
@@ -249,6 +333,7 @@ def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, fl
         lbl.pack(fill=tk.BOTH, expand=True)
         return lbl, None, meta, None
 
+    _configure_matplotlib_cjk()
     rows = _chart_rows(report)
     x_th = float(thresholds.get("stockout_pct") or 50)
     y_th = float(thresholds.get("consumption_days") or 60)
@@ -275,9 +360,9 @@ def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, fl
     fams = report.get("channel_families") or {}
     title = "Inventory Health"
     if fams:
-        bits = "、".join(sorted(fams.keys()))
-        title = f"Inventory Health — 省渠道 {bits}（其余→其他）"
-    ax.set_title(title, fontsize=11, fontweight="bold")
+        bits = ", ".join(sorted(fams.keys()))
+        title = f"Inventory Health ({bits} merged; other 3-digit channels separate)"
+    ax.set_title(title, fontsize=10, fontweight="bold")
     ax.axvline(x_th, color="#94a3b8", linestyle="--", linewidth=1)
     ax.axhline(y_th, color="#94a3b8", linestyle="--", linewidth=1)
 
@@ -370,6 +455,37 @@ def _rollup_channel_dicts(items: list[dict], label: str, th: dict[str, float]) -
         "quadrant": quad,
         "priority": ih._priority(stockout, demand, th_days, hth),
     }
+
+
+def open_other_channels_chart(
+    parent,
+    report: dict[str, Any],
+    thresholds: dict[str, float],
+):
+    """非省渠道的三位号气泡图（合并「其他」时双击下钻）。"""
+    if not HAS_MPL:
+        return
+    import inventory_health as ih
+
+    sub_rows = ih.rows_for_other_channels(report)
+    if not sub_rows:
+        return
+    import tkinter as tk
+    from tkinter import ttk
+
+    win = tk.Toplevel(parent)
+    win.title(f"其他渠道 — {len(sub_rows)} 个三位号")
+    win.geometry("900x620")
+    win.transient(parent)
+    frame = tk.Frame(win, bg="white")
+    frame.pack(fill=tk.BOTH, expand=True)
+    render_bubble_chart(frame, {"rows": sub_rows, "region": report.get("region")}, thresholds)
+    ttk.Label(
+        win,
+        text="各非河北/山东渠道；主图默认逐个显示，无需从此进入。",
+        wraplength=860,
+    ).pack(anchor="w", padx=10, pady=4)
+    ttk.Button(win, text="关闭", command=win.destroy).pack(pady=(0, 8))
 
 
 def open_family_subchannels_chart(
