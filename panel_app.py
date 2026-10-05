@@ -35,7 +35,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.42"
+APP_VERSION = "1.9.44"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -1035,6 +1035,10 @@ class PanelApp:
         vol_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._volume_tree.tag_configure("island_hdr", font=("Segoe UI", 9, "bold"), background="#f1f5f9")
         self._volume_tree.tag_configure("island_transit", background="#e0f2fe")
+
+        import inventory_health_ui as ih_ui
+
+        ih_ui.attach_inventory_health_tab(self, self._notebook, {"muted": C_MUTED})
 
         for widget in (
             mining_inner, self._tab_mining, self._tab_onhold, self._tab_transfer,
@@ -2059,6 +2063,7 @@ class PanelApp:
         mining_tabs = tuple(
             str(t) for t in (
                 self._tab_mining, self._tab_onhold, self._tab_transfer, self._tab_volume,
+                getattr(self, "_tab_inventory_health", None),
             ) if t
         )
         if not self._cached_products and selected not in mining_tabs:
@@ -2076,6 +2081,13 @@ class PanelApp:
             self._render_mining_transfer_table()
         elif self._tab_volume and selected == str(self._tab_volume):
             self._render_volume_tab()
+        elif getattr(self, "_tab_inventory_health", None) and selected == str(self._tab_inventory_health):
+            self._render_inventory_health()
+
+    def _render_inventory_health(self, force=False):
+        from inventory_health_ui import render_inventory_health
+
+        render_inventory_health(self, force=force)
 
     def _volume_channel_list(self):
         raw = str(self._volume_channel_var.get() if self._volume_channel_var else "").strip()

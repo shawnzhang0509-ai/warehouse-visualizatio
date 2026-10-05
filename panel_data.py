@@ -227,6 +227,11 @@ def _norm_code(value):
     return str(value).strip().upper() if value is not None else ""
 
 
+def sku_join_key(value) -> str:
+    """SKU 关联键：去空格/横杠，避免 stock 与 sales 导出格式不一致。"""
+    return re.sub(r"[^A-Z0-9]", "", _norm_code(value))
+
+
 def _norm_col_key(name):
     return re.sub(r"[^a-z0-9]", "", str(name).strip().lower())
 

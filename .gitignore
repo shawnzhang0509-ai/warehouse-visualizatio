@@ -19,6 +19,8 @@ Data-CA/parts.sql
 __pycache__/
 *.pyc
 data/daily_snapshots.json
+# 本机 SQL（与仓库模板并存会抢同一 CSV）
+Data-NZ/stock.txt
 Output-NZ/latest/
 Output-NZ/*.csv
 Output-NZ/*.xlsx

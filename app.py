@@ -41,7 +41,22 @@ STANDARD_OUTPUT_NAMES = {
     "stock_volume": "stock_volume",
     "warehouse_volume": "stock_volume",
     "warehouse_stock_volume": "stock_volume",
+    "sales_8-30": "sales 8-30",
+    "sales_8_30": "sales 8-30",
+    "sales8-30": "sales 8-30",
+    "sales_15": "sales 15",
+    "sales15": "sales 15",
+    "sales_30": "sales 30",
+    "sales30": "sales 30",
+    "weekly_sales": "weekly_sales",
 }
+
+_NON_SQL_CONFIG_FILES = frozenset(
+    {
+        "po_channel_prefixes.txt",
+        "channel_prefixes.txt",
+    }
+)
 
 try:
     import tkinter as tk
@@ -186,6 +201,8 @@ def _is_stub_sql(sql_text):
 
 def _should_skip_template(file_path, sql_text):
     name = file_path.name.lower()
+    if name in _NON_SQL_CONFIG_FILES:
+        return True
     if name.startswith("example_"):
         return True
     if name.endswith(".example") or ".example." in name:
