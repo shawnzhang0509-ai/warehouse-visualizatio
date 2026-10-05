@@ -15,7 +15,7 @@ try:
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
     from matplotlib import font_manager
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
     from matplotlib.figure import Figure
 
     HAS_MPL = True
@@ -23,6 +23,7 @@ except ImportError:
     HAS_MPL = False
     font_manager = None
     FigureCanvasTkAgg = None
+    NavigationToolbar2Tk = None
     Figure = None
 
 OTHERS_ROLLUP_LABEL = "其他"
@@ -333,24 +334,6 @@ def _draw_chart_guide_banner(
         color="#475569",
         wrap=True,
     )
-    x0 = 0.04
-    for label, color in (
-        ("健康", QUADRANT_COLORS["Healthy"]),
-        ("供应不足", QUADRANT_COLORS["Supply Shortage"]),
-        ("可能积压", QUADRANT_COLORS["Potential Overstock"]),
-        ("库存错配", QUADRANT_COLORS["Inventory Mismatch"]),
-    ):
-        ax_guide.scatter(
-            [x0],
-            [0.38],
-            s=28,
-            c=color,
-            edgecolors="#334155",
-            linewidths=0.3,
-            transform=ax_guide.transAxes,
-            clip_on=False,
-        )
-        x0 += 0.01
 
 
 def _scatter_points(ax, points: list[dict], *, marker="o", selected_key: str | None = None):
@@ -435,6 +418,103 @@ def bind_chart_interaction(app, canvas, fig, meta):
         pass
 
 
+def chart_report_for_view(app) -> tuple[dict[str, Any], dict[str, float]] | None:
+    """当前库存健康主图数据（与嵌入图一致）。"""
+    import inventory_health as ih
+
+    report = getattr(app, "_ih_report", None) or {}
+    if not report:
+        return None
+    th_raw = getattr(app, "_ih_thresholds", {}) or {}
+    th_obj = ih.HealthThresholds(
+        stockout_pct=float(th_raw.get("stockout_pct") or ih.DEFAULT_STOCKOUT_X),
+        consumption_days=float(th_raw.get("consumption_days") or ih.DEFAULT_DAYS_Y),
+        cover_days_proxy=float(th_raw.get("cover_days_proxy") or ih.DEFAULT_COVER_DAYS_PROXY),
+    )
+    chart_report = dict(report)
+    chart_report["rows"] = ih.rows_for_family_chart(report, th_obj)
+    if not chart_report.get("rows"):
+        return None
+    return chart_report, dict(th_obj.__dict__)
+
+
+def open_inventory_health_chart_viewer(app, *, fullscreen: bool = False) -> None:
+    """放大窗口或全屏查看象限图（含 Matplotlib 缩放/平移工具栏）。"""
+    import tkinter as tk
+    from tkinter import ttk
+
+    if not HAS_MPL:
+        return
+    root = getattr(app, "root", None)
+    if root is None:
+        return
+    packed = chart_report_for_view(app)
+    if not packed:
+        return
+    chart_report, th = packed
+
+    win = tk.Toplevel(root)
+    win.configure(bg="white")
+    win.title("库存健康象限图 — 全屏" if fullscreen else "库存健康象限图 — 放大")
+    win.transient(root)
+
+    top = tk.Frame(win, bg="white")
+    top.pack(fill=tk.X, padx=8, pady=6)
+    hint = "Esc 退出全屏 · 工具栏可框选放大/平移 · 双击气泡可下钻省渠道"
+    ttk.Label(top, text=hint, wraplength=900).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+    def _close(_event=None):
+        try:
+            win.destroy()
+        except tk.TclError:
+            pass
+
+    ttk.Button(top, text="关闭", command=_close).pack(side=tk.RIGHT, padx=(8, 0))
+    if fullscreen:
+        ttk.Button(top, text="退出全屏", command=_close).pack(side=tk.RIGHT)
+
+    body = tk.Frame(win, bg="white")
+    body.pack(fill=tk.BOTH, expand=True)
+
+    dpi = 100
+    if fullscreen:
+        win.update_idletasks()
+        sw = max(800, int(win.winfo_screenwidth()))
+        sh = max(600, int(win.winfo_screenheight()))
+        fig_w = max(10.0, (sw - 24) / dpi)
+        fig_h = max(7.0, (sh - 120) / dpi)
+        figsize = (fig_w, fig_h)
+        try:
+            win.attributes("-fullscreen", True)
+        except tk.TclError:
+            try:
+                win.state("zoomed")
+            except tk.TclError:
+                win.geometry(f"{sw}x{sh}+0+0")
+    else:
+        win.geometry("1280x920")
+        figsize = (12.0, 8.8)
+
+    win.bind("<Escape>", _close)
+
+    chart_host = tk.Frame(body, bg="white")
+    chart_host.pack(fill=tk.BOTH, expand=True)
+    _widget, fig, meta, canvas = render_bubble_chart(
+        chart_host,
+        chart_report,
+        th,
+        show_guide=True,
+        figsize=figsize,
+        dpi=dpi,
+    )
+    if canvas is None or fig is None:
+        return
+    toolbar_frame = tk.Frame(body, bg="white")
+    toolbar_frame.pack(fill=tk.X)
+    NavigationToolbar2Tk(canvas, toolbar_frame)
+    bind_chart_interaction(app, canvas, fig, meta)
+
+
 def run_inventory_health_drilldown(app) -> None:
     """双击气泡或点「分渠道图 / 其他渠道图」。"""
     mode = getattr(app, "_ih_drilldown", None)
@@ -455,6 +535,8 @@ def render_bubble_chart(
     thresholds: dict[str, float],
     *,
     show_guide: bool | None = None,
+    figsize: tuple[float, float] | None = None,
+    dpi: int = 100,
 ):
     """主图 Y 轴 0~150 天；超长点叠在顶栏。返回 (widget, fig, meta)。"""
     meta: dict[str, Any] = {"outliers": [], "main_y_max": _MAIN_Y_MAX}
@@ -493,13 +575,14 @@ def render_bubble_chart(
     if show_guide is None:
         show_guide = _chart_show_guide_panel() and bool(report.get("channel_families") or report.get("region"))
     fams = report.get("channel_families") or {}
+    default_size = (8.6, 7.0) if show_guide else (8.4, 6.2)
+    w, h = figsize if figsize else default_size
+    fig = Figure(figsize=(w, h), dpi=dpi, facecolor="white")
     if show_guide:
-        fig = Figure(figsize=(8.6, 7.0), dpi=100, facecolor="white")
         gs = fig.add_gridspec(2, 1, height_ratios=[0.22, 1], hspace=0.28)
         ax_guide = fig.add_subplot(gs[0, 0])
         ax = fig.add_subplot(gs[1, 0])
     else:
-        fig = Figure(figsize=(8.4, 6.2), dpi=100, facecolor="white")
         ax = fig.add_subplot(111)
         ax_guide = None
     ax.set_facecolor("#fafbfc")

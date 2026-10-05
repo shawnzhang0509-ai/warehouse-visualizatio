@@ -209,7 +209,17 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
         state=tk.DISABLED,
         command=lambda: ihc.run_inventory_health_drilldown(app),
     )
-    app._ih_family_btn.pack(side=tk.LEFT)
+    app._ih_family_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+    def _ih_chart_zoom():
+        ihc.open_inventory_health_chart_viewer(app, fullscreen=False)
+
+    def _ih_chart_fullscreen():
+        ihc.open_inventory_health_chart_viewer(app, fullscreen=True)
+
+    ttk.Button(chart_tool, text="放大查看", command=_ih_chart_zoom).pack(side=tk.LEFT, padx=(0, 4))
+    ttk.Button(chart_tool, text="全屏", command=_ih_chart_fullscreen).pack(side=tk.LEFT)
+
     chart_frame = tk.Frame(chart_wrap, bg="white")
     chart_frame.pack(fill=tk.BOTH, expand=True)
     table_frame = tk.Frame(panes, bg="white")
