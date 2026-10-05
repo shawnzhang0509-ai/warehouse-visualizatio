@@ -335,7 +335,9 @@ def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, fl
 
     _configure_matplotlib_cjk()
     rows = _chart_rows(report)
-    x_th = float(thresholds.get("stockout_pct") or 50)
+    import inventory_health as ih
+
+    x_th = float(thresholds.get("stockout_pct") or ih.DEFAULT_STOCKOUT_X)
     y_th = float(thresholds.get("consumption_days") or 60)
     normal, outliers = _build_points(rows, y_th)
     meta["outliers"] = [
@@ -553,7 +555,9 @@ def open_long_days_chart(parent, report: dict[str, Any], thresholds: dict[str, f
     fig = Figure(figsize=(8.0, 5.6), dpi=100, facecolor="white")
     ax = fig.add_subplot(111)
     ax.set_facecolor("#fafbfc")
-    x_th = float(thresholds.get("stockout_pct") or 50)
+    import inventory_health as ih
+
+    x_th = float(thresholds.get("stockout_pct") or ih.DEFAULT_STOCKOUT_X)
     ax.set_xlabel("Stockout Rate (%)", fontsize=10)
     ax.set_ylabel("Theoretical Inventory Consumption Days (actual)", fontsize=10)
     ax.set_title(f"Long inventory days (>{_MAIN_Y_MAX:.0f}d)", fontsize=11, fontweight="bold")

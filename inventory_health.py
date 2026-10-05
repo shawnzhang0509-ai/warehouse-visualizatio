@@ -60,7 +60,7 @@ SUPPLIER_KEYS = ["supplier", "vendor", "suppliername", "vendorname"]
 BRAND_KEYS = ["brand", "brandname", "manufacturer"]
 
 DEFAULT_LOOKBACK_DAYS = int(os.getenv("INVENTORY_HEALTH_LOOKBACK_DAYS", "90") or "90")
-DEFAULT_STOCKOUT_X = float(os.getenv("INVENTORY_HEALTH_STOCKOUT_X", "50") or "50")
+DEFAULT_STOCKOUT_X = float(os.getenv("INVENTORY_HEALTH_STOCKOUT_X", "30") or "30")
 DEFAULT_DAYS_Y = float(os.getenv("INVENTORY_HEALTH_DAYS_Y", "60") or "60")
 DEFAULT_COVER_DAYS_PROXY = float(os.getenv("INVENTORY_HEALTH_COVER_DAYS", "14") or "14")
 
