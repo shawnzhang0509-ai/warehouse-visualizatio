@@ -12,6 +12,29 @@ import inventory_health as ih
 import inventory_health_chart as ihc
 
 
+def _ui_after(app, delay_ms: int, callback):
+    """必须在主线程调度 Tk；PanelApp 只有 root.after，没有 app.after。"""
+    root = getattr(app, "root", None)
+    if root is not None:
+        root.after(delay_ms, callback)
+    else:
+        callback()
+
+
+def _snapshot_ih_filters(app) -> dict:
+    """在主线程读取 Tk 变量；后台线程调用 StringVar.get() 在 Windows 上会死锁。"""
+    return {
+        "channel": app._ih_channel_var.get(),
+        "category": app._ih_category_var.get(),
+        "sku": app._ih_sku_var.get(),
+        "branch": app._ih_branch_var.get(),
+        "group_by": app._ih_group_var.get() or "sku",
+        "stockout_th": app._ih_stockout_th.get(),
+        "days_th": app._ih_days_th.get(),
+        "cover_proxy": app._ih_cover_proxy.get(),
+    }
+
+
 def attach_inventory_health_tab(app, notebook, style_colors: dict):
     """在 notebook 上添加「库存健康」标签页。app 需有 region_var、log 方法（可选）。"""
     tab = ttk.Frame(notebook)
@@ -128,33 +151,35 @@ def render_inventory_health(app, force=False):
             return
 
     MAX_TABLE_ROWS = 600
+    snap = _snapshot_ih_filters(app)
 
     def work():
         try:
             t0 = time.perf_counter()
             th = ih.HealthThresholds(
-                stockout_pct=float(app._ih_stockout_th.get() or ih.DEFAULT_STOCKOUT_X),
-                consumption_days=float(app._ih_days_th.get() or ih.DEFAULT_DAYS_Y),
-                cover_days_proxy=float(app._ih_cover_proxy.get() or ih.DEFAULT_COVER_DAYS_PROXY),
+                stockout_pct=float(snap.get("stockout_th") or ih.DEFAULT_STOCKOUT_X),
+                consumption_days=float(snap.get("days_th") or ih.DEFAULT_DAYS_Y),
+                cover_days_proxy=float(snap.get("cover_proxy") or ih.DEFAULT_COVER_DAYS_PROXY),
             )
+
             def bump(msg):
-                app.after(0, lambda m=msg: app._ih_status.configure(text=f"库存健康：{m}"))
+                _ui_after(app, 0, lambda m=msg: app._ih_status.configure(text=f"库存健康：{m}"))
 
             report = ih.build_inventory_health_report(
                 region,
-                channel=app._ih_channel_var.get(),
-                category=app._ih_category_var.get(),
-                sku_filter=app._ih_sku_var.get(),
-                branch=app._ih_branch_var.get(),
-                group_by=app._ih_group_var.get() or "sku",
+                channel=snap.get("channel") or "",
+                category=snap.get("category") or "",
+                sku_filter=snap.get("sku") or "",
+                branch=snap.get("branch") or "",
+                group_by=snap.get("group_by") or "sku",
                 thresholds=th,
                 progress=bump,
             )
             elapsed = time.perf_counter() - t0
-            app.after(0, lambda r=report, e=elapsed: _finish_report(app, r, th, e, MAX_TABLE_ROWS))
+            _ui_after(app, 0, lambda r=report, e=elapsed: _finish_report(app, r, th, e, MAX_TABLE_ROWS))
         except Exception as exc:
             err = str(exc)
-            app.after(0, lambda msg=err: _fail_report(app, msg))
+            _ui_after(app, 0, lambda msg=err: _fail_report(app, msg))
 
     if force or not getattr(app, "_ih_report", None):
         app._ih_busy = True
@@ -175,7 +200,8 @@ def _finish_report(app, report, th, elapsed_sec, max_table_rows):
         _apply_report(app, report, th, elapsed_sec, max_table_rows, draw_chart=False)
     finally:
         app._ih_busy = False
-    app.after(80, lambda: _apply_chart(app, report, th))
+    if os.getenv("INVENTORY_HEALTH_SKIP_CHART", "").strip().lower() not in ("1", "true", "yes"):
+        _ui_after(app, 80, lambda: _apply_chart(app, report, th))
 
 
 def _apply_chart(app, report, th):
