@@ -611,7 +611,7 @@ def open_family_subchannels_chart(
 
     frame = tk.Frame(win, bg="white")
     frame.pack(fill=tk.BOTH, expand=True)
-    render_bubble_chart(frame, mini, thresholds)
+    render_bubble_chart(frame, mini, thresholds, show_guide=False)
     ttk.Label(
         win,
         text=f"子渠道：{', '.join(sorted(buckets.keys()))}",
