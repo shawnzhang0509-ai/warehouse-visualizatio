@@ -171,6 +171,48 @@ def channel_family_scan_dirs(region_key: str, data_dir: Path | str | None) -> li
     return out
 
 
+def channel_families_txt_paths(region_key: str, data_dir: Path | str | None) -> list[Path]:
+    paths: list[Path] = []
+    tpl = po_channel_prefixes_path(region_key).parent
+    for name in ("channel_families.txt", "channel_families.csv"):
+        p = tpl / name
+        if p.is_file():
+            paths.append(p)
+    out = Path(data_dir or "")
+    for name in ("channel_families.txt", "channel_families.csv"):
+        p = out / name
+        if p.is_file() and p not in paths:
+            paths.append(p)
+    return paths
+
+
+def load_channel_families_from_txt(path: Path | None) -> dict[str, list[str]]:
+    """channel_families.txt：每行 河北_321（与销量子文件夹同名即可）。"""
+    if path is None or not Path(path).is_file():
+        return {}
+    if path.suffix.lower() == ".csv":
+        return load_channel_families_file(path)
+    text = ""
+    for encoding in ("utf-8-sig", "utf-8", "gbk"):
+        try:
+            text = Path(path).read_text(encoding=encoding)
+            break
+        except Exception:
+            text = ""
+    subs: dict[str, set[str]] = defaultdict(set)
+    for line in text.splitlines():
+        raw = (line or "").strip()
+        if not raw or raw.startswith("#"):
+            continue
+        parsed = parse_named_channel_folder(raw.split()[0])
+        if parsed and parsed[0]:
+            subs[parsed[0]].add(parsed[1])
+    return {
+        fam: sorted(codes, key=lambda c: int(c) if c.isdigit() else c)
+        for fam, codes in subs.items()
+    }
+
+
 def load_channel_families_for_region(
     region_key: str,
     data_dir: Path | str | None,
@@ -179,8 +221,8 @@ def load_channel_families_for_region(
     for scan_dir in channel_family_scan_dirs(region_key, data_dir):
         maps.append(scan_channel_families_from_dirs(scan_dir))
     maps.append(load_channel_families_from_po_prefixes(po_channel_prefixes_path(region_key)))
-    fam_csv = Path(data_dir or "") / "channel_families.csv"
-    maps.append(load_channel_families_file(fam_csv if fam_csv.is_file() else None))
+    for fam_path in channel_families_txt_paths(region_key, data_dir):
+        maps.append(load_channel_families_from_txt(fam_path))
     return merge_channel_family_maps(*maps)
 
 

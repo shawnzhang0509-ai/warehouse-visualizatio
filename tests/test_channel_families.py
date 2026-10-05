@@ -7,6 +7,7 @@ from channel_prefixes import (
     family_for_channel_link,
     list_merged_channel_filter_options,
     load_channel_families_from_po_prefixes,
+    load_channel_families_from_txt,
     parse_named_channel_folder,
     resolve_channel_filter,
     scan_channel_families_from_dirs,
@@ -29,6 +30,14 @@ class ChannelFamiliesTest(unittest.TestCase):
             fam = scan_channel_families_from_dirs(base)
             self.assertEqual(set(fam["河北"]), {"321", "352"})
             self.assertNotIn("996", fam)
+
+    def test_families_txt_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "channel_families.txt"
+            path.write_text("# c\n河北_321\n山东_446\n", encoding="utf-8")
+            fam = load_channel_families_from_txt(path)
+            self.assertEqual(fam["河北"], ["321"])
+            self.assertEqual(fam["山东"], ["446"])
 
     def test_po_prefixes_file(self):
         with tempfile.TemporaryDirectory() as tmp:

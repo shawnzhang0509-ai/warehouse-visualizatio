@@ -14,7 +14,8 @@
 | **parts.txt** / parts.sql | **parts.csv**（配件库存） |
 | **PO.txt** / po.sql（本机） | **po.csv**（在途采购；**只改本机 SQL，仓库不再内置 po.sql**） |
 | **stock_volume.txt** | **stock_volume.csv**（中心仓占用体积明细，容积率页备用） |
-| weekly_sales.sql | weekly_sales.csv |
+| **weekly_sales.sql** | **weekly_sales.csv**（分店×SKU 周销量；**库存健康**回退销量） |
+| sales 8-30 / 15 / 30（子目录或模板） | **sales 8-30.csv** 等（**库存健康**优先采用需求） |
 
 `on_hold.txt` / `parts.txt` / **`po.sql` 或 PO.txt** / **stock_volume.txt** **只放你本机**（已 `.gitignore`，**Git 不会更新你的 PO SQL**）。仓库里仅有 `*.example.txt` 作参考。
 
@@ -36,7 +37,8 @@
 | `display.csv` | ✅ 必须（陈列区 `%Display%`） |
 | `storage.csv` | ✅ 推荐（店面后仓 `%Storage%`，看板「仓有·店仓无 / 双有未陈列」） |
 | `blacklist.csv` | 可选（见 `blacklist.example.csv` 模板） |
-| `weekly_sales.csv` | 看板不需要 |
+| `weekly_sales.csv` | 可选（**库存健康**标签回退销量） |
+| `sales 8-30` / `sales 15` / `sales 30` | 可选（**库存健康**优先日均需求） |
 | `on_hold.csv` | 可选（看板「On Hold/配件」标签 + 产品状态 ⏸） |
 | `parts.csv` | 可选（配件挖掘） |
 
@@ -140,6 +142,7 @@
 1. **SSMS 有数 ≠ 看板有数**：看板读 `Output-NZ/po.csv`（由本机 **PO.txt** 经 **app.py** 导出）。
 2. **程序已支持 `DECLARE @…` + `SELECT` 批处理**（v1.9.39+），无需为执行器改 SQL 结构。
 3. **`LIKE '996'` 没有 `%`**：只匹配 SKU 恰好 `996`；系列用 `LIKE '996%'` 或 `@SkuFilter + '%'`。
-4. **`p.Sku LIKE '{sku}%'`（花括号占位符）**：执行前自动替换。优先 `po_sku_prefix` / `PO_SKU_PREFIX`（单渠道）；否则读同目录 **`po_channel_prefixes.txt`**（一行一个前三位，`河北_378` 也可写 `378`），生成 `LEFT(p.Sku,3) IN (...)` 一次查全渠道。只测一个渠道时在配置里写 `"po_sku_prefix": "130"`。
-5. 容积率页刷新可看状态栏诊断；PO 导出 0 行时 app 日志有 **PO 诊断** 计数。
+4. **`p.Sku LIKE '{sku}%'`（花括号占位符）**：执行前自动替换。优先 `po_sku_prefix` / `PO_SKU_PREFIX`（单渠道）；否则读同目录 **`po_channel_prefixes.txt`**（一行一个前三位数字），生成 `LEFT(p.Sku,3) IN (...)` 一次查全渠道。只测一个渠道时在配置里写 `"po_sku_prefix": "130"`。
+5. **库存健康合并河北/山东**：`po_channel_prefixes.txt` **保持纯数字**；另维护 **`channel_families.txt`**（每行 `河北_321` / `山东_446`，与销量子文件夹同名）。可复制 `Data-NZ/channel_families.txt` → `Output-NZ/channel_families.txt` 后刷新「库存健康」。
+6. 容积率页刷新可看状态栏诊断；PO 导出 0 行时 app 日志有 **PO 诊断** 计数。
 - 以 `example_` 开头的文件会自动跳过，不执行。
