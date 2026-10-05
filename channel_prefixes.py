@@ -5,6 +5,7 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent
 
+
 def normalize_sku_channel_code(channel: str | None, sku: str | None = "") -> str:
     """三位渠道号：996 / 996.0 / '996' → '996'；缺省从 SKU 前三位取。"""
     text = str(channel or "").strip()

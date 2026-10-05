@@ -1,0 +1,41 @@
+-- 在途 PO → Output-NZ/po.csv
+-- 复制本文件为 PO.txt，在 app.py 里执行 NZ 模板（不要提交 Git）。
+--
+-- 看板规则：只统计 CheckinDate 为空的行；在途体积按南北岛汇总（北岛总在途 / 南岛总在途）。
+-- 必含列：Sku、QuantityOrdered、VolumeM3（或 VolumeWithBox）、Region（北岛/南岛）
+
+DECLARE @SkuFilter VARCHAR(20) = '';   -- 只查 996 系列填 '996'，查全部留空
+
+SELECT
+    po.Id AS PurchaseOrderId,
+    po.PurchaseOrderCode,
+    p.Sku,
+    LEFT(p.Sku, 3) AS Channel,
+    pol.QuantityOrdered,
+    ISNULL(p.VolumeWithBox, 0) AS VolumeWithBox,
+    pol.QuantityOrdered * ISNULL(p.VolumeWithBox, 0) AS VolumeM3,
+    po.[ETD],
+    po.ShippedToPortId,
+    c.ActualArrivingDate AS CheckinDate,
+    c.ContainerNumber,
+    CASE
+        WHEN c.ShippedtoportId = '3b9ff26b-4ec0-44c6-92ac-ee9804272426' THEN N'南岛'
+        WHEN c.ShippedtoportId = '646a2216-87c2-4bc6-8469-fdbd90bb2d84' THEN N'北岛'
+        WHEN po.ShippedToPortId = '3b9ff26b-4ec0-44c6-92ac-ee9804272426' THEN N'南岛'
+        WHEN po.ShippedToPortId = '646a2216-87c2-4bc6-8469-fdbd90bb2d84' THEN N'北岛'
+        ELSE N'北岛'
+    END AS Region
+FROM dbo.PurchaseOrders po
+INNER JOIN dbo.PurchaseOrderLines pol ON pol.PurchaseOrderId = po.Id
+INNER JOIN dbo.Products p ON pol.ProductId = p.Id
+LEFT JOIN dbo.Containers c ON c.PurchaseOrderId = po.Id
+WHERE (@SkuFilter = '' OR p.Sku LIKE @SkuFilter + '%')   -- 注意：必须是 996% 不能写 LIKE '996'
+  AND pol.QuantityOrdered > 0
+  -- 只导出未到港（在途）；已填 ActualArrivingDate 的行看板也会排除
+  AND (c.ActualArrivingDate IS NULL)
+ORDER BY po.POPlacedOnUtc DESC, p.Sku;
+
+-- 常见踩坑：
+-- 1) p.Sku LIKE '996' 没有 % 时，SQL Server 只匹配 SKU 完全等于 "996" 的一条，不是 996-xxx 系列。
+-- 2) 不加 AND ActualArrivingDate IS NULL 时，已到货柜会把 CheckinDate 带出来，看板在途会变成 0。
+-- 3) 一个 PO 多柜时 JOIN 会重复行；若合计偏大，改为按 PO+Sku 汇总或 OUTER APPLY 取一行柜。

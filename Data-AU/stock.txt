@@ -1,3 +1,0 @@
--- 澳洲库存导出模板（列名同 Data-NZ/stock.txt）
--- 输出目录：Output-AU/{时间戳}/ 与 Output-AU/latest/
-SELECT GETDATE() AS run_time;

@@ -1,0 +1,4 @@
+warehouse_name,bucket,note
+Carbine Rd Warehouse,carbine,与 parts.csv 中 WarehouseName 完全一致时生效
+Walls Road Warehouse,walls,
+Gerald Connelly Warehouse,chch,也可用 gc / geraldconnelly

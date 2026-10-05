@@ -2,7 +2,6 @@ import argparse
 import csv
 import json
 import os
-import re
 import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -13,11 +12,6 @@ try:
 except ImportError:
     pyodbc = None
 
-try:
-    from openpyxl import Workbook
-except ImportError:
-    Workbook = None
-
 # SQL 模板文件名（不含后缀）到看板标准文件名的映射
 STANDARD_OUTPUT_NAMES = {
     "stock": "stock",
@@ -27,8 +21,26 @@ STANDARD_OUTPUT_NAMES = {
     "display": "display",
     "store_display": "display",
     "display_list": "display",
+    "display_with_families": "display",
+    "display.with_families": "display",
+    "stock_discontinued": "stock_discontinued",
+    "product_stock_discontinued": "stock_discontinued",
+    "storage": "storage",
+    "shop_storage": "storage",
+    "store_storage": "storage",
+    "on_hold": "on_hold",
+    "onhold": "on_hold",
+    "stock_on_hold": "on_hold",
+    "parts": "parts",
+    "spare_parts": "parts",
+    "part_stock": "parts",
     "po": "po",
+    "purchase_order": "po",
     "purchase_orders": "po",
+    "po_in_transit": "po",
+    "stock_volume": "stock_volume",
+    "warehouse_volume": "stock_volume",
+    "warehouse_stock_volume": "stock_volume",
     "sales_8-30": "sales 8-30",
     "sales_8_30": "sales 8-30",
     "sales8-30": "sales 8-30",
@@ -39,8 +51,12 @@ STANDARD_OUTPUT_NAMES = {
     "weekly_sales": "weekly_sales",
 }
 
-from sql_batch import drain_cursor, fetch_primary_result_set
-from sql_placeholders import apply_sql_placeholders, placeholder_context_for_region, placeholders_in_sql
+_NON_SQL_CONFIG_FILES = frozenset(
+    {
+        "po_channel_prefixes.txt",
+        "channel_prefixes.txt",
+    }
+)
 
 try:
     import tkinter as tk
@@ -53,34 +69,25 @@ except Exception:
     scrolledtext = None
 
 
+from runner_config import (
+    DEFAULT_APP_SETTINGS,
+    DEFAULT_REGION_CONFIG,
+    RUNNER_CONFIG_FILE,
+    RUNNER_CONFIG_LOCAL_FILE,
+    ensure_runner_config,
+    load_runner_config,
+    save_runner_config,
+)
+from po_probe import (
+    build_po_row_count_batch,
+    parse_sku_filter,
+    po_template_filter_hints,
+    warn_po_sql_patterns,
+)
+from sql_batch import drain_cursor, fetch_primary_result_set
+from sql_placeholders import apply_sql_placeholders, placeholder_context_for_region, placeholders_in_sql
+
 ROOT_DIR = Path(__file__).parent
-RUNNER_CONFIG_FILE = ROOT_DIR / "region_runner_config.json"
-
-DEFAULT_REGION_CONFIG = {
-    "NZ": {
-        "label": "新西兰",
-        "connection_uri": "mssql+pymssql://nzlivepooluser:iFur3RP%405sc%5El%5Et3%21@if-akl-live.database.windows.net:1433/nz_ierp_live?charset=utf8",
-        "template_dir": "Data-NZ",
-        "output_dir": "Output-NZ",
-    },
-    "AU": {
-        "label": "澳洲",
-        "connection_uri": "mssql+pymssql://appuserau:Ifurn1tureAuA7p5sc%5El%5Et@if-au-live.database.windows.net:1433/au_ierp_live?charset=utf8",
-        "template_dir": "Data-AU",
-        "output_dir": "Output-AU",
-    },
-    "CA": {
-        "label": "加拿大",
-        "connection_uri": "mssql+pymssql://capool:IfurnitureCA3sc%5El%5Et3@ca-sql-pool-server.database.windows.net:1433/ca_ierp_live?charset=utf8",
-        "template_dir": "Data-CA",
-        "output_dir": "Output-CA",
-    },
-}
-
-DEFAULT_APP_SETTINGS = {
-    "frequency_value": 30,
-    "frequency_unit": "minute",
-}
 
 
 def _utc_iso():
@@ -98,69 +105,16 @@ def _resolve_path(path_text):
 
 
 def _ensure_default_template_dirs(regions):
-    sample_sql = (
-        "-- 这里写你的查询，文件后缀保持 .txt\n"
-        "-- 示例：SELECT TOP 10 * FROM dbo.Warehouses;\n"
-        "SELECT GETDATE() AS run_time;"
-    )
     for cfg in regions.values():
         template_dir = _resolve_path(cfg.get("template_dir"))
         if template_dir is None:
             continue
         template_dir.mkdir(parents=True, exist_ok=True)
-        has_txt = any(p.is_file() and p.suffix.lower() == ".txt" for p in template_dir.iterdir())
-        if not has_txt:
-            (template_dir / "example_query.txt").write_text(sample_sql, encoding="utf-8")
-
-
-def _load_runner_config():
-    with RUNNER_CONFIG_FILE.open("r", encoding="utf-8") as f:
-        data = json.load(f)
-    if not isinstance(data, dict):
-        data = {}
-    data.setdefault("regions", {})
-    data.setdefault("settings", {})
-    return data
-
-
-def _save_runner_config(payload):
-    with RUNNER_CONFIG_FILE.open("w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
 
 
 def _ensure_runner_config():
-    if not RUNNER_CONFIG_FILE.exists():
-        payload = {"regions": DEFAULT_REGION_CONFIG, "settings": DEFAULT_APP_SETTINGS}
-        _save_runner_config(payload)
-        _ensure_default_template_dirs(payload["regions"])
-        return
-
-    data = _load_runner_config()
-    changed = False
-    regions = data.get("regions", {})
-    settings = data.get("settings", {})
-
-    for region_key, region_cfg in DEFAULT_REGION_CONFIG.items():
-        if region_key not in regions:
-            regions[region_key] = dict(region_cfg)
-            changed = True
-            continue
-        for field, value in region_cfg.items():
-            if field not in regions[region_key]:
-                regions[region_key][field] = value
-                changed = True
-
-    for key, value in DEFAULT_APP_SETTINGS.items():
-        if key not in settings:
-            settings[key] = value
-            changed = True
-
-    if changed:
-        data["regions"] = regions
-        data["settings"] = settings
-        _save_runner_config(data)
-
-    _ensure_default_template_dirs(regions)
+    ensure_runner_config()
+    _ensure_default_template_dirs(load_runner_config().get("regions", {}))
 
 
 def _region_label(region_key, cfg):
@@ -215,6 +169,7 @@ def _odbc_conn_str_from_uri(uri):
         f"PWD={parsed['password']};"
         "Encrypt=yes;"
         "TrustServerCertificate=no;"
+        "MARS_Connection=yes;"
         "Connection Timeout=30;"
     )
 
@@ -230,24 +185,6 @@ def _list_txt_templates(template_dir):
     files = [p for p in path.iterdir() if p.is_file() and p.suffix.lower() in (".txt", ".sql")]
     files.sort(key=lambda p: p.name.lower())
     return files
-
-
-def _read_sql_file(path):
-    last_err = None
-    for encoding in ("utf-8-sig", "utf-8", "gbk", "latin-1"):
-        try:
-            return path.read_text(encoding=encoding).strip()
-        except Exception as exc:
-            last_err = exc
-    raise RuntimeError(f"读取 SQL 文件失败: {path} ({last_err})")
-
-
-_NON_SQL_CONFIG_FILES = frozenset(
-    {
-        "po_channel_prefixes.txt",
-        "channel_prefixes.txt",
-    }
-)
 
 
 def _is_stub_sql(sql_text):
@@ -285,8 +222,18 @@ def _template_priority(file_path):
     return 2
 
 
+def _read_sql_file(path):
+    last_err = None
+    for encoding in ("utf-8-sig", "utf-8", "gbk", "latin-1"):
+        try:
+            return path.read_text(encoding=encoding).strip()
+        except Exception as exc:
+            last_err = exc
+    raise RuntimeError(f"读取 SQL 文件失败: {path} ({last_err})")
+
+
 def _load_sql_templates(template_dir, log=None):
-    """读取 Data-{region}/ 下 .sql / .txt；跳过配置/示例；同名输出只保留优先级最高的一份。"""
+    """读取 Data-{region}/ 下 .sql / .txt 查询模板；同名输出只保留优先级最高的一份。"""
     by_output = {}
     for file_path in _list_txt_templates(template_dir):
         sql_text = _read_sql_file(file_path)
@@ -294,7 +241,7 @@ def _load_sql_templates(template_dir, log=None):
             continue
         if _should_skip_template(file_path, sql_text):
             if callable(log):
-                log(f"跳过：{file_path.name}（配置/占位模板，不执行）")
+                log(f"跳过：{file_path.name}（占位/示例模板，不执行）")
             continue
         output_stem = _standard_output_stem(file_path.name)
         tpl = {"name": file_path.name, "sql": sql_text, "path": file_path}
@@ -322,27 +269,19 @@ def _load_sql_templates(template_dir, log=None):
 
 
 def _standard_output_stem(sql_file_name):
-    raw_stem = Path(sql_file_name).stem
-    norm = raw_stem.replace(" ", "_").lower()
-    mapped = STANDARD_OUTPUT_NAMES.get(norm) or STANDARD_OUTPUT_NAMES.get(raw_stem.lower())
-    if mapped:
-        return mapped
-    if raw_stem.lower().startswith("sales"):
-        return raw_stem
-    return norm
+    stem = Path(sql_file_name).stem.replace(" ", "_").lower()
+    return STANDARD_OUTPUT_NAMES.get(stem, stem)
 
 
-def _output_paths(output_dir, region_key, sql_file_name, batch_label):
+def _output_paths(output_dir, region_key, sql_file_name):
     output_root = _resolve_path(output_dir)
     if output_root is None:
         raise ValueError("输出目录为空。")
+    output_root.mkdir(parents=True, exist_ok=True)
     standard_stem = _standard_output_stem(sql_file_name)
-    batch_dir = output_root / batch_label
-    batch_dir.mkdir(parents=True, exist_ok=True)
     return {
-        "batch_dir": batch_dir,
-        "csv": batch_dir / f"{region_key}_{standard_stem}.csv",
-        "xlsx": batch_dir / f"{region_key}_{standard_stem}.xlsx",
+        "output_dir": output_root,
+        "csv": output_root / f"{standard_stem}.csv",
         "standard_name": standard_stem,
     }
 
@@ -356,60 +295,137 @@ def _write_csv(path, columns, rows):
             writer.writerow(list(row))
 
 
-_ILLEGAL_XLSX_CHAR_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
-
-
-def _xlsx_cell_value(value):
-    if value is None:
-        return ""
-    if isinstance(value, str):
-        return _ILLEGAL_XLSX_CHAR_RE.sub("", value)
-    return value
-
-
-def _write_xlsx(path, columns, rows):
-    if Workbook is None:
-        return False
+def _remove_legacy_xlsx(csv_path, log=None):
+    """删除同名的旧版 .xlsx，避免看板误读慢文件。"""
+    legacy = Path(csv_path).with_suffix(".xlsx")
+    if not legacy.is_file():
+        return
     try:
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "data"
-        if columns:
-            ws.append([_xlsx_cell_value(c) for c in columns])
-        for row in rows:
-            ws.append([_xlsx_cell_value(value) for value in row])
-        wb.save(path)
-        return True
-    except Exception:
-        try:
-            path.unlink(missing_ok=True)
-        except OSError:
-            pass
-        return False
-
-
-def _publish_latest(output_dir, standard_name, csv_path, xlsx_path):
-    """把本次导出复制到 {output_dir}/latest/，方便看板直接读取验证。"""
-    output_root = _resolve_path(output_dir)
-    if output_root is None or standard_name not in ("stock", "display"):
-        return []
-    latest_dir = output_root / "latest"
-    latest_dir.mkdir(parents=True, exist_ok=True)
-    published = []
-    for src, suffix in ((csv_path, ".csv"), (xlsx_path, ".xlsx")):
-        if src and Path(src).is_file():
-            target = latest_dir / f"{standard_name}{suffix}"
-            target.write_bytes(Path(src).read_bytes())
-            published.append(str(target))
-    return published
+        legacy.unlink()
+        if callable(log):
+            log(f"已删除旧版 Excel：{legacy.name}")
+    except OSError:
+        pass
 
 
 def _prepare_template_sql(sql_text, region_key, region_cfg, log_fn):
     ctx = placeholder_context_for_region(region_key, region_cfg)
     prepared, notes = apply_sql_placeholders(sql_text, ctx)
-    if placeholders_in_sql(sql_text) and notes:
-        log_fn(f"[{region_key}] SQL 占位符：{'；'.join(notes)}")
+    if placeholders_in_sql(sql_text):
+        if notes:
+            log_fn(f"[{region_key}] SQL 占位符：{'；'.join(notes)}")
+        if placeholders_in_sql(prepared):
+            log_fn(
+                f"[{region_key}] ⚠ SQL 仍含 {{sku}}：请在 region_runner_config 的该地区加 "
+                f'"po_sku_prefix": "130"（前三位），或设环境变量 PO_SKU_PREFIX=130'
+            )
     return prepared
+
+
+def _run_template_fresh_connection(connection_uri, sql):
+    conn = pyodbc.connect(_odbc_conn_str_from_uri(connection_uri), timeout=120)
+    try:
+        cur = conn.cursor()
+        result = _run_single_template(cur, sql)
+        drain_cursor(cur)
+        return result
+    finally:
+        conn.close()
+
+
+def _po_export_strict_only():
+    return os.getenv("WAREHOUSE_PO_EXPORT_STRICT", "").strip().lower() in ("1", "true", "yes")
+
+
+def _embedded_po_sql_for_region(region_key):
+    if (region_key or "").upper() != "NZ":
+        return None
+    from warehouse_volume import NZ_DEFAULT_PO_SQL
+
+    return NZ_DEFAULT_PO_SQL.strip()
+
+
+def _log_connection_context(cursor, region_key, log_fn):
+    try:
+        cursor.execute("SELECT DB_NAME() AS db_name, @@SERVERNAME AS server_name")
+        row = cursor.fetchone()
+        drain_cursor(cursor)
+        if row:
+            log_fn(f"[{region_key}] PO 诊断 · 当前连接库={row[0]}  服务器={row[1]}")
+    except Exception as exc:
+        log_fn(f"[{region_key}] PO 诊断 · 连接信息失败：{exc}")
+
+
+def _probe_po_template_row_count(cursor, template_sql):
+    count_sql = build_po_row_count_batch(template_sql)
+    if not count_sql:
+        return None
+    cursor.execute(count_sql)
+    row = cursor.fetchone()
+    drain_cursor(cursor)
+    if not row:
+        return None
+    return int(row[0])
+
+
+def _log_po_zero_diagnostic(cursor, region_key, log_fn, template_sql=None):
+    if template_sql:
+        sku = parse_sku_filter(template_sql)
+        if sku is not None:
+            log_fn(f"[{region_key}] PO 诊断 · 模板 @SkuFilter = '{sku}'")
+        for msg in warn_po_sql_patterns(template_sql):
+            log_fn(f"[{region_key}] PO 诊断 · {msg}")
+        hints = po_template_filter_hints(template_sql)
+        if hints:
+            log_fn(f"[{region_key}] PO 诊断 · 模板特征：{'；'.join(hints)}")
+        try:
+            probe = _probe_po_template_row_count(cursor, template_sql)
+            if probe is not None:
+                log_fn(f"[{region_key}] PO 诊断 · 按本机 PO 脚本 COUNT = {probe}")
+        except Exception as exc:
+            log_fn(f"[{region_key}] PO 诊断 · 本机 PO 脚本 COUNT 失败：{exc}")
+        embedded = _embedded_po_sql_for_region(region_key)
+        if embedded:
+            try:
+                fb_cnt = _probe_po_template_row_count(cursor, embedded)
+                if fb_cnt is not None:
+                    log_fn(
+                        f"[{region_key}] PO 诊断 · 内置 NZ 查询 COUNT = {fb_cnt}"
+                        "（容积率页在 po.txt 为 0 时会自动用这条）"
+                    )
+            except Exception as exc:
+                log_fn(f"[{region_key}] PO 诊断 · 内置 NZ COUNT 失败：{exc}")
+    _log_connection_context(cursor, region_key, log_fn)
+    probes = (
+        ("POL QuantityOrdered>0", "SELECT COUNT(*) FROM dbo.PurchaseOrderLines WHERE QuantityOrdered > 0"),
+        ("Sku LIKE 996%", "SELECT COUNT(*) FROM dbo.Products WHERE Sku LIKE '996%'"),
+        (
+            "Sku LIKE '996' 无 %（常误写成完全匹配）",
+            "SELECT COUNT(*) FROM dbo.Products WHERE Sku LIKE '996'",
+        ),
+        ("PO+POL+Products join", (
+            "SELECT COUNT(*) FROM dbo.PurchaseOrders po "
+            "INNER JOIN dbo.PurchaseOrderLines pol ON pol.PurchaseOrderId = po.Id "
+            "INNER JOIN dbo.Products p ON pol.ProductId = p.Id "
+            "WHERE pol.QuantityOrdered > 0"
+        )),
+        (
+            "在途：JOIN 柜且 ActualArrivingDate IS NULL",
+            "SELECT COUNT(*) FROM dbo.PurchaseOrders po "
+            "INNER JOIN dbo.PurchaseOrderLines pol ON pol.PurchaseOrderId = po.Id "
+            "INNER JOIN dbo.Products p ON pol.ProductId = p.Id "
+            "LEFT JOIN dbo.Containers c ON c.PurchaseOrderId = po.Id "
+            "WHERE pol.QuantityOrdered > 0 AND c.ActualArrivingDate IS NULL",
+        ),
+    )
+    for label, sql in probes:
+        try:
+            cursor.execute(sql)
+            row = cursor.fetchone()
+            val = row[0] if row else "?"
+            log_fn(f"[{region_key}] PO 诊断 · {label} = {val}")
+        except Exception as exc:
+            log_fn(f"[{region_key}] PO 诊断 · {label} 失败：{exc}")
 
 
 def _run_single_template(cursor, sql):
@@ -429,24 +445,6 @@ def _run_single_template(cursor, sql):
         "row_count": len(rows),
         "has_result_set": True,
     }
-
-
-def _mirror_flat_csv(output_dir, template_name, csv_path, log_fn, region_key):
-    """把 sales / po 等也复制到 Output 根目录，方便看板与库存健康读取。"""
-    stem = Path(template_name).stem
-    low = stem.lower()
-    if not (low.startswith("sales") or low in ("po", "purchase_orders", "weekly_sales")):
-        return
-    root = _resolve_path(output_dir)
-    if root is None or not csv_path or not Path(csv_path).is_file():
-        return
-    flat_name = _standard_output_stem(template_name)
-    target = root / f"{flat_name}.csv"
-    try:
-        target.write_bytes(Path(csv_path).read_bytes())
-        log_fn(f"[{region_key}] 已同步：{target.name}")
-    except OSError as exc:
-        log_fn(f"[{region_key}] 同步 {target.name} 失败：{exc}")
 
 
 def _drivers():
@@ -491,7 +489,7 @@ def test_connection(uri):
             conn.close()
 
 
-def execute_region(region_key, region_cfg, log=None):
+def execute_region(region_key, region_cfg, log=None, on_template_start=None, on_template_done=None):
     def _log(text):
         if callable(log):
             log(text)
@@ -501,7 +499,7 @@ def execute_region(region_key, region_cfg, log=None):
     _log(f"[{region_key}] 开始执行：{label}")
     templates = _load_sql_templates(region_cfg.get("template_dir"), log=_log)
     if not templates:
-        _log(f"[{region_key}] 未找到可执行的 txt 模板。")
+        _log(f"[{region_key}] 未找到可执行的 .sql / .txt 模板。")
         return {
             "region": region_key,
             "label": label,
@@ -517,7 +515,6 @@ def execute_region(region_key, region_cfg, log=None):
     if pyodbc is None:
         raise RuntimeError("pyodbc 不可用，请先安装 pyodbc 和 ODBC Driver。")
 
-    batch_label = datetime.now().strftime("%Y%m%d_%H%M%S")
     conn = None
     cursor = None
     outputs = []
@@ -525,43 +522,75 @@ def execute_region(region_key, region_cfg, log=None):
     fail_count = 0
 
     try:
-        conn = pyodbc.connect(_odbc_conn_str_from_uri(region_cfg.get("connection_uri", "")), timeout=30)
+        conn_uri = region_cfg.get("connection_uri", "")
+        conn = pyodbc.connect(_odbc_conn_str_from_uri(conn_uri), timeout=30)
         cursor = conn.cursor()
         for tpl in templates:
             tpl_name = tpl["name"]
+            if callable(on_template_start):
+                on_template_start(tpl_name)
             _log(f"[{region_key}] 执行模板：{tpl_name}")
             try:
                 sql_text = _prepare_template_sql(tpl["sql"], region_key, region_cfg, _log)
-                result = _run_single_template(cursor, sql_text)
+                po_template = _standard_output_stem(tpl_name) == "po"
+                if po_template:
+                    result = _run_template_fresh_connection(conn_uri, sql_text)
+                else:
+                    result = _run_single_template(cursor, sql_text)
                 if result["has_result_set"]:
-                    paths = _output_paths(region_cfg.get("output_dir"), region_key, tpl_name, batch_label)
-                    _write_csv(paths["csv"], result["columns"], result["rows"])
-                    xlsx_ok = _write_xlsx(paths["xlsx"], result["columns"], result["rows"])
-                    if not xlsx_ok and Workbook is not None:
+                    paths = _output_paths(region_cfg.get("output_dir"), region_key, tpl_name)
+                    po_fallback_note = None
+                    if paths["standard_name"] == "po" and result["row_count"] == 0:
+                        cols_preview = ", ".join(result["columns"][:8]) if result["columns"] else "（无列）"
                         _log(
-                            f"[{region_key}] 提示：{tpl_name} 的 Excel 未生成（含非法字符或 openpyxl 限制），"
-                            f"CSV 已写入 {paths['csv'].name}"
+                            f"[{region_key}] ⚠ 本机 PO 脚本 0 行：列={cols_preview}。"
+                            "COUNT 见下方诊断；容积率页在脚本 0 行时会自动改用内置 NZ 查询。"
                         )
-                    latest_files = _publish_latest(
-                        region_cfg.get("output_dir"),
-                        paths["standard_name"],
-                        paths["csv"],
-                        paths["xlsx"] if xlsx_ok else None,
-                    )
+                        _log_po_zero_diagnostic(
+                            cursor, region_key, _log, template_sql=sql_text,
+                        )
+                        if not _po_export_strict_only():
+                            fb_sql = _embedded_po_sql_for_region(region_key)
+                            if fb_sql:
+                                _log(
+                                    f"[{region_key}] PO：本机脚本无数据，改用内置 NZ 查询写 po.csv…"
+                                )
+                                fb = _run_template_fresh_connection(conn_uri, fb_sql)
+                                if fb.get("has_result_set") and fb["row_count"] > 0:
+                                    result = fb
+                                    po_fallback_note = "内置NZ_PO"
+                        else:
+                            _log(
+                                f"[{region_key}] 已设 WAREHOUSE_PO_EXPORT_STRICT=1，"
+                                "不会用内置查询兜底 po.csv。"
+                            )
+                    _write_csv(paths["csv"], result["columns"], result["rows"])
+                    _remove_legacy_xlsx(paths["csv"], log=lambda m: _log(f"[{region_key}] {m}"))
                     outputs.append(
                         {
                             "template": tpl_name,
                             "rows": result["row_count"],
                             "file": str(paths["csv"]),
-                            "xlsx": str(paths["xlsx"]) if xlsx_ok else None,
-                            "latest": latest_files,
                             "status": "success",
                         }
                     )
-                    extra = f"，Excel: {paths['xlsx']}" if xlsx_ok else "（未安装 openpyxl，仅导出 CSV）"
-                    latest_hint = f"，latest: {', '.join(latest_files)}" if latest_files else ""
-                    _mirror_flat_csv(region_cfg.get("output_dir"), tpl_name, paths["csv"], _log, region_key)
-                    _log(f"[{region_key}] 成功：{tpl_name} -> {paths['csv']}{extra}{latest_hint} ({result['row_count']} 行)")
+                    if po_fallback_note:
+                        _log(
+                            f"[{region_key}] 成功：{tpl_name} -> {paths['csv']} "
+                            f"({result['row_count']} 行，来源={po_fallback_note}；未修改本机 po.txt)"
+                        )
+                    else:
+                        _log(
+                            f"[{region_key}] 成功：{tpl_name} -> {paths['csv']} "
+                            f"({result['row_count']} 行)"
+                        )
+                    if paths["standard_name"] == "display" and result["row_count"] < 10:
+                        _log(
+                            f"[{region_key}] ⚠ 警告：display 只有 {result['row_count']} 行，"
+                            "店面下拉将为空。请检查 Data-NZ/display_with_families.sql。"
+                        )
+                    if paths["standard_name"] == "stock" and result["row_count"] < 10:
+                        _log(f"[{region_key}] ⚠ 警告：stock 只有 {result['row_count']} 行，请检查库存 SQL。")
                 else:
                     conn.commit()
                     outputs.append(
@@ -587,6 +616,9 @@ def execute_region(region_key, region_cfg, log=None):
                     }
                 )
                 _log(f"[{region_key}] 失败：{tpl_name} -> {exc}")
+            finally:
+                if callable(on_template_done):
+                    on_template_done(tpl_name)
     finally:
         if cursor:
             cursor.close()
@@ -607,13 +639,38 @@ def execute_region(region_key, region_cfg, log=None):
     }
 
 
-def run_regions(selected_regions, config, log=None):
+def _count_runnable_templates(selected_regions, config, log=None):
+    regions = config.get("regions", {})
+    total = 0
+    for region in selected_regions:
+        region_cfg = regions.get(region)
+        if region_cfg:
+            total += len(_load_sql_templates(region_cfg.get("template_dir"), log=log))
+    return max(total, 1)
+
+
+def run_regions(selected_regions, config, log=None, progress=None):
     regions = config.get("regions", {})
     results = []
     summary = {"regions": len(selected_regions), "success": 0, "partial": 0, "warning": 0, "error": 0}
+    total_steps = _count_runnable_templates(selected_regions, config, log=log)
+    current_step = 0
+
+    def _report(message):
+        if callable(progress):
+            progress(current_step, total_steps, message)
 
     for region in selected_regions:
         region_cfg = regions.get(region)
+
+        def _on_start(tpl_name, rk=region):
+            _report(f"[{rk}] 正在执行 {tpl_name} ...")
+
+        def _on_done(tpl_name, rk=region):
+            nonlocal current_step
+            current_step += 1
+            _report(f"[{rk}] 已完成 {tpl_name} ({current_step}/{total_steps})")
+
         if not region_cfg:
             if callable(log):
                 log(f"[{region}] 未找到地区配置。")
@@ -630,7 +687,13 @@ def run_regions(selected_regions, config, log=None):
             }
         else:
             try:
-                result = execute_region(region, region_cfg, log=log)
+                result = execute_region(
+                    region,
+                    region_cfg,
+                    log=log,
+                    on_template_start=_on_start,
+                    on_template_done=_on_done,
+                )
             except Exception as exc:
                 if callable(log):
                     log(f"[{region}] 执行失败：{exc}")
@@ -667,7 +730,7 @@ class DesktopRunnerApp:
         if tk is None:
             raise RuntimeError("当前 Python 环境不可用 Tkinter，无法启动桌面界面。")
         _ensure_runner_config()
-        self.config_data = _load_runner_config()
+        self.config_data = load_runner_config()
         self.region_order = ["NZ", "AU", "CA"]
 
         self.root = tk.Tk()
@@ -687,11 +750,15 @@ class DesktopRunnerApp:
         self.status_var = tk.StringVar(value="就绪")
         self.next_run_var = tk.StringVar(value="未调度")
         self.progress_var = tk.DoubleVar(value=0)
+        self.progress_text_var = tk.StringVar(value="")
         self.save_hint_var = tk.StringVar(value="已加载")
+        self._active_edit_region = None
 
         self._build_ui()
-        self._load_edit_form(self.edit_region_var.get())
+        self._active_edit_region = self._current_edit_region()
+        self._load_edit_form(self._active_edit_region)
         self.log("程序已启动。")
+        self._log_config_sources()
 
     def _build_ui(self):
         top = ttk.Frame(self.root, padding=10)
@@ -729,7 +796,8 @@ class DesktopRunnerApp:
         form.pack(fill=tk.X)
         form.columnconfigure(1, weight=1)
 
-        ttk.Label(form, text="数据库连接").grid(row=0, column=0, sticky=tk.W, padx=(0, 8), pady=4)
+        self.conn_label = ttk.Label(form, text="数据库连接")
+        self.conn_label.grid(row=0, column=0, sticky=tk.W, padx=(0, 8), pady=4)
         self.conn_text = tk.Text(form, height=3, wrap=tk.WORD)
         self.conn_text.grid(row=0, column=1, sticky=tk.EW, pady=4)
         self.conn_text.bind("<KeyRelease>", lambda _e: self._mark_unsaved())
@@ -779,6 +847,8 @@ class DesktopRunnerApp:
         self.schedule_stop_btn.pack(side=tk.LEFT, padx=(0, 8))
         self.save_btn = ttk.Button(action_frame, text="保存配置", command=self.save_config_action)
         self.save_btn.pack(side=tk.LEFT)
+        self.reload_cfg_btn = ttk.Button(action_frame, text="重新加载配置", command=self.reload_config_action)
+        self.reload_cfg_btn.pack(side=tk.LEFT, padx=(8, 0))
 
         status_frame = ttk.Frame(top)
         status_frame.pack(fill=tk.X, pady=6)
@@ -788,8 +858,12 @@ class DesktopRunnerApp:
         self.summary_label = ttk.Label(status_frame, text="")
         self.summary_label.pack(side=tk.RIGHT)
 
-        self.progress = ttk.Progressbar(top, variable=self.progress_var, maximum=100)
-        self.progress.pack(fill=tk.X, pady=(0, 8))
+        progress_frame = ttk.Frame(top)
+        progress_frame.pack(fill=tk.X, pady=(0, 8))
+        self.progress_detail = ttk.Label(progress_frame, textvariable=self.progress_text_var, foreground="#4b5563")
+        self.progress_detail.pack(anchor=tk.W)
+        self.progress = ttk.Progressbar(progress_frame, variable=self.progress_var, maximum=100)
+        self.progress.pack(fill=tk.X, pady=(4, 0))
 
         log_frame = ttk.LabelFrame(top, text="执行日志", padding=8)
         log_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
@@ -806,6 +880,11 @@ class DesktopRunnerApp:
         if self.schedule_job:
             self.root.after_cancel(self.schedule_job)
             self.schedule_job = None
+        try:
+            self._sync_edit_form_to_config()
+            save_runner_config(self.config_data)
+        except Exception:
+            pass
         self.root.destroy()
 
     def log(self, text):
@@ -821,19 +900,38 @@ class DesktopRunnerApp:
     def _set_status(self, text):
         self.status_var.set(text)
 
-    def _set_busy(self, busy):
+    def _update_progress(self, current, total, message):
+        pct = (current / total * 100) if total else 0
+        self.progress_var.set(pct)
+        self.progress_text_var.set(message)
+
+    def _ui_progress_from_thread(self, current, total, message):
+        self.root.after(0, lambda: self._update_progress(current, total, message))
+
+    def _set_busy(self, busy, *, indeterminate=False):
         self.busy = busy
         state = tk.DISABLED if busy else tk.NORMAL
-        for widget in (self.test_btn, self.scan_btn, self.save_btn, self.run_btn, self.schedule_start_btn, self.freq_spin, self.freq_combo):
+        for widget in (
+            self.test_btn, self.scan_btn, self.save_btn, self.reload_cfg_btn,
+            self.run_btn, self.schedule_start_btn, self.freq_spin, self.freq_combo,
+        ):
             widget.configure(state=state)
         self.schedule_stop_btn.configure(state=tk.NORMAL)
         if busy:
-            self.progress.configure(mode="indeterminate")
-            self.progress.start(9)
+            if indeterminate:
+                self.progress.configure(mode="indeterminate")
+                self.progress.start(9)
+                self.progress_text_var.set("处理中...")
+            else:
+                self.progress.stop()
+                self.progress.configure(mode="determinate")
+                self.progress_var.set(0)
+                self.progress_text_var.set("准备中...")
         else:
             self.progress.stop()
             self.progress.configure(mode="determinate")
             self.progress_var.set(0)
+            self.progress_text_var.set("")
 
     def _mark_unsaved(self):
         self.save_hint_var.set("有未保存改动")
@@ -843,14 +941,45 @@ class DesktopRunnerApp:
         return text.split(" ")[0] if text else self.region_order[0]
 
     def _sync_edit_form_to_config(self):
-        region = self._current_edit_region()
+        region = self._active_edit_region or self._current_edit_region()
+        self._sync_edit_form_to_region(region)
+
+    def _sync_edit_form_to_region(self, region):
+        if not region:
+            return
         cfg = self.config_data["regions"][region]
         cfg["connection_uri"] = self.conn_text.get("1.0", tk.END).strip()
         cfg["template_dir"] = self.template_dir_entry.get().strip()
         cfg["output_dir"] = self.output_dir_entry.get().strip()
 
+    def _log_config_sources(self):
+        from runner_config import RUNNER_CONFIG_FILE
+        self.log(f"配置：{RUNNER_CONFIG_FILE.name}")
+        if RUNNER_CONFIG_LOCAL_FILE.is_file():
+            self.log(f"备份：{RUNNER_CONFIG_LOCAL_FILE.name}")
+        for key in self.region_order:
+            cfg = self.config_data["regions"].get(key, {})
+            uri = str(cfg.get("connection_uri", ""))
+            host = uri.split("@")[-1].split("/")[0] if "@" in uri else "-"
+            self.log(
+                f"  [{key}] 模板={cfg.get('template_dir', '-')}  "
+                f"输出={cfg.get('output_dir', '-')}  库={host}"
+            )
+
+    def reload_config_action(self):
+        self._sync_edit_form_to_config()
+        self.config_data = load_runner_config()
+        self._active_edit_region = self._current_edit_region()
+        self._load_edit_form(self._active_edit_region)
+        self._log_config_sources()
+        self.log("已从磁盘重新加载 region_runner_config.json。")
+        self._set_status("配置已重新加载")
+
     def _load_edit_form(self, region):
         cfg = self.config_data["regions"][region]
+        label = cfg.get("label", region)
+        if getattr(self, "conn_label", None):
+            self.conn_label.configure(text=f"数据库连接 ({region} {label})")
         self.conn_text.delete("1.0", tk.END)
         self.conn_text.insert("1.0", cfg.get("connection_uri", ""))
         self.template_dir_entry.delete(0, tk.END)
@@ -862,8 +991,11 @@ class DesktopRunnerApp:
         self.save_hint_var.set("已加载")
 
     def _on_edit_region_change(self, _event=None):
-        self._sync_edit_form_to_config()
-        self._load_edit_form(self._current_edit_region())
+        new_region = self._current_edit_region()
+        if self._active_edit_region and self._active_edit_region != new_region:
+            self._sync_edit_form_to_region(self._active_edit_region)
+        self._active_edit_region = new_region
+        self._load_edit_form(new_region)
 
     def pick_template_dir(self):
         if filedialog is None:
@@ -897,12 +1029,12 @@ class DesktopRunnerApp:
         regions = [k for k, var in self.region_vars.items() if var.get()]
         return regions or [self.region_order[0]]
 
-    def _run_in_background(self, status_text, worker_fn, done_fn):
+    def _run_in_background(self, status_text, worker_fn, done_fn, *, indeterminate=False):
         if self.busy:
             self.log("已有任务在执行，请稍候。")
             return
 
-        self._set_busy(True)
+        self._set_busy(True, indeterminate=indeterminate)
         self._set_status(status_text)
 
         def _worker():
@@ -922,11 +1054,12 @@ class DesktopRunnerApp:
             files = _list_txt_templates(cfg.get("template_dir"))
             self.template_list.delete(0, tk.END)
             if not files:
-                self.template_list.insert(tk.END, "目录下没有 .txt 模板。")
+                self.template_list.insert(tk.END, "目录下没有 .sql / .txt 模板。")
             else:
                 for f in files:
                     self.template_list.insert(tk.END, f.name)
-            self.log(f"[{region}] 找到 {len(files)} 个 txt 模板。")
+            runnable = _load_sql_templates(cfg.get("template_dir"), log=self.log)
+            self.log(f"[{region}] 目录内 {len(files)} 个文件，可执行 {len(runnable)} 个模板。")
             self._set_status("模板读取完成")
         except Exception as exc:
             self.template_list.delete(0, tk.END)
@@ -944,9 +1077,10 @@ class DesktopRunnerApp:
             self.freq_value_var.set(settings["frequency_value"])
         settings["frequency_unit"] = self.freq_unit_var.get() if self.freq_unit_var.get() in ("minute", "hour") else "minute"
         self.freq_unit_var.set(settings["frequency_unit"])
-        _save_runner_config(self.config_data)
+        save_runner_config(self.config_data)
+        region = self._active_edit_region or self._current_edit_region()
         self.save_hint_var.set("已保存")
-        self.log("配置保存成功。")
+        self.log(f"配置保存成功（{region}）→ region_runner_config.json")
         self._set_status("配置已保存")
 
     def test_connection_action(self):
@@ -970,7 +1104,7 @@ class DesktopRunnerApp:
                 self.log(f"[{region}] 连接失败：{result.get('message')}")
                 self._set_status("连接测试失败")
 
-        self._run_in_background("连接测试中...", worker, done)
+        self._run_in_background("连接测试中...", worker, done, indeterminate=True)
 
     def run_action(self, from_schedule=False):
         self._sync_edit_form_to_config()
@@ -983,7 +1117,12 @@ class DesktopRunnerApp:
         self.log(f"开始执行地区：{', '.join(selected)}")
 
         def worker():
-            return run_regions(selected, self.config_data, log=self._ui_log_from_thread)
+            return run_regions(
+                selected,
+                self.config_data,
+                log=self._ui_log_from_thread,
+                progress=self._ui_progress_from_thread,
+            )
 
         def done(err, result):
             self._set_busy(False)
@@ -991,6 +1130,7 @@ class DesktopRunnerApp:
                 self.log(f"执行失败：{err}")
                 self._set_status("执行失败")
                 return
+            self._update_progress(1, 1, "全部完成")
             summary = result.get("summary", {})
             self.summary_label.configure(
                 text=f"地区:{summary.get('regions', 0)} 成功:{summary.get('success', 0)} 部分:{summary.get('partial', 0)} 警告:{summary.get('warning', 0)} 失败:{summary.get('error', 0)}"
@@ -1050,7 +1190,7 @@ class DesktopRunnerApp:
 
 def run_cli_once(region_arg):
     _ensure_runner_config()
-    config = _load_runner_config()
+    config = load_runner_config()
     if region_arg:
         selected = [r.strip().upper() for r in region_arg.split(",") if r.strip()]
     else:

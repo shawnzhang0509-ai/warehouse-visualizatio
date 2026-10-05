@@ -56,10 +56,7 @@ def apply_sql_placeholders(
             if in_clause:
                 out = sku_like_pattern.sub(in_clause, out)
                 out = bare_like_pattern.sub(in_clause.replace("p.Sku", "Sku"), out)
-                notes.append(
-                    f"{{sku}} → 渠道列表 {len(set(channel_prefixes))} 个"
-                    "（po_channel_prefixes.txt，PO/sales 共用）"
-                )
+                notes.append(f"{{sku}} → 渠道列表 {len(set(channel_prefixes))} 个（po_channel_prefixes.txt）")
             else:
                 out = sku_like_pattern.sub(lambda m: f"{m.group('col')} LIKE '%'", out)
                 out = bare_like_pattern.sub("LIKE '%'", out)
@@ -87,7 +84,7 @@ def placeholder_context_for_region(region_key: str, region_cfg: dict | None = No
 
     from runner_config import load_runner_config
 
-    sku = os.getenv("PO_SKU_PREFIX", "").strip() or os.getenv("SALES_SKU_PREFIX", "").strip()
+    sku = os.getenv("PO_SKU_PREFIX", "").strip()
     cfg = dict(region_cfg) if isinstance(region_cfg, dict) else {}
     rk = (region_key or "").strip().upper()
     try:

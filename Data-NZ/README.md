@@ -14,28 +14,12 @@
 | **parts.txt** / parts.sql | **parts.csv**（配件库存） |
 | **PO.txt** / po.sql（本机） | **po.csv**（在途采购；**只改本机 SQL，仓库不再内置 po.sql**） |
 | **stock_volume.txt** | **stock_volume.csv**（中心仓占用体积明细，容积率页备用） |
-| **weekly_sales.sql** | **weekly_sales.csv**（分店×SKU 周销量；库存健康气泡图） |
+| weekly_sales.sql | weekly_sales.csv |
 
 `on_hold.txt` / `parts.txt` / **`po.sql` 或 PO.txt** / **stock_volume.txt** **只放你本机**（已 `.gitignore`，**Git 不会更新你的 PO SQL**）。仓库里仅有 `*.example.txt` 作参考。
 
 **`git pull` 提示 po.sql 冲突时**（远程已删除仓库版 po.sql）：先备份 `Data-NZ\po.sql`，再执行  
 `git rm --cached Data-NZ/po.sql`（若提示不存在可忽略）→ `git pull origin main` → 把备份拷回 `Data-NZ\po.sql`（此后为未跟踪文件，pull 不会再动它）。
-
-### `checkout` 失败：`stock.txt would be overwritten` / 一堆 `CONFLICT`
-
-常见原因：**`checkout` 没成功**，但下一行 **`git pull origin cursor/inventory-health-e23a` 仍然执行**，等于在 **main** 上把远程分支 merge 进来 → `app.py` 等冲突。
-
-在 **PowerShell** 里**一行一行**执行（不要 `>>` 连着三条；`checkout` 失败就不要 pull 该分支）：
-
-```powershell
-git merge --abort
-git status
-Move-Item -Force Data-NZ\stock.txt Data-NZ\stock.txt.my-backup
-git fetch origin
-git checkout cursor/inventory-health-e23a
-```
-
-`checkout` 成功后若提示 *Already up to date*，**不必**再 `pull origin cursor/inventory-health-e23a`。库存请用 **`product_stock_price.sql`**，不要用 `stock.txt`（已 `.gitignore`，与 main 一致）。
 
 **两个 stock 模板请一起执行（两库）。** 看板启动时会读 `stock.csv` + `stock_discontinued.csv`，状态栏会显示 `stock.csv + stock_discontinued.csv（两库）`。只导出一个文件时，停产=「全部」会缺数据。
 
@@ -52,7 +36,7 @@ git checkout cursor/inventory-health-e23a
 | `display.csv` | ✅ 必须（陈列区 `%Display%`） |
 | `storage.csv` | ✅ 推荐（店面后仓 `%Storage%`，看板「仓有·店仓无 / 双有未陈列」） |
 | `blacklist.csv` | 可选（见 `blacklist.example.csv` 模板） |
-| `weekly_sales.csv` | 可选（**库存健康**标签：日均销量与缺货率；由 `weekly_sales.sql` 导出） |
+| `weekly_sales.csv` | 看板不需要 |
 | `on_hold.csv` | 可选（看板「On Hold/配件」标签 + 产品状态 ⏸） |
 | `parts.csv` | 可选（配件挖掘） |
 
@@ -156,6 +140,6 @@ git checkout cursor/inventory-health-e23a
 1. **SSMS 有数 ≠ 看板有数**：看板读 `Output-NZ/po.csv`（由本机 **PO.txt** 经 **app.py** 导出）。
 2. **程序已支持 `DECLARE @…` + `SELECT` 批处理**（v1.9.39+），无需为执行器改 SQL 结构。
 3. **`LIKE '996'` 没有 `%`**：只匹配 SKU 恰好 `996`；系列用 `LIKE '996%'` 或 `@SkuFilter + '%'`。
-4. **`p.Sku LIKE '{sku}%'`（花括号占位符）**：**PO / sales 8-30 / 15 / 30** 执行前都会替换。优先 `po_sku_prefix` 或 `SALES_SKU_PREFIX`（单渠道）；否则读 **`po_channel_prefixes.txt`**，生成 `LEFT(p.Sku,3) IN (...)`。只测一个渠道时在 `region_runner_config.local.json` 写 `"po_sku_prefix": "130"`。
+4. **`p.Sku LIKE '{sku}%'`（花括号占位符）**：执行前自动替换。优先 `po_sku_prefix` / `PO_SKU_PREFIX`（单渠道）；否则读同目录 **`po_channel_prefixes.txt`**（一行一个前三位，`河北_378` 也可写 `378`），生成 `LEFT(p.Sku,3) IN (...)` 一次查全渠道。只测一个渠道时在配置里写 `"po_sku_prefix": "130"`。
 5. 容积率页刷新可看状态栏诊断；PO 导出 0 行时 app 日志有 **PO 诊断** 计数。
 - 以 `example_` 开头的文件会自动跳过，不执行。
