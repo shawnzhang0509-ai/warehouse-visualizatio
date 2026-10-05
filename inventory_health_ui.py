@@ -175,34 +175,70 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
     chart_frame = tk.Frame(chart_wrap, bg="white")
     chart_frame.pack(fill=tk.BOTH, expand=True)
     table_frame = tk.Frame(panes, bg="white")
-    panes.add(chart_wrap, minsize=380)
-    panes.add(table_frame, minsize=320)
+    panes.add(chart_wrap, minsize=560)
+    panes.add(table_frame, minsize=200)
+    app._ih_panes = panes
     app._ih_chart_frame = chart_frame
 
     cols = (
-        "priority", "sku", "channel", "demand_src", "stockout", "days", "demand_m3",
+        "priority", "channel", "stockout", "days", "demand_m3",
         "inv_m3", "transit", "quadrant",
     )
     app._ih_tree = ttk.Treeview(table_frame, columns=cols, show="headings", height=16)
     headings = {
-        "priority": ("P", 36), "sku": ("SKU", 88), "channel": ("渠道", 48),
-        "demand_src": ("需求来源", 72), "stockout": ("缺货%", 56), "days": ("库存天", 56),
-        "demand_m3": ("m³/天", 64),
-        "inv_m3": ("在库m³", 64), "transit": ("在途m³", 64), "quadrant": ("象限", 120),
+        "priority": ("P", 32), "channel": ("渠道", 52),
+        "stockout": ("缺货%", 52), "days": ("库存天", 52),
+        "demand_m3": ("m³/天", 58),
+        "inv_m3": ("在库m³", 58), "transit": ("在途m³", 58), "quadrant": ("象限", 108),
     }
     for c, (t, w) in headings.items():
         app._ih_tree.heading(c, text=t)
-        app._ih_tree.column(c, width=w, anchor="center" if c != "sku" else "w")
+        app._ih_tree.column(c, width=w, anchor="center")
     scroll = ttk.Scrollbar(table_frame, orient="vertical", command=app._ih_tree.yview)
     app._ih_tree.configure(yscrollcommand=scroll.set)
     app._ih_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     scroll.pack(side=tk.RIGHT, fill=tk.Y)
     app._ih_tree.tag_configure("mismatch", background="#fee2e2")
+    app._ih_tree.tag_configure("selected_row", background="#fef3c7")
+    app._ih_row_link: dict[str, str] = {}
+    app._ih_link_to_iid: dict[str, str] = {}
+
+    def _ih_select_tree_by_link(link_key: str):
+        iid = app._ih_link_to_iid.get(link_key or "")
+        if not iid:
+            return
+        app._ih_tree.selection_set(iid)
+        app._ih_tree.see(iid)
+
+    app._ih_select_tree_by_link = _ih_select_tree_by_link
+
+    def _on_ih_tree_select(_event=None):
+        sel = app._ih_tree.selection()
+        if not sel:
+            ihc.highlight_chart_link(app, None)
+            return
+        link = app._ih_row_link.get(sel[0], "")
+        ihc.highlight_chart_link(app, link or None)
+
+    app._ih_tree.bind("<<TreeviewSelect>>", _on_ih_tree_select)
+
+    def _ih_place_pane_sash():
+        panes = getattr(app, "_ih_panes", None)
+        if not panes:
+            return
+        try:
+            w = panes.winfo_width()
+            if w > 400:
+                panes.sash_place(0, int(w * 0.72), 0)
+        except tk.TclError:
+            pass
+
+    app._ih_place_pane_sash = _ih_place_pane_sash
 
     formula = tk.Label(
         tab,
         text="渠道 = SKU 前三位；负责人来自 Output-NZ/channel_owners.csv（与负责人报表一致）；"
-        "主图库存天 0–150，更长点叠顶栏，点「超长库存图」看真实纵轴",
+        "主图标注渠道前三位；点表格行 ↔ 高亮气泡；主图 0–150 天，超长点用「超长库存图」",
         bg="white", fg="#64748b", font=("Segoe UI", 8),
         wraplength=900, justify=tk.LEFT,
     )
@@ -291,9 +327,11 @@ def _apply_chart(app, report, th):
         for w in app._ih_chart_frame.winfo_children():
             w.destroy()
         app._ih_thresholds = th.__dict__
-        app._ih_chart_widget, _fig, chart_meta = ihc.render_bubble_chart(
+        app._ih_chart_widget, _fig, chart_meta, canvas = ihc.render_bubble_chart(
             app._ih_chart_frame, report, th.__dict__,
         )
+        if canvas is not None and _fig is not None:
+            ihc.bind_chart_interaction(app, canvas, _fig, chart_meta)
         n_out = int(chart_meta.get("outlier_count") or 0)
         if getattr(app, "_ih_outlier_btn", None) is not None:
             app._ih_outlier_btn.configure(text=f"超长库存图 ({n_out})")
@@ -338,6 +376,9 @@ def _apply_report(app, report, th, elapsed_sec=0.0, max_table_rows=600, draw_cha
 
     for iid in app._ih_tree.get_children():
         app._ih_tree.delete(iid)
+    app._ih_row_link = {}
+    app._ih_link_to_iid = {}
+
     def _cell(val):
         if val is None:
             return "—"
@@ -345,15 +386,23 @@ def _apply_report(app, report, th, elapsed_sec=0.0, max_table_rows=600, draw_cha
             return "—"
         return val
 
-    for row in display_rows:
+    for idx, row in enumerate(display_rows):
         tag = ("mismatch",) if row.get("quadrant") == "Inventory Mismatch" else ()
+        link = str(row.get("channel") or "").strip()
+        if not link:
+            sku = str(row.get("sku") or "").strip().replace("Σ", "").strip()
+            link = sku[:3] if sku else f"row{idx}"
+        iid = f"ih_{link}_{idx}"
+        app._ih_row_link[iid] = link
+        if link not in app._ih_link_to_iid:
+            app._ih_link_to_iid[link] = iid
         app._ih_tree.insert(
-            "", "end",
+            "",
+            "end",
+            iid=iid,
             values=(
                 _cell(row.get("priority")),
-                _cell(row.get("sku")),
-                _cell(row.get("channel")),
-                _cell(row.get("demand_source")) or "—",
+                _cell(row.get("channel")) or link,
                 _cell(row.get("stockout_rate_pct")),
                 _cell(row.get("theoretical_days_label")),
                 _cell(row.get("avg_daily_demand_m3")),
@@ -363,6 +412,9 @@ def _apply_report(app, report, th, elapsed_sec=0.0, max_table_rows=600, draw_cha
             ),
             tags=tag,
         )
+
+    if getattr(app, "_ih_place_pane_sash", None):
+        _ui_after(app, 120, app._ih_place_pane_sash)
 
     if draw_chart:
         _apply_chart(app, report, th)

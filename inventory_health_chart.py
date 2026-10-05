@@ -59,6 +59,26 @@ def _chart_rows(report: dict[str, Any]) -> list[dict]:
     return rows
 
 
+def _link_key_for_row(r: dict) -> str:
+    ch = str(r.get("channel") or "").strip()
+    if ch:
+        return ch
+    sku = str(r.get("sku") or "").strip()
+    if sku.startswith("Σ"):
+        sku = sku.replace("Σ", "").strip()
+    return sku[:3] if len(sku) >= 3 else sku
+
+
+def _style_scatter_arrays(points: list[dict], selected_key: str | None):
+    face, edge, sizes = [], [], []
+    for p in points:
+        selected = selected_key and p.get("link_key") == selected_key
+        face.append("#fbbf24" if selected else p["color"])
+        edge.append("#b45309" if selected else ("#c2410c" if p.get("outlier") else "#1e293b"))
+        sizes.append(p["size"] * 1.45 if selected else p["size"])
+    return face, edge, sizes
+
+
 def _build_points(rows: list[dict], y_th: float) -> tuple[list[dict], list[dict]]:
     """拆成主图点 + 超长库存天（≥主图上限）点。"""
     normal: list[dict] = []
@@ -73,6 +93,7 @@ def _build_points(rows: list[dict], y_th: float) -> tuple[list[dict], list[dict]
         x = float(r.get("stockout_rate_pct") or 0)
         quad = r.get("quadrant") or ""
         color = "#dc2626" if quad == "Inventory Mismatch" else "#2563eb"
+        link = _link_key_for_row(r)
         pt = {
             "row": r,
             "x": x,
@@ -80,8 +101,12 @@ def _build_points(rows: list[dict], y_th: float) -> tuple[list[dict], list[dict]
             "size": _bubble_size(r),
             "color": color,
             "label": r.get("sku") or "",
+            "link_key": link,
+            "channel_label": link,
+            "outlier": False,
         }
         if y_true > _MAIN_Y_MAX:
+            pt["outlier"] = True
             pt["x_plot"] = min(98.0, max(0.0, x + rng.uniform(-2.5, 2.5)))
             pt["y_plot"] = band_y + (out_idx % 5) * 0.35
             out_idx += 1
@@ -100,19 +125,77 @@ def _draw_quadrant_labels(ax, x_th: float, y_cap: float):
     ax.text(x_th * 1.5, y_cap * 0.12, QUADRANT_LABELS["br"], ha="center", fontsize=8, color="#ea580c")
 
 
-def _scatter_points(ax, points: list[dict], *, marker="o", edge="#1e293b"):
+def _scatter_points(ax, points: list[dict], *, marker="o", selected_key: str | None = None):
     if not points:
-        return
-    ax.scatter(
+        return None
+    fc, ec, sizes = _style_scatter_arrays(points, selected_key)
+    return ax.scatter(
         [p["x_plot"] for p in points],
         [p["y_plot"] for p in points],
-        s=[p["size"] for p in points],
-        c=[p["color"] for p in points],
+        s=sizes,
+        c=fc,
         marker=marker,
-        alpha=0.55,
-        edgecolors=edge,
-        linewidths=0.3,
+        alpha=0.62,
+        edgecolors=ec,
+        linewidths=0.45,
+        picker=True,
+        pickradius=10,
+        zorder=3 if marker == "o" else 4,
     )
+
+
+def _label_channels(ax, points: list[dict], max_labels: int = 160):
+    for p in points[:max_labels]:
+        ch = p.get("channel_label") or p.get("link_key") or ""
+        if not ch:
+            continue
+        ax.annotate(
+            str(ch),
+            (p["x_plot"], p["y_plot"]),
+            fontsize=7,
+            fontweight="bold",
+            color="#0f172a",
+            ha="center",
+            va="bottom",
+            xytext=(0, 3),
+            textcoords="offset points",
+            zorder=5,
+        )
+
+
+def highlight_chart_link(app, link_key: str | None):
+    meta = getattr(app, "_ih_chart_meta", None)
+    if not meta:
+        return
+    meta["selected_key"] = link_key or ""
+    for sc, pts in meta.get("pick_map", {}).items():
+        if sc is None:
+            continue
+        fc, ec, sizes = _style_scatter_arrays(pts, link_key or None)
+        sc.set_facecolors(fc)
+        sc.set_edgecolors(ec)
+        sc.set_sizes(sizes)
+    meta.get("canvas") and meta["canvas"].draw_idle()
+
+
+def bind_chart_interaction(app, canvas, fig, meta):
+    meta["canvas"] = canvas
+    meta["fig"] = fig
+    meta["selected_key"] = ""
+    app._ih_chart_meta = meta
+
+    def _on_pick(event):
+        pts = meta.get("pick_map", {}).get(event.artist)
+        if not pts:
+            return
+        p = pts[int(event.ind[0])]
+        key = p.get("link_key") or ""
+        highlight_chart_link(app, key)
+        cb = getattr(app, "_ih_select_tree_by_link", None)
+        if callable(cb):
+            cb(key)
+
+    fig.canvas.mpl_connect("pick_event", _on_pick)
 
 
 def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, float]):
@@ -127,7 +210,7 @@ def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, fl
             fg="#64748b",
         )
         lbl.pack(fill=tk.BOTH, expand=True)
-        return lbl, None, meta
+        return lbl, None, meta, None
 
     rows = _chart_rows(report)
     x_th = float(thresholds.get("stockout_pct") or 50)
@@ -147,7 +230,7 @@ def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, fl
     ]
     meta["outlier_count"] = len(outliers)
 
-    fig = Figure(figsize=(7.2, 5.4), dpi=100, facecolor="white")
+    fig = Figure(figsize=(8.4, 6.0), dpi=100, facecolor="white")
     ax = fig.add_subplot(111)
     ax.set_facecolor("#fafbfc")
     ax.set_xlabel("Stockout Rate (%)", fontsize=10)
@@ -156,10 +239,19 @@ def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, fl
     ax.axvline(x_th, color="#94a3b8", linestyle="--", linewidth=1)
     ax.axhline(y_th, color="#94a3b8", linestyle="--", linewidth=1)
 
-    _scatter_points(ax, normal)
+    sc_norm = _scatter_points(ax, normal)
+    sc_out = None
     if outliers:
         ax.axhline(_MAIN_Y_MAX - 6, color="#fdba74", linestyle=":", linewidth=1)
-        _scatter_points(ax, outliers, marker="^", edge="#c2410c")
+        sc_out = _scatter_points(ax, outliers, marker="^")
+    all_labeled = normal + outliers
+    _label_channels(ax, all_labeled)
+    meta["pick_map"] = {}
+    if sc_norm is not None:
+        meta["pick_map"][sc_norm] = normal
+    if sc_out is not None:
+        meta["pick_map"][sc_out] = outliers
+    meta["points"] = all_labeled
         ax.text(
             0.02,
             0.98,
@@ -185,7 +277,7 @@ def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, fl
     canvas.draw()
     widget = canvas.get_tk_widget()
     widget.pack(fill="both", expand=True)
-    return widget, fig, meta
+    return widget, fig, meta, canvas
 
 
 def open_long_days_chart(parent, report: dict[str, Any], thresholds: dict[str, float]):
