@@ -217,10 +217,68 @@ def _build_points(rows: list[dict], y_th: float) -> tuple[list[dict], list[dict]
 
 
 def _draw_quadrant_labels(ax, x_th: float, y_cap: float):
-    ax.text(x_th * 0.5, y_cap * 0.88, QUADRANT_LABELS["tl"], ha="center", fontsize=8, color="#64748b")
-    ax.text(x_th * 1.5, y_cap * 0.88, QUADRANT_LABELS["tr"], ha="center", fontsize=8, color="#dc2626", fontweight="bold")
-    ax.text(x_th * 0.5, y_cap * 0.12, QUADRANT_LABELS["bl"], ha="center", fontsize=8, color="#64748b")
-    ax.text(x_th * 1.5, y_cap * 0.12, QUADRANT_LABELS["br"], ha="center", fontsize=8, color="#ea580c")
+    """象限名标在绘图区外缘，避免与气泡重叠。"""
+    from matplotlib.transforms import blended_transform_factory
+
+    x_mid_l = x_th * 0.5
+    x_mid_r = x_th * 1.5
+    trans_bottom = blended_transform_factory(ax.transData, ax.transAxes)
+    trans_top = blended_transform_factory(ax.transData, ax.transAxes)
+    ax.text(
+        x_mid_l,
+        -0.11,
+        f"{QUADRANT_LABELS['bl']}\n健康",
+        transform=trans_bottom,
+        ha="center",
+        va="top",
+        fontsize=7.5,
+        color="#15803d",
+        fontweight="bold",
+        clip_on=False,
+        zorder=12,
+        bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="#bbf7d0", alpha=0.92),
+    )
+    ax.text(
+        x_mid_r,
+        -0.11,
+        f"{QUADRANT_LABELS['br']}\n供应不足",
+        transform=trans_bottom,
+        ha="center",
+        va="top",
+        fontsize=7.5,
+        color="#c2410c",
+        fontweight="bold",
+        clip_on=False,
+        zorder=12,
+        bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="#fed7aa", alpha=0.92),
+    )
+    ax.text(
+        x_mid_l,
+        1.05,
+        f"{QUADRANT_LABELS['tl']}\n可能积压",
+        transform=trans_top,
+        ha="center",
+        va="bottom",
+        fontsize=7.5,
+        color="#1d4ed8",
+        clip_on=False,
+        zorder=12,
+        bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="#bfdbfe", alpha=0.92),
+    )
+    ax.text(
+        x_mid_r,
+        1.05,
+        f"{QUADRANT_LABELS['tr']}\n库存错配",
+        transform=trans_top,
+        ha="center",
+        va="bottom",
+        fontsize=7.5,
+        color="#b91c1c",
+        fontweight="bold",
+        clip_on=False,
+        zorder=12,
+        bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="#fecaca", alpha=0.92),
+    )
 
 
 def _chart_show_guide_panel() -> bool:
@@ -231,63 +289,68 @@ def _chart_show_guide_panel() -> bool:
     )
 
 
-def _build_chart_guide_text(
-    x_th: float,
-    y_th: float,
-    families: dict[str, list[str]] | None,
-) -> str:
-    fam_line = ""
-    if families:
-        bits = "、".join(sorted(families.keys()))
-        fam_line = f"\n· {bits} 等省渠道在主图合并为一个气泡。"
-    return (
-        "读图说明\n"
-        f"横轴：缺货率（%）。竖虚线 {x_th:g}% 为警戒线，右侧缺货偏高。\n"
-        f"纵轴：理论库存消耗天数（在库体积÷日均需求体积）。"
-        f"横虚线 {y_th:g} 天，上方周转偏慢。\n"
-        "气泡越大：日均需求体积越大，便于先看大户。"
-        f"{fam_line}\n"
-        "\n四象限含义\n"
-        "左下·健康（绿）：缺货率与库存天数均较合理；维持节奏。\n"
-        "右下·供应不足（橙）：缺货率高、天数不高；优先补货/加 PO。\n"
-        "左上·可能积压（蓝）：缺货率低、天数很长；控采、促销或调拨。\n"
-        "右上·库存错配（红）：既缺货又高天数；查渠道/SKU 结构与在途。"
-    )
-
-
-def _draw_chart_guide_panel(
-    fig,
+def _draw_chart_guide_banner(
     ax_guide,
     x_th: float,
     y_th: float,
     families: dict[str, list[str]] | None,
 ) -> None:
+    """读图说明横条：放在主图上方，不占用绘图区宽度。"""
     ax_guide.set_facecolor("#f8fafc")
     ax_guide.axis("off")
-    body = _build_chart_guide_text(x_th, y_th, families)
+    fam_bit = ""
+    if families:
+        fam_bit = f"  |  {'、'.join(sorted(families.keys()))} 省渠道主图合并为一个气泡"
+    line1 = (
+        f"读图说明：横轴缺货率%，竖虚线 {x_th:g}% 为警戒线；"
+        f"纵轴理论库存消耗天（在库÷日均需求），横虚线 {y_th:g} 天；"
+        f"气泡越大=日均需求体积越大。"
+        f"{fam_bit}"
+    )
+    line2 = (
+        "四象限：左下绿·健康（维持）  |  右下橙·供应不足（补货）  |  "
+        "左上蓝·可能积压（控采/促销）  |  右上红·库存错配（查结构/在途）"
+    )
     ax_guide.text(
-        0.02,
-        0.98,
-        body,
+        0.5,
+        0.72,
+        line1,
         transform=ax_guide.transAxes,
         va="top",
-        ha="left",
-        fontsize=7.2,
+        ha="center",
+        fontsize=7.4,
         color="#334155",
-        linespacing=1.35,
         wrap=True,
-        bbox=dict(boxstyle="round,pad=0.45", facecolor="white", edgecolor="#cbd5e1", alpha=0.96),
     )
-    y = 0.22
+    ax_guide.text(
+        0.5,
+        0.08,
+        line2,
+        transform=ax_guide.transAxes,
+        va="bottom",
+        ha="center",
+        fontsize=7.2,
+        color="#475569",
+        wrap=True,
+    )
+    x0 = 0.04
     for label, color in (
         ("健康", QUADRANT_COLORS["Healthy"]),
         ("供应不足", QUADRANT_COLORS["Supply Shortage"]),
         ("可能积压", QUADRANT_COLORS["Potential Overstock"]),
         ("库存错配", QUADRANT_COLORS["Inventory Mismatch"]),
     ):
-        ax_guide.scatter([0.06], [y], s=42, c=color, edgecolors="#334155", linewidths=0.35, transform=ax_guide.transAxes, clip_on=False)
-        ax_guide.text(0.12, y, label, transform=ax_guide.transAxes, fontsize=7, va="center", color="#475569")
-        y -= 0.055
+        ax_guide.scatter(
+            [x0],
+            [0.38],
+            s=28,
+            c=color,
+            edgecolors="#334155",
+            linewidths=0.3,
+            transform=ax_guide.transAxes,
+            clip_on=False,
+        )
+        x0 += 0.01
 
 
 def _scatter_points(ax, points: list[dict], *, marker="o", selected_key: str | None = None):
@@ -431,12 +494,12 @@ def render_bubble_chart(
         show_guide = _chart_show_guide_panel() and bool(report.get("channel_families") or report.get("region"))
     fams = report.get("channel_families") or {}
     if show_guide:
-        fig = Figure(figsize=(11.2, 6.4), dpi=100, facecolor="white")
-        gs = fig.add_gridspec(1, 2, width_ratios=[1.62, 1], wspace=0.06)
-        ax = fig.add_subplot(gs[0, 0])
-        ax_guide = fig.add_subplot(gs[0, 1])
+        fig = Figure(figsize=(8.6, 7.0), dpi=100, facecolor="white")
+        gs = fig.add_gridspec(2, 1, height_ratios=[0.22, 1], hspace=0.28)
+        ax_guide = fig.add_subplot(gs[0, 0])
+        ax = fig.add_subplot(gs[1, 0])
     else:
-        fig = Figure(figsize=(8.4, 6.0), dpi=100, facecolor="white")
+        fig = Figure(figsize=(8.4, 6.2), dpi=100, facecolor="white")
         ax = fig.add_subplot(111)
         ax_guide = None
     ax.set_facecolor("#fafbfc")
@@ -446,7 +509,8 @@ def render_bubble_chart(
     if fams:
         bits = ", ".join(sorted(fams.keys()))
         title = f"Inventory Health ({bits} merged; other 3-digit channels separate)"
-    ax.set_title(title, fontsize=10, fontweight="bold")
+    title_pad = 28 if show_guide else 8
+    ax.set_title(title, fontsize=10, fontweight="bold", pad=title_pad)
     ax.axvline(x_th, color="#94a3b8", linestyle="--", linewidth=1)
     ax.axhline(y_th, color="#94a3b8", linestyle="--", linewidth=1)
 
@@ -483,7 +547,7 @@ def render_bubble_chart(
     ax.set_ylim(0, y_cap)
     _draw_quadrant_labels(ax, x_th, y_cap)
     if ax_guide is not None:
-        _draw_chart_guide_panel(fig, ax_guide, x_th, y_th, fams if fams else None)
+        _draw_chart_guide_banner(ax_guide, x_th, y_th, fams if fams else None)
     else:
         for quad, color in (
             ("Supply Shortage", QUADRANT_COLORS["Supply Shortage"]),
@@ -494,6 +558,8 @@ def render_bubble_chart(
             ax.scatter([], [], c=color, s=36, label=quad, edgecolors="#334155", linewidths=0.3)
         ax.legend(loc="lower right", fontsize=7, framealpha=0.9, title="Quadrant")
     ax.grid(True, alpha=0.25)
+    ax.margins(x=0.02, y=0.02)
+    fig.subplots_adjust(left=0.09, right=0.97, bottom=0.14, top=0.94 if not show_guide else 0.88)
 
     canvas = FigureCanvasTkAgg(fig, master=parent)
     canvas.draw()
