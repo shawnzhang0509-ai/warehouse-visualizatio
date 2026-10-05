@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import panel_data as pd
+from channel_prefixes import normalize_sku_channel_code
 
 WINDOWS = (
     (
@@ -94,9 +95,10 @@ def _to_float(val, default=None):
 
 
 def _norm_key(sku: str, channel: str, region: str) -> tuple[str, str, str]:
+    ch = normalize_sku_channel_code(channel, sku) or pd.sku_prefix(sku)
     return (
-        pd._norm_code(sku),
-        (channel or pd.sku_prefix(sku) or "").strip().upper(),
+        pd.sku_join_key(sku),
+        ch,
         str(region or "").strip(),
     )
 
@@ -107,10 +109,6 @@ def _qty_for_window(row: dict, window: str) -> float | None:
         k = key.lower()
         if k in lower:
             return _to_float(lower[k], 0.0)
-    # 模糊：列名含 8-30 等
-    for col, val in lower.items():
-        if window.replace("-", "") in col.replace("-", "").replace("_", ""):
-            return _to_float(val, 0.0)
     return None
 
 
@@ -161,7 +159,7 @@ def _pick_applied_daily(row: dict, windows_state: dict[str, float]) -> tuple[flo
         qty = windows_state.get(window)
         if qty is not None and qty > 0 and days:
             candidates.append((float(qty) / float(days), f"{window}天"))
-        wpre = _pick(row, V4_WINDOW_DEMAND_KEYS.get(window, []))
+        wpre = _pick_cell(row, V4_WINDOW_DEMAND_KEYS.get(window, []))
         if wpre is not None:
             v = _to_float(wpre)
             if v is not None and v >= 0:
@@ -244,14 +242,17 @@ def _merge_row(
     sku = str(_pick(row, SKU_KEYS) or "").strip()
     if not sku:
         return
-    channel = str(_pick(row, CHANNEL_KEYS) or pd.sku_prefix(sku) or "").strip()
+    channel = normalize_sku_channel_code(
+        str(_pick(row, CHANNEL_KEYS) or ""),
+        sku,
+    ) or pd.sku_prefix(sku)
     region = str(_pick(row, REGION_KEYS) or "").strip()
     key = _norm_key(sku, channel, region)
     slot = acc.setdefault(
         key,
         {
             "sku": sku,
-            "channel": channel.upper() if channel else pd.sku_prefix(sku),
+            "channel": channel or pd.sku_prefix(sku),
             "region": region,
             "name": str(_pick(row, NAME_KEYS) or "").strip(),
             "windows": {},

@@ -5,6 +5,34 @@ from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent
 
+def normalize_sku_channel_code(channel: str | None, sku: str | None = "") -> str:
+    """三位渠道号：996 / 996.0 / '996' → '996'；缺省从 SKU 前三位取。"""
+    text = str(channel or "").strip()
+    if text:
+        try:
+            num = float(str(text).replace(",", ""))
+            if abs(num - round(num)) < 1e-9:
+                n = int(round(num))
+                s = str(n)
+                return s.zfill(3) if len(s) < 3 else s[:3]
+        except ValueError:
+            pass
+        digits = re.sub(r"\D", "", text)
+        if len(digits) >= 3:
+            return digits[:3]
+        if digits:
+            return digits.zfill(3)
+    sku_text = str(sku or "").strip()
+    if sku_text:
+        prefix = sku_text.split("-", 1)[0] if "-" in sku_text else sku_text[:3]
+        digits = re.sub(r"\D", "", prefix)
+        if len(digits) >= 3:
+            return digits[:3]
+        if digits:
+            return digits.zfill(3)
+    return ""
+
+
 def parse_channel_line(line: str) -> str | None:
     text = (line or "").strip()
     if not text or text.startswith("#"):

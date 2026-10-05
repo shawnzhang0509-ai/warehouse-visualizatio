@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 import panel_data as pd
+from channel_prefixes import normalize_sku_channel_code
 from sales_demand import collapse_demand_by_sku_channel, load_sales_demand_index
 
 try:
@@ -68,7 +69,7 @@ def normalize_channel_filter(channel: str) -> str:
 
 def channel_from_sku(code: str) -> str:
     """渠道 = SKU 前三位（107-381 → 107），与看板 SKU 前三位汇总一致。"""
-    return pd.sku_prefix(code)
+    return normalize_sku_channel_code("", code) or pd.sku_prefix(code)
 
 
 @dataclass
@@ -132,17 +133,17 @@ def _pick(row: dict, keys: list[str]):
     return pd._pick(row, keys)
 
 
-def _lookup_sales_demand(index, norm: str, channel: str, branch: str):
+def _lookup_sales_demand(index, sku_key: str, channel: str, branch: str):
     if not index:
         return None
-    channel = (channel or "").upper()
+    channel = normalize_sku_channel_code(channel, "") or str(channel or "").strip()
     branch = (branch or "").strip()
     for reg in (branch, ""):
-        hit = index.get((norm, channel, reg))
+        hit = index.get((sku_key, channel, reg))
         if hit:
             return hit
     for key, rec in index.items():
-        if key[0] == norm and key[1] == channel:
+        if key[0] == sku_key and key[1] == channel:
             return rec
     return None
 
@@ -236,7 +237,9 @@ def _sales_aggregates(
         sku = str(_pick(row, WEEKLY_SKU_KEYS) or "").strip()
         if not sku:
             continue
-        channel = str(_pick(row, WEEKLY_CHANNEL_KEYS) or pd.sku_prefix(sku) or "").strip().upper()
+        channel = channel_from_sku(sku) if not _pick(row, WEEKLY_CHANNEL_KEYS) else normalize_sku_channel_code(
+            str(_pick(row, WEEKLY_CHANNEL_KEYS) or ""), sku,
+        )
         branch = str(_pick(row, WEEKLY_BRANCH_KEYS) or "").strip()
         qty = _to_float(_pick(row, WEEKLY_QTY_KEYS), 0.0) or 0.0
         so = _pick(row, STOCKOUT_KEYS)
@@ -244,7 +247,7 @@ def _sales_aggregates(
         if d0:
             global_min = d0 if global_min is None else min(global_min, d0)
             global_max = d0 if global_max is None else max(global_max, d0)
-        key = (pd._norm_code(sku), channel, branch)
+        key = (pd.sku_join_key(sku), channel, branch)
         b = buckets[key]
         b["qty"] += qty
         if so is not None and str(so).strip() != "":
@@ -329,7 +332,7 @@ def _load_po_by_sku(region: str) -> dict[str, float]:
         if not sku:
             continue
         m3 = float(line.get("volume_m3") or 0.0)
-        out[pd._norm_code(sku)] += m3
+        out[pd.sku_join_key(sku)] += m3
     return dict(out)
 
 
@@ -370,15 +373,15 @@ def build_inventory_health_report(
     t_phase = _time.perf_counter()
     demand_by_sc = _demand_by_sku_channel(demand_index)
     demand_has_units = any((rec.avg_daily_units or 0) > 0 for rec in demand_index.values())
-    always_weekly = os.getenv("INVENTORY_HEALTH_ALWAYS_WEEKLY", "").strip().lower() in ("1", "true", "yes")
-    if demand_index and demand_has_units and not always_weekly:
-        weekly_rows, weekly_path, weekly_warn = [], None, None
-        sales_buckets, span_days, d_min, d_max = {}, max(1, int(lookback_days or DEFAULT_LOOKBACK_DAYS)), None, None
-        warnings_weekly_skip = "已用 sales 8-30/15/30，跳过 weekly_sales 大表以加速"
-    else:
-        weekly_rows, weekly_path, weekly_warn = _load_weekly_sales(region_key)
-        sales_buckets, span_days, d_min, d_max = _sales_aggregates(weekly_rows, lookback_days)
-        warnings_weekly_skip = ""
+    weekly_rows, weekly_path, weekly_warn = _load_weekly_sales(region_key)
+    sales_buckets, span_days, d_min, d_max = _sales_aggregates(weekly_rows, lookback_days)
+    warnings_weekly_skip = ""
+    if demand_index and demand_has_units:
+        warnings_weekly_skip = (
+            "销量优先 sales 8-30/15/30；未命中 SKU 回退 weekly_sales"
+            if weekly_rows
+            else "已用 sales 8-30/15/30（无 weekly_sales 文件则无法回退）"
+        )
     timings["weekly_sales"] = _time.perf_counter() - t_phase
     t_phase = _time.perf_counter()
 
@@ -411,7 +414,7 @@ def build_inventory_health_report(
         code = str(_pick(raw, pd.CODE_KEYS) or "").strip()
         if not code:
             continue
-        norm = pd._norm_code(code)
+        norm = pd.sku_join_key(code)
         ch = channel_from_sku(code)
         if channel_f and ch != channel_f:
             continue
@@ -447,7 +450,7 @@ def build_inventory_health_report(
                 unit_vol = demand_rec.unit_volume_m3
             if demand_rec.stockout_rate_pct is not None:
                 stockout_vals = [demand_rec.stockout_rate_pct / 100.0]
-        else:
+        elif weekly_rows or sales_buckets:
             sale = sales_buckets.get((norm, ch, branch_f)) if branch_f else None
             if sale is None:
                 tot = weekly_by_sc.get((norm, ch))
@@ -462,6 +465,8 @@ def build_inventory_health_report(
                 avg_daily = sale["qty"] / span_days if span_days > 0 else 0.0
                 stockout_vals = sale["stockout"]
                 demand_source = f"weekly_sales/{span_days}d"
+        else:
+            avg_daily = 0.0
 
         incomplete: list[str] = []
         if unit_vol is None:
@@ -518,6 +523,9 @@ def build_inventory_health_report(
 
     if group_by and group_by != "sku":
         rows_out = _aggregate_rows(rows_out, group_by, th)
+
+    with_demand = sum(1 for r in rows_out if (r.avg_daily_units or 0) > 0)
+    warnings.append(f"日均需求命中 {with_demand}/{len(rows_out)} 行（渠道={channel_f or '全部'}）")
 
     timings["aggregate"] = _time.perf_counter() - t_phase
     _bump("完成，刷新界面…")
@@ -590,6 +598,10 @@ def _aggregate_rows(rows: list[InventoryHealthRow], group_by: str, th: HealthThr
         if so_weighted:
             tw = sum(w for _, w in so_weighted)
             stockout = sum(v * w for v, w in so_weighted) / tw if tw else None
+        elif avg_daily_u > 0 and inv_u > 0:
+            proxy = _stockout_proxy_pct(inv_u, avg_daily_u, th.cover_days_proxy)
+            if proxy is not None:
+                stockout = proxy
         th_days, th_label = _theoretical_days(inv_vol if inv_vol else None, demand if demand else None)
         rep = items[0]
         out.append(
