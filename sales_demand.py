@@ -51,7 +51,10 @@ V4_WINDOW_DEMAND_KEYS = {
 SAMPLE_QTY_KEYS = ["sampleqty", "sample_qty", "样品销量", "样本销量"]
 SAMPLE_DAYS_KEYS = ["sampledays", "sample_days", "样本天数", "sampleday"]
 DEMAND_SOURCE_KEYS = ["demandsource", "demand_source", "需求来源", "采用来源"]
-REGION_KEYS = ["region", "地区", "island", "南北岛", "destinationregion"]
+REGION_KEYS = [
+    "region", "地区", "island", "南北岛", "destinationregion",
+    "destination_region", "merge_regions", "shippedtoport", "shipped_to_port",
+]
 CHANNEL_KEYS = ["channel", "渠道", "sku_prefix"] + pd.CHANNEL_KEYS
 
 
@@ -61,9 +64,15 @@ def normalize_demand_island(text: str | None) -> str:
     if not raw:
         return ""
     low = raw.lower().replace(" ", "")
-    if raw in ("北岛", "北", "North", "NI", "North Island", "NorthIsland") or "north" in low:
+    if raw in (
+        "北岛", "北", "North", "NI", "North Island", "NorthIsland",
+        "NorthIslandTotal", "北岛合计",
+    ) or "north" in low or low in ("ni", "northisland"):
         return "北岛"
-    if raw in ("南岛", "南", "South", "SI", "South Island", "SouthIsland") or "south" in low:
+    if raw in (
+        "南岛", "南", "South", "SI", "South Island", "SouthIsland",
+        "SouthIslandTotal", "南岛合计",
+    ) or "south" in low or low in ("si", "southisland"):
         return "南岛"
     if "南" in raw:
         return "南岛"
@@ -86,6 +95,55 @@ def filter_demand_index_by_island(
         if reg == scope:
             out[key] = rec
     return out
+
+
+def demand_index_has_island_labels(index: dict[tuple[str, str, str], Any]) -> bool:
+    for rec in (index or {}).values():
+        if normalize_demand_island(getattr(rec, "region", "") or ""):
+            return True
+    return False
+
+
+def sample_demand_region_labels(index: dict[tuple[str, str, str], Any], limit: int = 6) -> list[str]:
+    seen: list[str] = []
+    for rec in (index or {}).values():
+        raw = str(getattr(rec, "region", "") or "").strip() or "(空)"
+        if raw not in seen:
+            seen.append(raw)
+        if len(seen) >= limit:
+            break
+    return seen
+
+
+def scope_demand_index_for_island(
+    index: dict[tuple[str, str, str], Any],
+    island_scope: str,
+) -> tuple[dict[tuple[str, str, str], Any], str | None]:
+    """
+    按南北岛筛销量；若 CSV 完全无地区列（V4 渠道子目录常见），回退全国销量并提示。
+    在库/在途仍由 inventory_health 按岛筛。
+    """
+    scope = normalize_demand_island(island_scope)
+    if not scope:
+        return dict(index or {}), None
+    matched = filter_demand_index_by_island(index, scope)
+    if matched:
+        return matched, None
+    if not index:
+        return {}, f"无 sales 导出；南北岛={scope} 仅筛在库/在途"
+    if not demand_index_has_island_labels(index):
+        samples = ", ".join(sample_demand_region_labels(index))
+        return dict(index), (
+            f"销量未分南北岛（Region 示例: {samples}），日均需求暂用全国合计；"
+            f"在库/在途仍按{scope}。请在 sales 导出加 Region 或放 Output-NZ/北岛/渠道号/ 下"
+        )
+    samples = ", ".join(sample_demand_region_labels(index, 8))
+    return {}, (
+        f"销量有地区列但未匹配{scope}（见到: {samples}）。"
+        "请核对导出是否为 北岛/南岛 或 North/South Island"
+    )
+
+
 SKU_KEYS = pd.CODE_KEYS
 NAME_KEYS = pd.NAME_KEYS
 
@@ -233,8 +291,10 @@ def _load_per_channel_sales_dirs(
     data_dir: Path,
     acc: dict[tuple[str, str, str], dict[str, Any]],
     warnings: list[str],
+    *,
+    default_region: str = "",
 ) -> bool:
-    """V4 渠道子目录：Output-NZ/996/Sales 8-30.csv 等。"""
+    """V4 渠道子目录：Output-NZ/996/Sales 8-30.csv 或 Output-NZ/北岛/996/…"""
     loaded = False
     if not data_dir.is_dir():
         return False
@@ -243,6 +303,13 @@ def _load_per_channel_sales_dirs(
             continue
         name = child.name
         if name in ("latest", "config", "_config") or re.fullmatch(r"\d{8}_\d{6}", name):
+            continue
+        island_from_dir = normalize_demand_island(name)
+        if island_from_dir:
+            if _load_per_channel_sales_dirs(
+                child, acc, warnings, default_region=island_from_dir,
+            ):
+                loaded = True
             continue
         ch_hint = re.match(r"^(\d{3})", name)
         if not ch_hint:
@@ -255,14 +322,16 @@ def _load_per_channel_sales_dirs(
             if not rows:
                 continue
             loaded = True
-            warnings.append(f"已读 {name}/{path.name}（{len(rows)} 行）")
+            region_tag = default_region or ""
+            tag = f"{region_tag}/{name}" if region_tag else name
+            warnings.append(f"已读 {tag}/{path.name}（{len(rows)} 行）")
             for row in rows:
                 if not _pick(row, CHANNEL_KEYS) and not _pick(row, SKU_KEYS):
                     continue
                 if not _pick(row, CHANNEL_KEYS):
                     row = dict(row)
                     row.setdefault("渠道", ch_hint.group(1))
-                _merge_row(acc, row, window, days)
+                _merge_row(acc, row, window, days, default_region=default_region)
     return loaded
 
 
@@ -271,6 +340,8 @@ def _merge_row(
     row: dict,
     window: str | None,
     window_days: int | None,
+    *,
+    default_region: str = "",
 ):
     sku = str(_pick(row, SKU_KEYS) or "").strip()
     if not sku:
@@ -280,6 +351,8 @@ def _merge_row(
         sku,
     ) or pd.sku_prefix(sku)
     region = str(_pick(row, REGION_KEYS) or "").strip()
+    if not region and default_region:
+        region = default_region
     key = _norm_key(sku, channel, region)
     slot = acc.setdefault(
         key,

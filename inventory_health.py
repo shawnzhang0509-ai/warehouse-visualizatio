@@ -23,9 +23,9 @@ import panel_data as pd
 from channel_prefixes import normalize_sku_channel_code
 from sales_demand import (
     collapse_demand_by_sku_channel,
-    filter_demand_index_by_island,
     load_sales_demand_index,
     normalize_demand_island,
+    scope_demand_index_for_island,
 )
 
 try:
@@ -85,6 +85,14 @@ def _weekly_row_matches_island(row: dict, island_scope: str) -> bool:
         return True
     reg = _pick(row, ["region", "Region", "地区", "island", "南北岛", "DestinationRegion"])
     return normalize_demand_island(str(reg or "")) == scope
+
+
+def _weekly_has_island_labels(rows: list[dict]) -> bool:
+    for row in rows or []:
+        reg = _pick(row, ["region", "Region", "地区", "island", "南北岛", "DestinationRegion"])
+        if normalize_demand_island(str(reg or "")):
+            return True
+    return False
 
 
 def normalize_channel_filter(channel: str) -> str:
@@ -432,13 +440,24 @@ def build_inventory_health_report(
     timings["sales_demand"] = _time.perf_counter() - t_phase
     t_phase = _time.perf_counter()
     island_f = normalize_island_scope(island_scope)
-    demand_index_scoped = filter_demand_index_by_island(demand_index, island_f)
-    demand_by_sc = _demand_by_sku_channel(demand_index_scoped)
-    demand_has_units = any((rec.avg_daily_units or 0) > 0 for rec in demand_index.values())
-    weekly_rows, weekly_path, weekly_warn = _load_weekly_sales(region_key)
-    sales_buckets, span_days, d_min, d_max = _sales_aggregates(
-        weekly_rows, lookback_days, island_f,
+    demand_index_scoped, island_demand_note = scope_demand_index_for_island(
+        demand_index, island_f,
     )
+    demand_by_sc = _demand_by_sku_channel(demand_index_scoped)
+    demand_has_units = any(
+        (rec.avg_daily_units or 0) > 0 for rec in demand_index_scoped.values()
+    )
+    weekly_rows, weekly_path, weekly_warn = _load_weekly_sales(region_key)
+    weekly_island_filter = island_f
+    if island_f and weekly_rows and not _weekly_has_island_labels(weekly_rows):
+        weekly_island_filter = ""
+    sales_buckets, span_days, d_min, d_max = _sales_aggregates(
+        weekly_rows, lookback_days, weekly_island_filter,
+    )
+    if island_f and weekly_rows and not weekly_island_filter and not island_demand_note:
+        island_demand_note = (
+            f"weekly_sales 无南北岛列，回退用全量周销量；在库/在途仍按{island_f}"
+        )
     warnings_weekly_skip = ""
     if demand_index and demand_has_units:
         warnings_weekly_skip = (
@@ -459,6 +478,8 @@ def build_inventory_health_report(
 
     rows_out: list[InventoryHealthRow] = []
     warnings: list[str] = list(sales_warns)
+    if island_demand_note:
+        warnings.append(island_demand_note)
     if warnings_weekly_skip:
         warnings.append(warnings_weekly_skip)
     if weekly_warn and not demand_index:
@@ -595,10 +616,6 @@ def build_inventory_health_report(
     warnings.append(
         f"日均需求命中 {with_demand}/{len(rows_out)} 行（渠道={channel_f or '全部'}{island_note}）",
     )
-    if island_f and pd.island_stock_supported(region_key) and not demand_index_scoped and demand_index:
-        warnings.append(
-            f"已选 {island_f}，但 sales 导出无匹配 Region/南北岛 行；请确认 V4 导出含地区列",
-        )
 
     timings["aggregate"] = _time.perf_counter() - t_phase
     _bump("完成，刷新界面…")
