@@ -38,10 +38,16 @@ V4_DAILY_DEMAND_KEYS = [
     "avg_daily_demand_3checkins_avg",
     "singleavgdailydemand",
     "singleavgdailysales",
+    "singleavg",
+    "single_avg",
     "avgdailysales",
     "avgdailydemand",
     "avg_daily_sales",
     "avg_dailysales",
+]
+PO_SHAPED_KEYS = [
+    "checkindate", "check_in_date", "containernumber", "container_number",
+    "purchaseorder", "purchase_order", "sourcetype", "source_type",
 ]
 V4_WINDOW_DEMAND_KEYS = {
     "8-30": ["需求_8_30天", "需求_8-30天", "demand_8_30", "demand_8-30"],
@@ -268,17 +274,65 @@ def _pick_applied_daily(row: dict, windows_state: dict[str, float]) -> tuple[flo
     return best_val, best_src
 
 
+def _read_sales_table(path: Path | str) -> list[dict]:
+    """库存健康读销量：优先 CSV；同目录 xlsx 便于 Excel 另存为。"""
+    path = Path(path)
+    if path.suffix.lower() == ".csv":
+        return pd._read_table(path)
+    if path.suffix.lower() == ".xlsx":
+        reader = getattr(pd, "_read_xlsx_rows", None)
+        if callable(reader):
+            return reader(path)
+    return []
+
+
+def _headers_look_like_sales_demand(rows: list[dict]) -> bool:
+    if not rows:
+        return False
+    sample = {str(k).strip().lower() for k in rows[0]}
+    joined = "".join(sorted(sample))
+    if not any(k in sample for k in ("sku", "productcode", "itemcode", "编码")):
+        return False
+    demand_markers = (
+        "8-30", "8_30", "830", "15", "30", "采用", "applieddemand",
+        "avgdaily", "singleavg", "dailydemand", "日均需求", "sales",
+    )
+    return any(m in joined for m in demand_markers)
+
+
+def _warn_po_shaped_sales(path: Path, rows: list[dict], warnings: list[str]) -> None:
+    if not rows:
+        return
+    po_hits = 0
+    zero_demand = 0
+    for row in rows[:500]:
+        if any(_pick(row, [k]) for k in PO_SHAPED_KEYS):
+            po_hits += 1
+        if (_precomputed_daily_units(row) or 0) <= 0:
+            zero_demand += 1
+    n = min(len(rows), 500)
+    if po_hits >= max(3, n // 2) and zero_demand >= max(3, n * 4 // 5):
+        warnings.append(
+            f"⚠ {path.name} 含 CheckinDate/Container/PurchaseOrder 等列且日均需求多为 0，"
+            "像 po.csv 在途表而非销量；请用 supplychain/V4 导出 sales 8-30/15/30（或带 Region 的销量宽表）",
+        )
+
+
 def _find_sales_file_in_dir(folder: Path, stems: tuple[str, ...]) -> Path | None:
     folder = Path(folder)
     if not folder.is_dir():
         return None
     for stem in stems:
-        for ext in (".csv", ".txt"):
+        for ext in (".csv", ".txt", ".xlsx"):
             candidate = folder / f"{stem}{ext}"
             if candidate.is_file():
                 return candidate
     stem_set = {s.lower().replace("_", " ").replace("-", " ") for s in stems}
-    for candidate in sorted(folder.glob("*.csv")) + sorted(folder.glob("*.txt")):
+    for candidate in (
+        sorted(folder.glob("*.csv"))
+        + sorted(folder.glob("*.txt"))
+        + sorted(folder.glob("*.xlsx"))
+    ):
         norm = candidate.stem.lower().replace("_", " ").replace("-", " ")
         if norm in stem_set:
             return candidate
@@ -318,7 +372,7 @@ def _load_per_channel_sales_dirs(
             path = _find_sales_file_in_dir(child, stems)
             if not path:
                 continue
-            rows = pd._read_table(path)
+            rows = _read_sales_table(path)
             if not rows:
                 continue
             loaded = True
@@ -420,31 +474,48 @@ def load_sales_demand_index(
         if not path or not Path(path).is_file():
             continue
         loaded_any = True
-        rows = pd._read_table(path)
+        rows = _read_sales_table(path)
         warnings.append(f"已读 {Path(path).name}（{len(rows)} 行）")
+        _warn_po_shaped_sales(Path(path), rows, warnings)
         for row in rows:
             _merge_row(acc, row, window, days)
 
-    # 合并宽表（单文件含多窗口列）
-    for stems in (("sales", "sales_merged", "sales_channel"),):
-        path = _find(stems)
+    # 合并宽表（单文件含多窗口列或 V4 日均需求列 + Region）
+    for stems in (
+        "sales", "sales_merged", "sales_channel",
+        "aggregate_sales", "sales_demand", "sales_export",
+    ):
+        path = _find((stems,))
         if not path or not Path(path).is_file():
             continue
         if any(Path(path).name.lower().startswith(s.split()[0]) for s, _, _ in WINDOWS):
             continue
-        rows = pd._read_table(path)
-        if not rows:
-            continue
-        sample = {str(k).lower() for k in rows[0]}
-        if not any(w in "".join(sample) for w in ("8-30", "15", "30", "采用")):
+        rows = _read_sales_table(path)
+        if not rows or not _headers_look_like_sales_demand(rows):
             continue
         loaded_any = True
         warnings.append(f"已读宽表 {Path(path).name}")
+        _warn_po_shaped_sales(Path(path), rows, warnings)
         for row in rows:
             _merge_row(acc, row, None, None)
 
     subdir_loaded = _load_per_channel_sales_dirs(data_dir, acc, warnings)
     loaded_any = loaded_any or subdir_loaded
+
+    if not loaded_any:
+        # 根目录任意 *sales*.csv/xlsx（含 Region + AvgDailyDemand）
+        for candidate in sorted(data_dir.glob("*sales*.*")):
+            if candidate.suffix.lower() not in (".csv", ".xlsx"):
+                continue
+            rows = _read_sales_table(candidate)
+            if not _headers_look_like_sales_demand(rows):
+                continue
+            loaded_any = True
+            warnings.append(f"已读 {candidate.name}（{len(rows)} 行）")
+            _warn_po_shaped_sales(candidate, rows, warnings)
+            for row in rows:
+                _merge_row(acc, row, None, None)
+            break
 
     if not loaded_any:
         return {}, ["未找到 sales 8-30 / 15 / 30 导出（Output 根目录或渠道子文件夹）"]
@@ -481,6 +552,14 @@ def load_sales_demand_index(
             stockout_rate_pct=so_pct,
             raw_name=slot.get("name") or "",
         )
+    with_units = sum(1 for r in out.values() if (r.avg_daily_units or 0) > 0)
+    if out and with_units == 0:
+        warnings.append(
+            f"已加载 {len(out)} 条销量行，但 AvgDailyDemand/采用需求/窗口销量均为 0；"
+            "请检查 SQL 是否导出了真实销量（不是 PO 在途行）",
+        )
+    elif out:
+        warnings.append(f"销量有效日均>0：{with_units}/{len(out)} 条")
     return out, warnings
 
 
