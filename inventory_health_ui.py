@@ -69,7 +69,7 @@ def _snapshot_ih_filters(app) -> dict:
         "category": app._ih_category_var.get(),
         "sku": app._ih_sku_var.get(),
         "branch": app._ih_branch_var.get(),
-        "group_by": app._ih_group_var.get() or "sku",
+        "group_by": app._ih_group_var.get() or "channel",
         "owner": app._ih_owner_var.get() if hasattr(app, "_ih_owner_var") else "",
         "island_scope": (
             app._ih_island_var.get()
@@ -290,8 +290,8 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
 
     formula = tk.Label(
         tab,
-        text="渠道 = SKU 前三位；Output 下 河北_321 类文件夹自动合并为「河北」等省渠道，点表格行后可用「分渠道图」；"
-        "NZ 可选南北岛；气泡按象限着色；主图 0–150 天",
+        text="省渠道：po_channel_prefixes.txt 写 河北_321 或 Output 下同名文件夹 → 主图显示河北/山东；"
+        "单击选中、双击省气泡或点「分渠道图」下钻子渠道；汇总=渠道",
         bg="white", fg="#64748b", font=("Segoe UI", 8),
         wraplength=900, justify=tk.LEFT,
     )
@@ -343,7 +343,7 @@ def render_inventory_health(app, force=False):
                 branch=snap.get("branch") or "",
                 owner=owner,
                 island_scope=island,
-                group_by=snap.get("group_by") or "sku",
+                group_by=snap.get("group_by") or "channel",
                 thresholds=th,
                 progress=bump,
             )
@@ -403,6 +403,8 @@ def _apply_chart(app, report, th):
 
 def _apply_report(app, report, th, elapsed_sec=0.0, max_table_rows=600, draw_chart=True):
     app._ih_report = report
+    if report.get("channel_families"):
+        app._ih_channel_families = report["channel_families"]
     s = report.get("summary") or {}
     cards = app._ih_card_labels
     cards["inv_m3"].configure(text=str(s.get("total_inventory_volume_m3", "—")))
@@ -416,8 +418,7 @@ def _apply_report(app, report, th, elapsed_sec=0.0, max_table_rows=600, draw_cha
 
     meta = report.get("meta") or {}
     warns = "; ".join(report.get("warnings") or [])
-    gb = (report.get("meta") or {}).get("group_by") or "channel"
-    if report.get("channel_families") and gb == "channel":
+    if report.get("channel_families"):
         table_rows = ih.rows_for_family_chart(report, th)
     else:
         table_rows = report.get("rows") or []

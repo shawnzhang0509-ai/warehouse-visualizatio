@@ -423,7 +423,7 @@ def build_inventory_health_report(
     brand: str = "",
     owner: str = "",
     island_scope: str = "",
-    group_by: str = "sku",
+    group_by: str = "channel",
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     thresholds: HealthThresholds | None = None,
     progress: Any = None,
@@ -692,11 +692,58 @@ def build_inventory_health_report(
     }
 
 
+def _rollup_row_dicts(items: list[dict[str, Any]], label: str, th: HealthThresholds) -> dict[str, Any]:
+    """把多行指标合成一个气泡（主图「其他」等）。"""
+    inv_vol = sum(float(x.get("inventory_volume_m3") or 0) for x in items)
+    demand = sum(float(x.get("avg_daily_demand_m3") or 0) for x in items)
+    inv_u = sum(float(x.get("inventory_units") or 0) for x in items)
+    transit = sum(float(x.get("transit_volume_m3") or 0) for x in items)
+    avg_daily_u = sum(float(x.get("avg_daily_units") or 0) for x in items)
+    so_weighted = []
+    for x in items:
+        w = float(x.get("avg_daily_demand_m3") or x.get("avg_daily_units") or 1.0)
+        so = x.get("stockout_rate_pct")
+        if so is not None:
+            so_weighted.append((float(so), w))
+    stockout = None
+    if so_weighted:
+        tw = sum(w for _, w in so_weighted)
+        stockout = sum(v * w for v, w in so_weighted) / tw if tw else None
+    th_days, th_label = _theoretical_days(inv_vol or None, demand or None)
+    quad = _quadrant(stockout, th_days, th)
+    return {
+        "sku": f"Σ {label}",
+        "name": f"汇总 · {len(items)} 渠道",
+        "category": "",
+        "channel": label,
+        "channel_family": "",
+        "sub_channel": "",
+        "branch": "",
+        "stockout_rate_pct": round(stockout, 2) if stockout is not None else None,
+        "stockout_source": "aggregated",
+        "avg_daily_units": round(avg_daily_u, 4),
+        "unit_volume_m3": None,
+        "avg_daily_demand_m3": round(demand, 4) if demand else None,
+        "inventory_units": inv_u,
+        "inventory_volume_m3": round(inv_vol, 4) if inv_vol else None,
+        "transit_volume_m3": round(transit, 4),
+        "theoretical_days": round(th_days, 2) if th_days is not None else None,
+        "theoretical_days_label": th_label,
+        "inventory_value": sum(float(x.get("inventory_value") or 0) for x in items) or None,
+        "priority": _priority(stockout, demand, th_days, th),
+        "quadrant": quad,
+        "bubble_m3_day": round(demand, 4) if demand else 0.0,
+        "demand_source": "aggregated",
+    }
+
+
 def rows_for_family_chart(
     report: dict[str, Any],
     thresholds: HealthThresholds | None = None,
+    *,
+    main_view: bool = True,
 ) -> list[dict[str, Any]]:
-    """主图：有渠道族时始终按省/族汇总（河北、山东），避免仍显示 hundreds 个三位号。"""
+    """主图：有渠道族时按省汇总（河北、山东）；main_view 时其余三位号合并为「其他」。"""
     families = report.get("channel_families") or {}
     if not families:
         return list(report.get("rows") or [])
@@ -744,13 +791,17 @@ def rows_for_family_chart(
         return list(report.get("rows") or [])
     agg = _aggregate_rows(sku_rows, "channel", th, sub_to_fam=sub_map)
     out = [r.as_dict() for r in agg]
-    # 主图优先展示省渠道（河北/山东），其余三位号单独成点
     family_labels = set(families.keys())
     family_rows = [r for r in out if str(r.get("channel") or "") in family_labels]
     other_rows = [r for r in out if str(r.get("channel") or "") not in family_labels]
-    if family_rows:
-        return family_rows + other_rows
-    return out
+    if not family_rows:
+        return out
+    if main_view:
+        merged: list[dict[str, Any]] = list(family_rows)
+        if other_rows:
+            merged.append(_rollup_row_dicts(other_rows, "其他", th))
+        return merged
+    return family_rows + other_rows
 
 
 def _aggregate_rows(

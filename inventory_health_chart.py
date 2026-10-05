@@ -272,7 +272,12 @@ def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, fl
     ax.set_facecolor("#fafbfc")
     ax.set_xlabel("Stockout Rate (%)", fontsize=10)
     ax.set_ylabel("Theoretical Inventory Consumption Days", fontsize=10)
-    ax.set_title("Inventory Health", fontsize=11, fontweight="bold")
+    fams = report.get("channel_families") or {}
+    title = "Inventory Health"
+    if fams:
+        bits = "、".join(sorted(fams.keys()))
+        title = f"Inventory Health — 省渠道 {bits}（其余→其他）"
+    ax.set_title(title, fontsize=11, fontweight="bold")
     ax.axvline(x_th, color="#94a3b8", linestyle="--", linewidth=1)
     ax.axhline(y_th, color="#94a3b8", linestyle="--", linewidth=1)
 
