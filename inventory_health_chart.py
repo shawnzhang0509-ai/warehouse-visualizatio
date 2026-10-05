@@ -244,14 +244,6 @@ def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, fl
     if outliers:
         ax.axhline(_MAIN_Y_MAX - 6, color="#fdba74", linestyle=":", linewidth=1)
         sc_out = _scatter_points(ax, outliers, marker="^")
-    all_labeled = normal + outliers
-    _label_channels(ax, all_labeled)
-    meta["pick_map"] = {}
-    if sc_norm is not None:
-        meta["pick_map"][sc_norm] = normal
-    if sc_out is not None:
-        meta["pick_map"][sc_out] = outliers
-    meta["points"] = all_labeled
         ax.text(
             0.02,
             0.98,
@@ -261,6 +253,14 @@ def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, fl
             va="top",
             color="#9a3412",
         )
+    all_labeled = normal + outliers
+    _label_channels(ax, all_labeled)
+    meta["pick_map"] = {}
+    if sc_norm is not None:
+        meta["pick_map"][sc_norm] = normal
+    if sc_out is not None:
+        meta["pick_map"][sc_out] = outliers
+    meta["points"] = all_labeled
 
     xmax = x_th * 2
     if normal:
