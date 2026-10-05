@@ -223,6 +223,73 @@ def _draw_quadrant_labels(ax, x_th: float, y_cap: float):
     ax.text(x_th * 1.5, y_cap * 0.12, QUADRANT_LABELS["br"], ha="center", fontsize=8, color="#ea580c")
 
 
+def _chart_show_guide_panel() -> bool:
+    return os.getenv("INVENTORY_HEALTH_CHART_HIDE_GUIDE", "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _build_chart_guide_text(
+    x_th: float,
+    y_th: float,
+    families: dict[str, list[str]] | None,
+) -> str:
+    fam_line = ""
+    if families:
+        bits = "、".join(sorted(families.keys()))
+        fam_line = f"\n· {bits} 等省渠道在主图合并为一个气泡。"
+    return (
+        "读图说明\n"
+        f"横轴：缺货率（%）。竖虚线 {x_th:g}% 为警戒线，右侧缺货偏高。\n"
+        f"纵轴：理论库存消耗天数（在库体积÷日均需求体积）。"
+        f"横虚线 {y_th:g} 天，上方周转偏慢。\n"
+        "气泡越大：日均需求体积越大，便于先看大户。"
+        f"{fam_line}\n"
+        "\n四象限含义\n"
+        "左下·健康（绿）：缺货率与库存天数均较合理；维持节奏。\n"
+        "右下·供应不足（橙）：缺货率高、天数不高；优先补货/加 PO。\n"
+        "左上·可能积压（蓝）：缺货率低、天数很长；控采、促销或调拨。\n"
+        "右上·库存错配（红）：既缺货又高天数；查渠道/SKU 结构与在途。"
+    )
+
+
+def _draw_chart_guide_panel(
+    fig,
+    ax_guide,
+    x_th: float,
+    y_th: float,
+    families: dict[str, list[str]] | None,
+) -> None:
+    ax_guide.set_facecolor("#f8fafc")
+    ax_guide.axis("off")
+    body = _build_chart_guide_text(x_th, y_th, families)
+    ax_guide.text(
+        0.02,
+        0.98,
+        body,
+        transform=ax_guide.transAxes,
+        va="top",
+        ha="left",
+        fontsize=7.2,
+        color="#334155",
+        linespacing=1.35,
+        wrap=True,
+        bbox=dict(boxstyle="round,pad=0.45", facecolor="white", edgecolor="#cbd5e1", alpha=0.96),
+    )
+    y = 0.22
+    for label, color in (
+        ("健康", QUADRANT_COLORS["Healthy"]),
+        ("供应不足", QUADRANT_COLORS["Supply Shortage"]),
+        ("可能积压", QUADRANT_COLORS["Potential Overstock"]),
+        ("库存错配", QUADRANT_COLORS["Inventory Mismatch"]),
+    ):
+        ax_guide.scatter([0.06], [y], s=42, c=color, edgecolors="#334155", linewidths=0.35, transform=ax_guide.transAxes, clip_on=False)
+        ax_guide.text(0.12, y, label, transform=ax_guide.transAxes, fontsize=7, va="center", color="#475569")
+        y -= 0.055
+
+
 def _scatter_points(ax, points: list[dict], *, marker="o", selected_key: str | None = None):
     if not points:
         return None
@@ -319,7 +386,13 @@ def run_inventory_health_drilldown(app) -> None:
         open_other_channels_chart(root, report, th)
 
 
-def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, float]):
+def render_bubble_chart(
+    parent,
+    report: dict[str, Any],
+    thresholds: dict[str, float],
+    *,
+    show_guide: bool | None = None,
+):
     """主图 Y 轴 0~150 天；超长点叠在顶栏。返回 (widget, fig, meta)。"""
     meta: dict[str, Any] = {"outliers": [], "main_y_max": _MAIN_Y_MAX}
     if not HAS_MPL:
@@ -354,12 +427,21 @@ def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, fl
     ]
     meta["outlier_count"] = len(outliers)
 
-    fig = Figure(figsize=(8.4, 6.0), dpi=100, facecolor="white")
-    ax = fig.add_subplot(111)
+    if show_guide is None:
+        show_guide = _chart_show_guide_panel() and bool(report.get("channel_families") or report.get("region"))
+    fams = report.get("channel_families") or {}
+    if show_guide:
+        fig = Figure(figsize=(11.2, 6.4), dpi=100, facecolor="white")
+        gs = fig.add_gridspec(1, 2, width_ratios=[1.62, 1], wspace=0.06)
+        ax = fig.add_subplot(gs[0, 0])
+        ax_guide = fig.add_subplot(gs[0, 1])
+    else:
+        fig = Figure(figsize=(8.4, 6.0), dpi=100, facecolor="white")
+        ax = fig.add_subplot(111)
+        ax_guide = None
     ax.set_facecolor("#fafbfc")
     ax.set_xlabel("Stockout Rate (%)", fontsize=10)
     ax.set_ylabel("Theoretical Inventory Consumption Days", fontsize=10)
-    fams = report.get("channel_families") or {}
     title = "Inventory Health"
     if fams:
         bits = ", ".join(sorted(fams.keys()))
@@ -400,15 +482,17 @@ def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, fl
     ax.set_xlim(0, max(xmax, x_th * 2))
     ax.set_ylim(0, y_cap)
     _draw_quadrant_labels(ax, x_th, y_cap)
-    legend_y = 0.02
-    for quad, color in (
-        ("Supply Shortage", QUADRANT_COLORS["Supply Shortage"]),
-        ("Inventory Mismatch", QUADRANT_COLORS["Inventory Mismatch"]),
-        ("Potential Overstock", QUADRANT_COLORS["Potential Overstock"]),
-        ("Healthy", QUADRANT_COLORS["Healthy"]),
-    ):
-        ax.scatter([], [], c=color, s=36, label=quad, edgecolors="#334155", linewidths=0.3)
-    ax.legend(loc="lower right", fontsize=7, framealpha=0.9, title="Quadrant")
+    if ax_guide is not None:
+        _draw_chart_guide_panel(fig, ax_guide, x_th, y_th, fams if fams else None)
+    else:
+        for quad, color in (
+            ("Supply Shortage", QUADRANT_COLORS["Supply Shortage"]),
+            ("Inventory Mismatch", QUADRANT_COLORS["Inventory Mismatch"]),
+            ("Potential Overstock", QUADRANT_COLORS["Potential Overstock"]),
+            ("Healthy", QUADRANT_COLORS["Healthy"]),
+        ):
+            ax.scatter([], [], c=color, s=36, label=quad, edgecolors="#334155", linewidths=0.3)
+        ax.legend(loc="lower right", fontsize=7, framealpha=0.9, title="Quadrant")
     ax.grid(True, alpha=0.25)
 
     canvas = FigureCanvasTkAgg(fig, master=parent)
@@ -481,7 +565,9 @@ def open_other_channels_chart(
     win.transient(parent)
     frame = tk.Frame(win, bg="white")
     frame.pack(fill=tk.BOTH, expand=True)
-    render_bubble_chart(frame, {"rows": sub_rows, "region": report.get("region")}, thresholds)
+    render_bubble_chart(
+        frame, {"rows": sub_rows, "region": report.get("region")}, thresholds, show_guide=False,
+    )
     ttk.Label(
         win,
         text="各非河北/山东渠道；主图默认逐个显示，无需从此进入。",
