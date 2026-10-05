@@ -28,6 +28,14 @@ QUADRANT_LABELS = {
     "br": "Supply Shortage",
 }
 
+# 气泡颜色 = 象限（缺货高+周转低 = 橙色告警，不是「全蓝」）
+QUADRANT_COLORS = {
+    "Healthy": "#22c55e",
+    "Supply Shortage": "#f97316",
+    "Potential Overstock": "#3b82f6",
+    "Inventory Mismatch": "#dc2626",
+}
+
 # 主图固定可读区：超过阈值的点叠在顶栏，点击按钮看完整纵轴副图。
 _MAIN_Y_MAX = float(os.getenv("INVENTORY_HEALTH_CHART_MAIN_YMAX", "150") or "150")
 
@@ -92,7 +100,7 @@ def _build_points(rows: list[dict], y_th: float) -> tuple[list[dict], list[dict]
             continue
         x = float(r.get("stockout_rate_pct") or 0)
         quad = r.get("quadrant") or ""
-        color = "#dc2626" if quad == "Inventory Mismatch" else "#2563eb"
+        color = QUADRANT_COLORS.get(quad, "#64748b")
         link = _link_key_for_row(r)
         pt = {
             "row": r,
@@ -247,7 +255,7 @@ def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, fl
         ax.text(
             0.02,
             0.98,
-            f"▲ {len(outliers)} 个渠道/SKU 库存天 > {_MAIN_Y_MAX:.0f}，叠在顶栏；点「超长库存图」看真实天数",
+            f"{len(outliers)} 个 >{_MAIN_Y_MAX:.0f}天 叠顶栏 | 点「超长库存图」看真实天数",
             transform=ax.transAxes,
             fontsize=7,
             va="top",
@@ -271,6 +279,15 @@ def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, fl
     ax.set_xlim(0, max(xmax, x_th * 2))
     ax.set_ylim(0, y_cap)
     _draw_quadrant_labels(ax, x_th, y_cap)
+    legend_y = 0.02
+    for quad, color in (
+        ("Supply Shortage", QUADRANT_COLORS["Supply Shortage"]),
+        ("Inventory Mismatch", QUADRANT_COLORS["Inventory Mismatch"]),
+        ("Potential Overstock", QUADRANT_COLORS["Potential Overstock"]),
+        ("Healthy", QUADRANT_COLORS["Healthy"]),
+    ):
+        ax.scatter([], [], c=color, s=36, label=quad, edgecolors="#334155", linewidths=0.3)
+    ax.legend(loc="lower right", fontsize=7, framealpha=0.9, title="Quadrant")
     ax.grid(True, alpha=0.25)
 
     canvas = FigureCanvasTkAgg(fig, master=parent)

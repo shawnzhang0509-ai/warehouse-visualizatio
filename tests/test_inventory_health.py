@@ -19,6 +19,20 @@ class InventoryHealthCalcTest(unittest.TestCase):
         th = ih.HealthThresholds(stockout_pct=50, consumption_days=60)
         self.assertEqual(ih._quadrant(80, 90, th), "Inventory Mismatch")
 
+    def test_quadrant_supply_shortage(self):
+        th = ih.HealthThresholds(stockout_pct=50, consumption_days=60)
+        self.assertEqual(ih._quadrant(80, 10, th), "Supply Shortage")
+
+    def test_island_north_stock_only(self):
+        row = {
+            "Sku": "130-001",
+            "CarbineStock": 10,
+            "GeraldConnellyStock": 50,
+        }
+        self.assertEqual(ih._inventory_units_for_scope(row, "NZ", "北岛"), 10.0)
+        self.assertEqual(ih._inventory_units_for_scope(row, "NZ", "南岛"), 50.0)
+        self.assertEqual(ih._inventory_units_for_scope(row, "NZ", ""), 60.0)
+
     def test_build_with_mock_bundle(self):
         stock_rows = [
             {

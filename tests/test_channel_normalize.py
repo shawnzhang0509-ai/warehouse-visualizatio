@@ -1,7 +1,6 @@
 import unittest
 
 from channel_prefixes import normalize_sku_channel_code
-from sales_demand import load_sales_demand_index
 import panel_data as pd
 
 

@@ -62,6 +62,11 @@ def _snapshot_ih_filters(app) -> dict:
         "branch": app._ih_branch_var.get(),
         "group_by": app._ih_group_var.get() or "sku",
         "owner": app._ih_owner_var.get() if hasattr(app, "_ih_owner_var") else "",
+        "island_scope": (
+            app._ih_island_var.get()
+            if hasattr(app, "_ih_island_var")
+            else ""
+        ),
         "stockout_th": app._ih_stockout_th.get(),
         "days_th": app._ih_days_th.get(),
         "cover_proxy": app._ih_cover_proxy.get(),
@@ -87,6 +92,7 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
     app._ih_stockout_th = tk.StringVar(value=str(ih.DEFAULT_STOCKOUT_X))
     app._ih_days_th = tk.StringVar(value=str(ih.DEFAULT_DAYS_Y))
     app._ih_cover_proxy = tk.StringVar(value=str(ih.DEFAULT_COVER_DAYS_PROXY))
+    app._ih_island_var = tk.StringVar(value="全部")
 
     toolbar = tk.Frame(tab, bg="white")
     toolbar.pack(fill=tk.X, padx=6, pady=6)
@@ -111,6 +117,21 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
         "<<ComboboxSelected>>",
         lambda _e: app._render_inventory_health(force=True),
     )
+    region0 = app._current_region() if hasattr(app, "_current_region") else "NZ"
+    if pd.island_stock_supported(region0):
+        ttk.Label(toolbar, text="南北岛").pack(side=tk.LEFT, padx=(6, 0))
+        app._ih_island_combo = ttk.Combobox(
+            toolbar,
+            width=6,
+            textvariable=app._ih_island_var,
+            state="readonly",
+            values=("全部", "北岛", "南岛"),
+        )
+        app._ih_island_combo.pack(side=tk.LEFT, padx=4)
+        app._ih_island_combo.bind(
+            "<<ComboboxSelected>>",
+            lambda _e: app._render_inventory_health(force=True),
+        )
     ttk.Label(toolbar, text="分类").pack(side=tk.LEFT)
     ttk.Entry(toolbar, width=10, textvariable=app._ih_category_var).pack(side=tk.LEFT, padx=4)
     ttk.Label(toolbar, text="SKU").pack(side=tk.LEFT)
@@ -199,6 +220,9 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
     app._ih_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
     scroll.pack(side=tk.RIGHT, fill=tk.Y)
     app._ih_tree.tag_configure("mismatch", background="#fee2e2")
+    app._ih_tree.tag_configure("shortage", background="#ffedd5")
+    app._ih_tree.tag_configure("overstock", background="#dbeafe")
+    app._ih_tree.tag_configure("healthy", background="#dcfce7")
     app._ih_tree.tag_configure("selected_row", background="#fef3c7")
     app._ih_row_link: dict[str, str] = {}
     app._ih_link_to_iid: dict[str, str] = {}
@@ -237,8 +261,8 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
 
     formula = tk.Label(
         tab,
-        text="渠道 = SKU 前三位；负责人来自 Output-NZ/channel_owners.csv（与负责人报表一致）；"
-        "主图标注渠道前三位；点表格行 ↔ 高亮气泡；主图 0–150 天，超长点用「超长库存图」",
+        text="渠道 = SKU 前三位；负责人来自 channel_owners.csv；NZ 可选南北岛（北=Carbine+Walls 在库、南=Gerald Connelly，"
+        "销量按 sales Region，在途按 po 南北岛）；气泡按象限着色（橙=缺货高周转低）；主图 0–150 天",
         bg="white", fg="#64748b", font=("Segoe UI", 8),
         wraplength=900, justify=tk.LEFT,
     )
@@ -279,6 +303,9 @@ def render_inventory_health(app, force=False):
             owner = snap.get("owner") or ""
             if owner in ("全部负责人",):
                 owner = ""
+            island = snap.get("island_scope") or ""
+            if island in ("全部", ""):
+                island = ""
             report = ih.build_inventory_health_report(
                 region,
                 channel=snap.get("channel") or "",
@@ -286,6 +313,7 @@ def render_inventory_health(app, force=False):
                 sku_filter=snap.get("sku") or "",
                 branch=snap.get("branch") or "",
                 owner=owner,
+                island_scope=island,
                 group_by=snap.get("group_by") or "sku",
                 thresholds=th,
                 progress=bump,
@@ -387,7 +415,16 @@ def _apply_report(app, report, th, elapsed_sec=0.0, max_table_rows=600, draw_cha
         return val
 
     for idx, row in enumerate(display_rows):
-        tag = ("mismatch",) if row.get("quadrant") == "Inventory Mismatch" else ()
+        quad = row.get("quadrant") or ""
+        tag = ()
+        if quad == "Inventory Mismatch":
+            tag = ("mismatch",)
+        elif quad == "Supply Shortage":
+            tag = ("shortage",)
+        elif quad == "Potential Overstock":
+            tag = ("overstock",)
+        elif quad == "Healthy":
+            tag = ("healthy",)
         link = str(row.get("channel") or "").strip()
         if not link:
             sku = str(row.get("sku") or "").strip().replace("Σ", "").strip()

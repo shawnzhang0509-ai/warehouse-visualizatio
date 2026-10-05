@@ -21,7 +21,12 @@ from typing import Any
 
 import panel_data as pd
 from channel_prefixes import normalize_sku_channel_code
-from sales_demand import collapse_demand_by_sku_channel, load_sales_demand_index
+from sales_demand import (
+    collapse_demand_by_sku_channel,
+    filter_demand_index_by_island,
+    load_sales_demand_index,
+    normalize_demand_island,
+)
 
 try:
     import warehouse_volume as wv
@@ -52,6 +57,34 @@ DEFAULT_LOOKBACK_DAYS = int(os.getenv("INVENTORY_HEALTH_LOOKBACK_DAYS", "90") or
 DEFAULT_STOCKOUT_X = float(os.getenv("INVENTORY_HEALTH_STOCKOUT_X", "50") or "50")
 DEFAULT_DAYS_Y = float(os.getenv("INVENTORY_HEALTH_DAYS_Y", "60") or "60")
 DEFAULT_COVER_DAYS_PROXY = float(os.getenv("INVENTORY_HEALTH_COVER_DAYS", "14") or "14")
+
+
+def normalize_island_scope(text: str | None) -> str:
+    """UI「南北岛」→ 北岛 | 南岛 | 空=全国。"""
+    if wv is not None:
+        return wv._normalize_po_island(text)
+    return normalize_demand_island(text)
+
+
+def _inventory_units_for_scope(raw: dict, region_key: str, island_scope: str) -> float:
+    wh_stock = pd._extract_warehouse_stock(raw)
+    scope = normalize_island_scope(island_scope)
+    if scope and pd.island_stock_supported(region_key):
+        if scope == "北岛":
+            return float(pd._qty_from_warehouses(wh_stock or {}, pd.NZ_NORTH_WAREHOUSES))
+        if scope == "南岛":
+            return float(pd._qty_from_warehouses(wh_stock or {}, pd.NZ_SOUTH_WAREHOUSES))
+    if wh_stock:
+        return float(sum(wh_stock.values()))
+    return float(_to_float(_pick(raw, pd.STOCK_KEYS), 0.0) or 0.0)
+
+
+def _weekly_row_matches_island(row: dict, island_scope: str) -> bool:
+    scope = normalize_island_scope(island_scope)
+    if not scope:
+        return True
+    reg = _pick(row, ["region", "Region", "地区", "island", "南北岛", "DestinationRegion"])
+    return normalize_demand_island(str(reg or "")) == scope
 
 
 def normalize_channel_filter(channel: str) -> str:
@@ -239,6 +272,7 @@ def _load_weekly_sales(region: str) -> tuple[list[dict], Path | None, str | None
 def _sales_aggregates(
     weekly_rows: list[dict],
     lookback_days: int,
+    island_scope: str = "",
 ) -> tuple[dict[tuple[str, str, str], dict], int, date | None, date | None]:
     """
     键：(sku_norm, channel, branch) → {qty, days_span, stockout_vals, weeks}
@@ -250,6 +284,8 @@ def _sales_aggregates(
     global_min: date | None = None
     global_max: date | None = None
     for row in weekly_rows:
+        if not _weekly_row_matches_island(row, island_scope):
+            continue
         sku = str(_pick(row, WEEKLY_SKU_KEYS) or "").strip()
         if not sku:
             continue
@@ -334,7 +370,7 @@ def _priority(stockout: float | None, demand_m3: float | None, days: float | Non
     return 4
 
 
-def _load_po_by_sku(region: str) -> dict[str, float]:
+def _load_po_by_sku(region: str, island_scope: str = "") -> dict[str, float]:
     """在途体积：只读 Output-{region}/po.csv，绝不连数据库。"""
     if wv is None:
         return {}
@@ -342,8 +378,13 @@ def _load_po_by_sku(region: str) -> dict[str, float]:
         lines, _path = wv.load_po_lines_from_csv(region)
     except Exception:
         return {}
+    scope = normalize_island_scope(island_scope)
     out: dict[str, float] = defaultdict(float)
     for line in lines or []:
+        if scope:
+            isl = str(line.get("island") or "").strip()
+            if isl != scope:
+                continue
         sku = str(line.get("sku") or "").strip()
         if not sku:
             continue
@@ -362,6 +403,7 @@ def build_inventory_health_report(
     supplier: str = "",
     brand: str = "",
     owner: str = "",
+    island_scope: str = "",
     group_by: str = "sku",
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     thresholds: HealthThresholds | None = None,
@@ -389,10 +431,14 @@ def build_inventory_health_report(
     demand_index, sales_warns = load_sales_demand_index(region_key, data_dir=data_dir)
     timings["sales_demand"] = _time.perf_counter() - t_phase
     t_phase = _time.perf_counter()
-    demand_by_sc = _demand_by_sku_channel(demand_index)
+    island_f = normalize_island_scope(island_scope)
+    demand_index_scoped = filter_demand_index_by_island(demand_index, island_f)
+    demand_by_sc = _demand_by_sku_channel(demand_index_scoped)
     demand_has_units = any((rec.avg_daily_units or 0) > 0 for rec in demand_index.values())
     weekly_rows, weekly_path, weekly_warn = _load_weekly_sales(region_key)
-    sales_buckets, span_days, d_min, d_max = _sales_aggregates(weekly_rows, lookback_days)
+    sales_buckets, span_days, d_min, d_max = _sales_aggregates(
+        weekly_rows, lookback_days, island_f,
+    )
     warnings_weekly_skip = ""
     if demand_index and demand_has_units:
         warnings_weekly_skip = (
@@ -404,7 +450,7 @@ def build_inventory_health_report(
     t_phase = _time.perf_counter()
 
     _bump("读 po.csv（在途）…")
-    po_by_sku = _load_po_by_sku(region_key)
+    po_by_sku = _load_po_by_sku(region_key, island_f)
     timings["po_csv"] = _time.perf_counter() - t_phase
     t_phase = _time.perf_counter()
 
@@ -451,8 +497,7 @@ def build_inventory_health_report(
         if brand_f and brand_f not in br.lower():
             continue
 
-        wh_stock = pd._extract_warehouse_stock(raw)
-        inv_units = sum(wh_stock.values()) if wh_stock else (_to_float(_pick(raw, pd.STOCK_KEYS), 0.0) or 0.0)
+        inv_units = _inventory_units_for_scope(raw, region_key, island_f)
         unit_vol = _unit_volume_m3(raw)
         inv_vol = inv_units * unit_vol if unit_vol is not None else None
         price = _to_float(_pick(raw, pd.PRICE_KEYS))
@@ -461,7 +506,7 @@ def build_inventory_health_report(
 
         demand_source = ""
         stockout_vals: list[float] = []
-        demand_rec = _lookup_sales_demand(demand_index, norm, ch, branch_f)
+        demand_rec = _lookup_sales_demand(demand_index_scoped, norm, ch, branch_f)
         if demand_rec is None:
             demand_rec = demand_by_sc.get((norm, ch))
         if demand_rec and demand_rec.avg_daily_units > 0:
@@ -546,7 +591,14 @@ def build_inventory_health_report(
         rows_out = _aggregate_rows(rows_out, group_by, th)
 
     with_demand = sum(1 for r in rows_out if (r.avg_daily_units or 0) > 0)
-    warnings.append(f"日均需求命中 {with_demand}/{len(rows_out)} 行（渠道={channel_f or '全部'}）")
+    island_note = f" · 南北岛={island_f or '全国'}" if pd.island_stock_supported(region_key) else ""
+    warnings.append(
+        f"日均需求命中 {with_demand}/{len(rows_out)} 行（渠道={channel_f or '全部'}{island_note}）",
+    )
+    if island_f and pd.island_stock_supported(region_key) and not demand_index_scoped and demand_index:
+        warnings.append(
+            f"已选 {island_f}，但 sales 导出无匹配 Region/南北岛 行；请确认 V4 导出含地区列",
+        )
 
     timings["aggregate"] = _time.perf_counter() - t_phase
     _bump("完成，刷新界面…")
@@ -579,6 +631,8 @@ def build_inventory_health_report(
                 "stocking_volume": "备货体积(m³) = 采用需求 × 体积系数（与供应链决策一致）",
             },
             "sales_demand_rows": len(demand_index),
+            "sales_demand_rows_scoped": len(demand_index_scoped),
+            "island_scope": island_f or None,
         },
         "warnings": warnings,
     }

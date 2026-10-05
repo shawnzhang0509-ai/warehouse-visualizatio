@@ -53,6 +53,39 @@ SAMPLE_DAYS_KEYS = ["sampledays", "sample_days", "样本天数", "sampleday"]
 DEMAND_SOURCE_KEYS = ["demandsource", "demand_source", "需求来源", "采用来源"]
 REGION_KEYS = ["region", "地区", "island", "南北岛", "destinationregion"]
 CHANNEL_KEYS = ["channel", "渠道", "sku_prefix"] + pd.CHANNEL_KEYS
+
+
+def normalize_demand_island(text: str | None) -> str:
+    """sales / weekly 行的地区 → 北岛 | 南岛 | 空（未标注）。"""
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    low = raw.lower().replace(" ", "")
+    if raw in ("北岛", "北", "North", "NI", "North Island", "NorthIsland") or "north" in low:
+        return "北岛"
+    if raw in ("南岛", "南", "South", "SI", "South Island", "SouthIsland") or "south" in low:
+        return "南岛"
+    if "南" in raw:
+        return "南岛"
+    if "北" in raw:
+        return "北岛"
+    return ""
+
+
+def filter_demand_index_by_island(
+    index: dict[tuple[str, str, str], Any],
+    island_scope: str,
+) -> dict[tuple[str, str, str], Any]:
+    """库存健康按岛：只保留 Region/南北岛 与筛选一致的 sales 行。"""
+    scope = normalize_demand_island(island_scope)
+    if not scope:
+        return dict(index or {})
+    out: dict[tuple[str, str, str], Any] = {}
+    for key, rec in (index or {}).items():
+        reg = normalize_demand_island(getattr(rec, "region", "") or "")
+        if reg == scope:
+            out[key] = rec
+    return out
 SKU_KEYS = pd.CODE_KEYS
 NAME_KEYS = pd.NAME_KEYS
 
