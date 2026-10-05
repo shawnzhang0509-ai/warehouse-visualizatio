@@ -148,6 +148,22 @@ def _lookup_sales_demand(index, sku_key: str, channel: str, branch: str):
     return None
 
 
+def _channel_matches_owner(code: str, channel: str, owner: str, config_rows: list[dict]) -> bool:
+    owner = str(owner or "").strip()
+    if not owner or owner in ("全部", "全部负责人"):
+        return True
+    if not config_rows:
+        return True
+    ch = normalize_sku_channel_code(channel, code) or channel_from_sku(code)
+    probe = f"{ch}-000" if ch else code
+    for cfg in config_rows:
+        if str(cfg.get("owner") or "").strip() != owner:
+            continue
+        if pd.product_matches_channel(probe, cfg.get("channel")) or pd.product_matches_channel(code, cfg.get("channel")):
+            return True
+    return False
+
+
 def _demand_by_sku_channel(index) -> dict[tuple[str, str], Any]:
     """O(1) 查找：SKU×渠道（前三位）汇总日均需求。"""
     return collapse_demand_by_sku_channel(index)
@@ -345,6 +361,7 @@ def build_inventory_health_report(
     branch: str = "",
     supplier: str = "",
     brand: str = "",
+    owner: str = "",
     group_by: str = "sku",
     lookback_days: int = DEFAULT_LOOKBACK_DAYS,
     thresholds: HealthThresholds | None = None,
@@ -367,6 +384,7 @@ def build_inventory_health_report(
     t_phase = _time.perf_counter()
 
     _stock_p, _disp_p, _src, data_dir = pd.resolve_sources(region_key)
+    owner_cfg, _owner_path = pd.load_channel_owner_config(region_key, data_dir=data_dir)
     _bump("读 sales 8-30/15/30…")
     demand_index, sales_warns = load_sales_demand_index(region_key, data_dir=data_dir)
     timings["sales_demand"] = _time.perf_counter() - t_phase
@@ -406,6 +424,7 @@ def build_inventory_health_report(
     branch_f = branch.strip()
     supplier_f = supplier.strip().lower()
     brand_f = brand.strip().lower()
+    owner_f = str(owner or "").strip()
     weekly_by_sc = _weekly_totals_by_sku_channel(sales_buckets, branch_f)
 
     for raw in stock_raw:
@@ -417,6 +436,8 @@ def build_inventory_health_report(
         norm = pd.sku_join_key(code)
         ch = channel_from_sku(code)
         if channel_f and ch != channel_f:
+            continue
+        if not _channel_matches_owner(code, ch, owner_f, owner_cfg):
             continue
         cat = str(_pick(raw, pd.FAMILY_KEYS) or "未分类").strip()
         if category_f and category_f not in cat.lower():

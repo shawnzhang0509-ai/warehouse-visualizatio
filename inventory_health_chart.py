@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import random
 from typing import Any
 
 try:
@@ -27,27 +28,96 @@ QUADRANT_LABELS = {
     "br": "Supply Shortage",
 }
 
-# 个别 SKU 库存天数极大（低销高库存）会把 Y 轴拉到几千天，其余点全贴在 X 轴下。
-_Y_CAP_PERCENTILE = float(os.getenv("INVENTORY_HEALTH_CHART_Y_PCT", "0.92") or "0.92")
-_Y_HARD_MAX = float(os.getenv("INVENTORY_HEALTH_CHART_YMAX", "420") or "420")
+# 主图固定可读区：超过阈值的点叠在顶栏，点击按钮看完整纵轴副图。
+_MAIN_Y_MAX = float(os.getenv("INVENTORY_HEALTH_CHART_MAIN_YMAX", "150") or "150")
 
 
-def _chart_y_cap(ys: list[float], y_th: float) -> float:
-    """可读 Y 上限：分位数 + 天数线，且不超过硬顶。"""
-    floor = max(y_th * 2.0, 30.0)
-    if not ys:
-        return min(_Y_HARD_MAX, floor)
-    positive = sorted(y for y in ys if y > 0)
-    if not positive:
-        return min(_Y_HARD_MAX, floor)
-    idx = min(int(len(positive) * _Y_CAP_PERCENTILE), len(positive) - 1)
-    pct = positive[idx]
-    cap = max(floor, pct * 1.12)
-    return min(cap, _Y_HARD_MAX)
+def _row_y_true(r: dict, y_th: float) -> float | None:
+    y_raw = r.get("theoretical_days")
+    if y_raw is None:
+        label = r.get("theoretical_days_label") or ""
+        if label in ("∞", "N/A"):
+            return None
+        return y_th * 1.5
+    return float(y_raw)
+
+
+def _bubble_size(r: dict) -> float:
+    b = float(r.get("bubble_m3_day") or r.get("avg_daily_demand_m3") or 0.1)
+    return max(24.0, min(520.0, (max(b, 0.05) ** 0.5) * 55.0))
+
+
+def _chart_rows(report: dict[str, Any]) -> list[dict]:
+    rows = [
+        r for r in (report.get("rows") or [])
+        if (r.get("avg_daily_demand_m3") or r.get("bubble_m3_day") or 0) > 0
+        or (r.get("inventory_volume_m3") or 0) > 0
+    ]
+    rows.sort(key=lambda r: float(r.get("bubble_m3_day") or r.get("avg_daily_demand_m3") or 0), reverse=True)
+    if len(rows) > 900:
+        rows = rows[:900]
+    return rows
+
+
+def _build_points(rows: list[dict], y_th: float) -> tuple[list[dict], list[dict]]:
+    """拆成主图点 + 超长库存天（≥主图上限）点。"""
+    normal: list[dict] = []
+    outliers: list[dict] = []
+    band_y = _MAIN_Y_MAX - 4.0
+    rng = random.Random(42)
+    out_idx = 0
+    for r in rows:
+        y_true = _row_y_true(r, y_th)
+        if y_true is None:
+            continue
+        x = float(r.get("stockout_rate_pct") or 0)
+        quad = r.get("quadrant") or ""
+        color = "#dc2626" if quad == "Inventory Mismatch" else "#2563eb"
+        pt = {
+            "row": r,
+            "x": x,
+            "y_true": y_true,
+            "size": _bubble_size(r),
+            "color": color,
+            "label": r.get("sku") or "",
+        }
+        if y_true > _MAIN_Y_MAX:
+            pt["x_plot"] = min(98.0, max(0.0, x + rng.uniform(-2.5, 2.5)))
+            pt["y_plot"] = band_y + (out_idx % 5) * 0.35
+            out_idx += 1
+            outliers.append(pt)
+        else:
+            pt["x_plot"] = x
+            pt["y_plot"] = y_true
+            normal.append(pt)
+    return normal, outliers
+
+
+def _draw_quadrant_labels(ax, x_th: float, y_cap: float):
+    ax.text(x_th * 0.5, y_cap * 0.88, QUADRANT_LABELS["tl"], ha="center", fontsize=8, color="#64748b")
+    ax.text(x_th * 1.5, y_cap * 0.88, QUADRANT_LABELS["tr"], ha="center", fontsize=8, color="#dc2626", fontweight="bold")
+    ax.text(x_th * 0.5, y_cap * 0.12, QUADRANT_LABELS["bl"], ha="center", fontsize=8, color="#64748b")
+    ax.text(x_th * 1.5, y_cap * 0.12, QUADRANT_LABELS["br"], ha="center", fontsize=8, color="#ea580c")
+
+
+def _scatter_points(ax, points: list[dict], *, marker="o", edge="#1e293b"):
+    if not points:
+        return
+    ax.scatter(
+        [p["x_plot"] for p in points],
+        [p["y_plot"] for p in points],
+        s=[p["size"] for p in points],
+        c=[p["color"] for p in points],
+        marker=marker,
+        alpha=0.55,
+        edgecolors=edge,
+        linewidths=0.3,
+    )
 
 
 def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, float]):
-    """在 parent Tk 控件内绘制气泡图；返回 (canvas_widget, fig) 或 (label, None)。"""
+    """主图 Y 轴 0~150 天；超长点叠在顶栏。返回 (widget, fig, meta)。"""
+    meta: dict[str, Any] = {"outliers": [], "main_y_max": _MAIN_Y_MAX}
     if not HAS_MPL:
         import tkinter as tk
 
@@ -57,18 +127,25 @@ def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, fl
             fg="#64748b",
         )
         lbl.pack(fill=tk.BOTH, expand=True)
-        return lbl, None
+        return lbl, None, meta
 
-    rows = [
-        r for r in (report.get("rows") or [])
-        if (r.get("avg_daily_demand_m3") or r.get("bubble_m3_day") or 0) > 0
-        or (r.get("inventory_volume_m3") or 0) > 0
-    ]
-    rows.sort(key=lambda r: float(r.get("bubble_m3_day") or r.get("avg_daily_demand_m3") or 0), reverse=True)
-    if len(rows) > 900:
-        rows = rows[:900]
+    rows = _chart_rows(report)
     x_th = float(thresholds.get("stockout_pct") or 50)
     y_th = float(thresholds.get("consumption_days") or 60)
+    normal, outliers = _build_points(rows, y_th)
+    meta["outliers"] = [
+        {
+            "sku": p["label"],
+            "channel": p["row"].get("channel"),
+            "stockout_rate_pct": p["x"],
+            "theoretical_days": p["y_true"],
+            "quadrant": p["row"].get("quadrant"),
+            "inventory_volume_m3": p["row"].get("inventory_volume_m3"),
+            "avg_daily_demand_m3": p["row"].get("avg_daily_demand_m3"),
+        }
+        for p in outliers
+    ]
+    meta["outlier_count"] = len(outliers)
 
     fig = Figure(figsize=(7.2, 5.4), dpi=100, facecolor="white")
     ax = fig.add_subplot(111)
@@ -79,60 +156,112 @@ def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, fl
     ax.axvline(x_th, color="#94a3b8", linestyle="--", linewidth=1)
     ax.axhline(y_th, color="#94a3b8", linestyle="--", linewidth=1)
 
-    xmax = x_th * 2
-    ymax = y_th * 2
-    xs, ys_plot, ys_true, sizes, colors, labels = [], [], [], [], [], []
-    for r in rows:
-        x = float(r.get("stockout_rate_pct") or 0)
-        y_raw = r.get("theoretical_days")
-        if y_raw is None:
-            label = r.get("theoretical_days_label") or ""
-            if label in ("∞", "N/A"):
-                continue
-            y_true = y_th * 1.5
-        else:
-            y_true = float(y_raw)
-        b = float(r.get("bubble_m3_day") or r.get("avg_daily_demand_m3") or 0.1)
-        xs.append(x)
-        ys_true.append(y_true)
-        sizes.append(max(24.0, min(520.0, (max(b, 0.05) ** 0.5) * 55.0)))
-        quad = r.get("quadrant") or ""
-        colors.append("#dc2626" if quad == "Inventory Mismatch" else "#2563eb")
-        labels.append(r.get("sku") or "")
-
-    y_cap = _chart_y_cap(ys_true, y_th)
-    clipped = 0
-    for y_true in ys_true:
-        if y_true > y_cap:
-            ys_plot.append(y_cap * 0.98)
-            clipped += 1
-        else:
-            ys_plot.append(y_true)
-
-    if xs:
-        ax.scatter(xs, ys_plot, s=sizes, c=colors, alpha=0.55, edgecolors="#1e293b", linewidths=0.3)
-        xmax = max(max(xs), xmax)
-    ax.set_xlim(0, max(xmax, x_th * 2))
-    ax.set_ylim(0, y_cap)
-    if clipped:
+    _scatter_points(ax, normal)
+    if outliers:
+        ax.axhline(_MAIN_Y_MAX - 6, color="#fdba74", linestyle=":", linewidth=1)
+        _scatter_points(ax, outliers, marker="^", edge="#c2410c")
         ax.text(
             0.02,
             0.98,
-            f"Y 显示上限 {y_cap:.0f} 天（{clipped} 个超长库存点在顶边）",
+            f"▲ {len(outliers)} 个渠道/SKU 库存天 > {_MAIN_Y_MAX:.0f}，叠在顶栏；点「超长库存图」看真实天数",
             transform=ax.transAxes,
             fontsize=7,
             va="top",
-            color="#64748b",
+            color="#9a3412",
         )
-    # 象限文字放在当前可见范围内
-    ax.text(x_th * 0.5, y_cap * 0.88, QUADRANT_LABELS["tl"], ha="center", fontsize=8, color="#64748b")
-    ax.text(x_th * 1.5, y_cap * 0.88, QUADRANT_LABELS["tr"], ha="center", fontsize=8, color="#dc2626", fontweight="bold")
-    ax.text(x_th * 0.5, y_cap * 0.12, QUADRANT_LABELS["bl"], ha="center", fontsize=8, color="#64748b")
-    ax.text(x_th * 1.5, y_cap * 0.12, QUADRANT_LABELS["br"], ha="center", fontsize=8, color="#ea580c")
+
+    xmax = x_th * 2
+    if normal:
+        xmax = max(max(p["x_plot"] for p in normal), xmax)
+    if outliers:
+        xmax = max(max(p["x_plot"] for p in outliers), xmax)
+    y_cap = _MAIN_Y_MAX
+    ax.set_xlim(0, max(xmax, x_th * 2))
+    ax.set_ylim(0, y_cap)
+    _draw_quadrant_labels(ax, x_th, y_cap)
     ax.grid(True, alpha=0.25)
 
     canvas = FigureCanvasTkAgg(fig, master=parent)
     canvas.draw()
     widget = canvas.get_tk_widget()
     widget.pack(fill="both", expand=True)
-    return widget, fig
+    return widget, fig, meta
+
+
+def open_long_days_chart(parent, report: dict[str, Any], thresholds: dict[str, float]):
+    """弹窗：仅展示库存天 > 主图上限的点，纵轴按真实天数缩放。"""
+    if not HAS_MPL:
+        return
+    import tkinter as tk
+    from tkinter import ttk
+
+    rows = _chart_rows(report)
+    y_th = float(thresholds.get("consumption_days") or 60)
+    _normal, outliers = _build_points(rows, y_th)
+    if not outliers:
+        return
+
+    win = tk.Toplevel(parent)
+    win.title(f"库存天 > {_MAIN_Y_MAX:.0f} — 明细气泡图")
+    win.geometry("820x560")
+    win.transient(parent)
+
+    fig = Figure(figsize=(8.0, 5.6), dpi=100, facecolor="white")
+    ax = fig.add_subplot(111)
+    ax.set_facecolor("#fafbfc")
+    x_th = float(thresholds.get("stockout_pct") or 50)
+    ax.set_xlabel("Stockout Rate (%)", fontsize=10)
+    ax.set_ylabel("Theoretical Inventory Consumption Days (actual)", fontsize=10)
+    ax.set_title(f"Long inventory days (>{_MAIN_Y_MAX:.0f}d)", fontsize=11, fontweight="bold")
+    ax.axvline(x_th, color="#94a3b8", linestyle="--", linewidth=1)
+    ax.axhline(y_th, color="#94a3b8", linestyle="--", linewidth=1)
+
+    for p in outliers:
+        p["x_plot"] = p["x"]
+        p["y_plot"] = p["y_true"]
+    _scatter_points(ax, outliers, marker="^", edge="#c2410c")
+
+    ymax = max(p["y_true"] for p in outliers) * 1.08
+    ymax = max(ymax, y_th * 2, _MAIN_Y_MAX * 1.2)
+    ax.set_xlim(0, max(100.0, max(p["x"] for p in outliers) * 1.05))
+    ax.set_ylim(0, ymax)
+    ax.grid(True, alpha=0.25)
+
+    for p in outliers[:24]:
+        ax.annotate(
+            f"{p['label']} ({p['y_true']:.0f}d)",
+            (p["x"], p["y_true"]),
+            fontsize=7,
+            xytext=(4, 4),
+            textcoords="offset points",
+        )
+
+    canvas = FigureCanvasTkAgg(fig, master=win)
+    canvas.draw()
+    canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+    cols = ("sku", "channel", "days", "stockout", "quadrant")
+    tree = ttk.Treeview(win, columns=cols, show="headings", height=6)
+    for c, t, w in (
+        ("sku", "SKU/渠道", 120),
+        ("channel", "渠道", 56),
+        ("days", "库存天", 72),
+        ("stockout", "缺货%", 56),
+        ("quadrant", "象限", 140),
+    ):
+        tree.heading(c, text=t)
+        tree.column(c, width=w, anchor="center")
+    for p in sorted(outliers, key=lambda x: -x["y_true"]):
+        tree.insert(
+            "",
+            "end",
+            values=(
+                p["label"],
+                p["row"].get("channel") or "",
+                f"{p['y_true']:.1f}",
+                f"{p['x']:.1f}",
+                p["row"].get("quadrant") or "",
+            ),
+        )
+    tree.pack(fill=tk.X, padx=8, pady=(0, 8))
+    ttk.Button(win, text="关闭", command=win.destroy).pack(pady=(0, 8))

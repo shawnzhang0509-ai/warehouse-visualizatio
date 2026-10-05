@@ -8,6 +8,7 @@ import time
 import tkinter as tk
 from tkinter import ttk
 
+import panel_data as pd
 import inventory_health as ih
 import inventory_health_chart as ihc
 from channel_prefixes import load_region_po_channel_prefixes
@@ -22,9 +23,28 @@ def _ui_after(app, delay_ms: int, callback):
         callback()
 
 
+def _populate_ih_owner_combo(app):
+    region = app._current_region() if hasattr(app, "_current_region") else "NZ"
+    rows, _path = pd.load_channel_owner_config(region)
+    owners = sorted({str(r.get("owner") or "").strip() for r in rows if str(r.get("owner") or "").strip()})
+    values = ["全部负责人"] + owners
+    if getattr(app, "_ih_owner_combo", None) is not None:
+        app._ih_owner_combo["values"] = values
+        cur = app._ih_owner_var.get()
+        if cur not in values:
+            app._ih_owner_var.set("全部负责人")
+
+
 def _populate_ih_channel_combo(app):
     region = app._current_region() if hasattr(app, "_current_region") else "NZ"
     prefixes = load_region_po_channel_prefixes(region)
+    owner = (app._ih_owner_var.get() if hasattr(app, "_ih_owner_var") else "") or ""
+    if owner and owner not in ("", "全部负责人"):
+        rows, _ = pd.load_channel_owner_config(region)
+        prefixes = [
+            p for p in prefixes
+            if ih._channel_matches_owner(f"{p}-000", p, owner, rows)
+        ]
     values = ["全部"] + prefixes
     if getattr(app, "_ih_channel_combo", None) is not None:
         app._ih_channel_combo["values"] = values
@@ -41,6 +61,7 @@ def _snapshot_ih_filters(app) -> dict:
         "sku": app._ih_sku_var.get(),
         "branch": app._ih_branch_var.get(),
         "group_by": app._ih_group_var.get() or "sku",
+        "owner": app._ih_owner_var.get() if hasattr(app, "_ih_owner_var") else "",
         "stockout_th": app._ih_stockout_th.get(),
         "days_th": app._ih_days_th.get(),
         "cover_proxy": app._ih_cover_proxy.get(),
@@ -58,6 +79,7 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
     app._ih_chart_widget = None
 
     app._ih_channel_var = tk.StringVar(value="全部")
+    app._ih_owner_var = tk.StringVar(value="全部负责人")
     app._ih_category_var = tk.StringVar(value="")
     app._ih_sku_var = tk.StringVar(value="")
     app._ih_branch_var = tk.StringVar(value="")
@@ -69,7 +91,17 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
     toolbar = tk.Frame(tab, bg="white")
     toolbar.pack(fill=tk.X, padx=6, pady=6)
     ttk.Button(toolbar, text="刷新", command=lambda: app._render_inventory_health(force=True)).pack(side=tk.LEFT, padx=(0, 8))
-    ttk.Label(toolbar, text="渠道(前三位)").pack(side=tk.LEFT)
+    ttk.Label(toolbar, text="负责人").pack(side=tk.LEFT)
+    app._ih_owner_combo = ttk.Combobox(
+        toolbar, width=10, textvariable=app._ih_owner_var, state="readonly",
+    )
+    app._ih_owner_combo.pack(side=tk.LEFT, padx=4)
+    _populate_ih_owner_combo(app)
+    app._ih_owner_combo.bind(
+        "<<ComboboxSelected>>",
+        lambda _e: (_populate_ih_channel_combo(app), app._render_inventory_health(force=True)),
+    )
+    ttk.Label(toolbar, text="渠道(前三位)").pack(side=tk.LEFT, padx=(6, 0))
     app._ih_channel_combo = ttk.Combobox(
         toolbar, width=8, textvariable=app._ih_channel_var, state="readonly",
     )
@@ -126,9 +158,24 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
 
     panes = tk.PanedWindow(tab, orient=tk.HORIZONTAL, bg="white", sashwidth=6)
     panes.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
-    chart_frame = tk.Frame(panes, bg="white")
+    chart_wrap = tk.Frame(panes, bg="white")
+    chart_tool = tk.Frame(chart_wrap, bg="white")
+    chart_tool.pack(fill=tk.X, padx=4, pady=(2, 0))
+    app._ih_outlier_btn = ttk.Button(
+        chart_tool,
+        text="超长库存图 (0)",
+        state=tk.DISABLED,
+        command=lambda: ihc.open_long_days_chart(
+            app.root,
+            getattr(app, "_ih_report", None) or {},
+            getattr(app, "_ih_thresholds", {}),
+        ),
+    )
+    app._ih_outlier_btn.pack(side=tk.LEFT)
+    chart_frame = tk.Frame(chart_wrap, bg="white")
+    chart_frame.pack(fill=tk.BOTH, expand=True)
     table_frame = tk.Frame(panes, bg="white")
-    panes.add(chart_frame, minsize=380)
+    panes.add(chart_wrap, minsize=380)
     panes.add(table_frame, minsize=320)
     app._ih_chart_frame = chart_frame
 
@@ -154,8 +201,8 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
 
     formula = tk.Label(
         tab,
-        text="渠道 = SKU 前三位（与 po_channel_prefixes.txt / PO {sku} 一致）；"
-        "汇总选 channel 按渠道聚合；选具体渠道后自动刷新",
+        text="渠道 = SKU 前三位；负责人来自 Output-NZ/channel_owners.csv（与负责人报表一致）；"
+        "主图库存天 0–150，更长点叠顶栏，点「超长库存图」看真实纵轴",
         bg="white", fg="#64748b", font=("Segoe UI", 8),
         wraplength=900, justify=tk.LEFT,
     )
@@ -164,6 +211,7 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
 
 def render_inventory_health(app, force=False):
     region = app._current_region() if hasattr(app, "_current_region") else "NZ"
+    _populate_ih_owner_combo(app)
     _populate_ih_channel_combo(app)
 
     now = time.time()
@@ -192,12 +240,16 @@ def render_inventory_health(app, force=False):
             def bump(msg):
                 _ui_after(app, 0, lambda m=msg: app._ih_status.configure(text=f"库存健康：{m}"))
 
+            owner = snap.get("owner") or ""
+            if owner in ("全部负责人",):
+                owner = ""
             report = ih.build_inventory_health_report(
                 region,
                 channel=snap.get("channel") or "",
                 category=snap.get("category") or "",
                 sku_filter=snap.get("sku") or "",
                 branch=snap.get("branch") or "",
+                owner=owner,
                 group_by=snap.get("group_by") or "sku",
                 thresholds=th,
                 progress=bump,
@@ -238,9 +290,14 @@ def _apply_chart(app, report, th):
             app._ih_chart_widget.destroy()
         for w in app._ih_chart_frame.winfo_children():
             w.destroy()
-        app._ih_chart_widget, _fig = ihc.render_bubble_chart(
+        app._ih_thresholds = th.__dict__
+        app._ih_chart_widget, _fig, chart_meta = ihc.render_bubble_chart(
             app._ih_chart_frame, report, th.__dict__,
         )
+        n_out = int(chart_meta.get("outlier_count") or 0)
+        if getattr(app, "_ih_outlier_btn", None) is not None:
+            app._ih_outlier_btn.configure(text=f"超长库存图 ({n_out})")
+            app._ih_outlier_btn.configure(state=tk.NORMAL if n_out else tk.DISABLED)
     except Exception as exc:
         app._ih_status.configure(
             text=str(app._ih_status.cget("text")) + f" · 气泡图跳过：{exc}",
