@@ -44,6 +44,12 @@ class ExportFilteredTests(unittest.TestCase):
         self.assertEqual(row["qty"], 1)
         self.assertEqual(row["code"], "581-012")
 
+    def test_diagnose_on_hold_uses_region_paths(self):
+        msg = panel_data.diagnose_on_hold_bundle({"region": "CA", "on_hold_path": None})
+        self.assertIn("Data-CA", msg)
+        self.assertIn("Output-CA", msg)
+        self.assertNotIn("Data-NZ", msg)
+
     def test_list_on_hold_analysis_respects_status_and_days(self):
         bundle = {
             "on_hold_rows": [

@@ -34,7 +34,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.27"
+APP_VERSION = "1.9.57"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -2044,7 +2044,10 @@ class PanelApp:
                 self._mining_status_lbl.configure(text=f"{oh_hint} · {parts_hint} · 请点「刷新数据」")
             else:
                 self._mining_status_lbl.configure(
-                    text=oh_diag or "请执行 on_hold.txt / parts.txt 导出到 Output-NZ 后点「刷新数据」",
+                    text=oh_diag or (
+                        f"请执行 {panel_data.region_sql_export_hint(region, 'on_hold')}；"
+                        f"{panel_data.region_sql_export_hint(region, 'parts')} 后点「刷新数据」"
+                    ),
                 )
 
     def _render_mining_panels(self):

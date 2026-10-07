@@ -1,0 +1,27 @@
+-- On Hold / 冻结库存 → Output-CA/on_hold.csv
+-- 复制为 on_hold.txt 后按业务修改；on_hold.txt 不提交 Git（每人本地 SQL）
+--
+-- 列名看板会自动识别：WarehouseName、Sku、OnHoldQty、StockOnHoldStatus 等
+-- 可选冻结日期列（用于「On Hold 分析」算天数）：OnHoldDate / HoldSince / ModifiedOn 等
+
+-- 分析页按「每一行」展示，请勿按 SKU 汇总；需带订单号或 Ticket、冻结日期、仓名
+SELECT
+    w.Name AS WarehouseName,
+    p.Sku,
+    p.Name AS ProductName,
+    ISNULL(p.ProductFamily, '') AS ProductFamily,
+    s.StockOnHoldStatus,
+    o.OrderCode AS OrderCode,      -- 或 OrderNo；看板识别 ordercode / orderno
+    t.TicketNo AS TicketNo,        -- 无工单可删；也可从 OrderCode 后缀解析
+    s.OnHoldDate AS OnHoldDate,    -- 勿只导出 Excel 时间片段；用完整日期或序列值
+    s.Quantity AS Quantity         -- Quantity=0 的行不会进入分析表
+FROM [dbo].[Stocks] s
+INNER JOIN [dbo].[Warehouses] w
+    ON s.WarehouseId = w.Id
+INNER JOIN [dbo].[Products] p
+    ON s.ProductId = p.Id
+WHERE s.StockStatus = 'Normal'
+  AND s.StockOnHoldStatus IS NOT NULL
+  AND s.Quantity > 0
+  -- 不要 GROUP BY SKU；每单/每 Ticket 一行
+ORDER BY s.OnHoldDate DESC, p.Sku;

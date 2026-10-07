@@ -898,6 +898,30 @@ def _region_output_dir(region_key):
     return path.resolve()
 
 
+def _region_dirs_for_key(region_key):
+    """返回该地区 SQL 模板目录与 CSV 输出目录（相对仓库根，如 Data-CA / Output-CA）。"""
+    rk = str(region_key or default_region() or "NZ").strip().upper()
+    regions = _load_runner_regions()
+    cfg = regions.get(rk) or DEFAULT_REGION_META.get(rk, {})
+    tpl = (cfg.get("template_dir") or f"Data-{rk}").strip()
+    out = (cfg.get("output_dir") or f"Output-{rk}").strip()
+    return tpl, out
+
+
+def region_sql_export_hint(region_key, txt_stem, csv_filename=None):
+    """On Hold / parts 等扩展表：按当前地区提示路径，避免写死 NZ。"""
+    tpl, out = _region_dirs_for_key(region_key)
+    csv_name = csv_filename or f"{txt_stem}.csv"
+    return f"{tpl} 放置 {txt_stem}.txt，执行 SQL 导出到 {out}/{csv_name}"
+
+
+def _bundle_region_key(bundle):
+    rk = str((bundle or {}).get("region") or "").strip().upper()
+    if rk:
+        return rk
+    return _region_from_data_dir((bundle or {}).get("data_dir"), None)
+
+
 def resolve_sources(region=None):
     stock_env = os.getenv("INSTOCK_STOCK_CSV")
     display_env = os.getenv("INSTOCK_DISPLAY_CSV")
@@ -2156,10 +2180,8 @@ def diagnose_on_hold_bundle(bundle):
     row_count = int(bundle.get("on_hold_row_count") or 0)
     sku_count = len(bundle.get("on_hold_by_code") or {})
     if not path or not Path(path).is_file():
-        return (
-            "未找到 on_hold.csv：请在 Data-NZ 放置 on_hold.txt，执行 SQL 导出到 Output-NZ/on_hold.csv，"
-            "然后点「刷新数据」。"
-        )
+        hint = region_sql_export_hint(_bundle_region_key(bundle), "on_hold")
+        return f"未找到 on_hold.csv：请在 {hint}，然后点「刷新数据」。"
     name = Path(path).name
     if row_count <= 0:
         return (
@@ -3421,7 +3443,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         diagnostics.append({
             "level": "info",
             "message": (
-                "未找到 on_hold.csv：可在 Data-NZ 放置 on_hold.txt 并执行 SQL 导出，"
+                f"未找到 on_hold.csv：可在 {region_sql_export_hint(region_key, 'on_hold')}，"
                 "用于 On Hold 挖掘。"
             ),
         })
@@ -3429,7 +3451,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         diagnostics.append({
             "level": "info",
             "message": (
-                "未找到 parts.csv：可在 Data-NZ 放置 parts.txt 并执行 SQL 导出，"
+                f"未找到 parts.csv：可在 {region_sql_export_hint(region_key, 'parts')}，"
                 "用于配件挖掘。"
             ),
         })
