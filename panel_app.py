@@ -9,6 +9,7 @@
 import csv
 import io
 import os
+import re
 import ssl
 import sys
 import threading
@@ -34,7 +35,11 @@ except Exception:
     Image = None
     ImageTk = None
 
+<<<<<<< HEAD
 APP_VERSION = "1.9.57"
+=======
+APP_VERSION = "1.9.56"
+>>>>>>> origin/cursor/inventory-health-e23a
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -165,6 +170,14 @@ class PanelApp:
         self._onhold_sort_reverse = False
         self._tab_onhold = None
         self._tab_transfer = None
+        self._tab_volume = None
+        self._volume_tree = None
+        self._volume_channel_tree = None
+        self._volume_status_lbl = None
+        self._volume_channel_var = None
+        self._volume_channel_pick_var = None
+        self._volume_channel_options = []
+        self._volume_last_report = None
         self._onhold_status_lbl = None
         self._transfer_status_lbl = None
         self._mining_rendered_for = None
@@ -234,6 +247,8 @@ class PanelApp:
         self._island_owner_filter_var = tk.StringVar(value="全部负责人")
         self._island_channel_filter_var = tk.StringVar(value="全部渠道")
         self._mining_kind_var = tk.StringVar(value="全部")
+        self._volume_channel_var = tk.StringVar(value="")
+        self._volume_channel_pick_var = tk.StringVar(value="全部渠道")
         self._onhold_status_filter_var = tk.StringVar(value="全部状态")
         self._onhold_days_filter_var = tk.StringVar(value="全部天数")
         self._onhold_days_combo = None
@@ -942,6 +957,92 @@ class PanelApp:
         self._mining_transfer_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         self._mining_transfer_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._mining_transfer_tree.bind("<Double-1>", self._on_mining_transfer_double_click)
+
+        # ── 仓库容积率（纯桌面，无浏览器）──
+        self._tab_volume = ttk.Frame(self._notebook)
+        self._notebook.add(self._tab_volume, text="仓库容积率")
+        vol_tab = self._tab_volume
+        vol_toolbar = tk.Frame(vol_tab, bg="white")
+        vol_toolbar.pack(fill=tk.X, padx=4, pady=(6, 4))
+        ttk.Button(vol_toolbar, text="刷新", command=self._refresh_volume_tab).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Label(vol_toolbar, text="筛选渠道", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        self._volume_channel_combo = ttk.Combobox(
+            vol_toolbar, width=14, state="readonly", textvariable=self._volume_channel_pick_var,
+        )
+        self._volume_channel_combo.pack(side=tk.LEFT, padx=(6, 8))
+        self._volume_channel_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_volume_channel_pick())
+        tk.Label(vol_toolbar, text="或手动", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(side=tk.LEFT)
+        ttk.Entry(vol_toolbar, width=16, textvariable=self._volume_channel_var).pack(side=tk.LEFT, padx=(6, 8))
+        ttk.Button(vol_toolbar, text="应用筛选", command=self._refresh_volume_tab).pack(side=tk.LEFT)
+        self._volume_status_lbl = tk.Label(
+            vol_tab,
+            text="在库：ERP；在途：po.csv 或刷新时自动执行 Data-NZ/PO.txt（与 SSMS 同库）",
+            bg="white", fg=C_MUTED, font=("Segoe UI", 9),
+        )
+        self._volume_status_lbl.pack(anchor="w", padx=8, pady=(0, 4))
+        vol_panes = tk.PanedWindow(vol_tab, orient=tk.HORIZONTAL, bg="white", sashwidth=6)
+        vol_panes.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 6))
+        ch_frame = tk.Frame(vol_panes, bg="white")
+        wh_frame = tk.Frame(vol_panes, bg="white")
+        vol_panes.add(ch_frame, minsize=220)
+        vol_panes.add(wh_frame, minsize=420)
+        tk.Label(
+            ch_frame,
+            text="按渠道合计（在库+在途 PO；双击筛选）",
+            bg="white", fg=C_TEXT, font=("Segoe UI", 9, "bold"),
+        ).pack(anchor="w", padx=4, pady=(0, 4))
+        ch_wrap = tk.Frame(ch_frame, bg="white")
+        ch_wrap.pack(fill=tk.BOTH, expand=True)
+        self._volume_channel_tree = ttk.Treeview(
+            ch_wrap,
+            columns=("channel", "stock", "po", "total"),
+            show="headings",
+            style="Prefix.Treeview",
+        )
+        self._volume_channel_tree.heading("channel", text="渠道")
+        self._volume_channel_tree.heading("stock", text="在库(柜)")
+        self._volume_channel_tree.heading("po", text="在途(柜)")
+        self._volume_channel_tree.heading("total", text="合计(柜)")
+        self._volume_channel_tree.column("channel", width=56, stretch=True)
+        self._volume_channel_tree.column("stock", width=72, stretch=False)
+        self._volume_channel_tree.column("po", width=72, stretch=False)
+        self._volume_channel_tree.column("total", width=72, stretch=False)
+        ch_vscroll = ttk.Scrollbar(ch_wrap, orient="vertical", command=self._volume_channel_tree.yview)
+        self._volume_channel_tree.configure(yscrollcommand=ch_vscroll.set)
+        self._volume_channel_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        ch_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._volume_channel_tree.bind("<Double-1>", self._on_volume_channel_double_click)
+        tk.Label(
+            wh_frame, text="按南北岛（在库分仓；在途仅南北岛总在途）",
+            bg="white", fg=C_TEXT, font=("Segoe UI", 9, "bold"),
+        ).pack(anchor="w", padx=4, pady=(0, 4))
+        wh_wrap = tk.Frame(wh_frame, bg="white")
+        wh_wrap.pack(fill=tk.BOTH, expand=True)
+        vcols = ("name", "volume", "po", "total", "capacity", "util", "m3")
+        self._volume_tree = ttk.Treeview(
+            wh_wrap, columns=vcols, show="headings", selectmode="browse", style="Prefix.Treeview",
+        )
+        for col, text, w in (
+            ("name", "仓库", 180),
+            ("volume", "在库(柜)", 72),
+            ("po", "在途(柜)", 72),
+            ("total", "合计(柜)", 72),
+            ("capacity", "容量(柜)", 72),
+            ("util", "容积率%", 68),
+            ("m3", "在库m³", 72),
+        ):
+            self._volume_tree.heading(col, text=text)
+            self._volume_tree.column(col, width=w, minwidth=60, stretch=col == "name")
+        vol_vscroll = ttk.Scrollbar(wh_wrap, orient="vertical", command=self._volume_tree.yview)
+        self._volume_tree.configure(yscrollcommand=vol_vscroll.set)
+        self._volume_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vol_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._volume_tree.tag_configure("island_hdr", font=("Segoe UI", 9, "bold"), background="#f1f5f9")
+        self._volume_tree.tag_configure("island_transit", background="#e0f2fe")
+
+        import inventory_health_ui as ih_ui
+
+        ih_ui.attach_inventory_health_tab(self, self._notebook, {"muted": C_MUTED})
 
         for widget in (
             mining_inner, self._tab_mining, self._tab_onhold, self._tab_transfer,
@@ -1965,7 +2066,8 @@ class PanelApp:
             return
         mining_tabs = tuple(
             str(t) for t in (
-                self._tab_mining, self._tab_onhold, self._tab_transfer,
+                self._tab_mining, self._tab_onhold, self._tab_transfer, self._tab_volume,
+                getattr(self, "_tab_inventory_health", None),
             ) if t
         )
         if not self._cached_products and selected not in mining_tabs:
@@ -1981,6 +2083,151 @@ class PanelApp:
             self._render_on_hold_analysis()
         elif self._tab_transfer and selected == str(self._tab_transfer):
             self._render_mining_transfer_table()
+        elif self._tab_volume and selected == str(self._tab_volume):
+            self._render_volume_tab()
+        elif getattr(self, "_tab_inventory_health", None) and selected == str(self._tab_inventory_health):
+            self._render_inventory_health()
+
+    def _render_inventory_health(self, force=False):
+        from inventory_health_ui import render_inventory_health
+
+        render_inventory_health(self, force=force)
+
+    def _volume_channel_list(self):
+        raw = str(self._volume_channel_var.get() if self._volume_channel_var else "").strip()
+        if not raw:
+            return []
+        parts = re.split(r"[,，\s]+", raw)
+        return [p.strip().upper() for p in parts if p.strip()]
+
+    def _refresh_volume_tab(self):
+        self._render_volume_tab(force=True)
+
+    def _on_volume_channel_pick(self):
+        pick = str(self._volume_channel_pick_var.get() or "").strip()
+        if pick in ("", "全部渠道"):
+            self._volume_channel_var.set("")
+        else:
+            self._volume_channel_var.set(pick)
+        self._refresh_volume_tab()
+
+    def _on_volume_channel_double_click(self, _event=None):
+        if not self._volume_channel_tree:
+            return
+        sel = self._volume_channel_tree.selection()
+        if not sel:
+            return
+        vals = self._volume_channel_tree.item(sel[0], "values")
+        if not vals:
+            return
+        ch = str(vals[0]).strip()
+        if not ch:
+            return
+        self._volume_channel_var.set(ch)
+        if self._volume_channel_pick_var:
+            self._volume_channel_pick_var.set(ch)
+        self._refresh_volume_tab()
+
+    def _render_volume_tab(self, force=False):
+        if not self._volume_tree:
+            return
+        region = self._cached_summary.get("region") or self._current_region()
+        if self._volume_status_lbl:
+            self._volume_status_lbl.configure(text=f"正在查询 {region} 仓库体积…")
+        channels = self._volume_channel_list()
+
+        def work():
+            import warehouse_volume as wv
+            report = wv.build_volume_report(region, channels or None)
+            stock_channels = wv.channel_breakdown(region)
+            if channels:
+                stock_channels = [
+                    r for r in stock_channels if str(r.get("channel") or "").upper() in channels
+                ]
+            po_report = report.get("po") or wv.build_po_report(region, channels or None)
+            channel_rows = wv.merge_channel_breakdown(stock_channels, po_report)
+            channel_names = [r["channel"] for r in channel_rows]
+            return report, channel_rows, channel_names
+
+        def done(err, payload):
+            if err:
+                if self._volume_status_lbl:
+                    self._volume_status_lbl.configure(text=f"查询失败：{err}")
+                return
+            report, channel_rows, channel_names = payload
+            self._volume_last_report = report
+            self._volume_channel_options = ["全部渠道"] + channel_names
+            if getattr(self, "_volume_channel_combo", None):
+                self._volume_channel_combo.configure(values=self._volume_channel_options)
+            if self._volume_channel_tree:
+                if self._volume_channel_tree.get_children():
+                    self._volume_channel_tree.delete(*self._volume_channel_tree.get_children())
+                for row in channel_rows or []:
+                    self._volume_channel_tree.insert(
+                        "", tk.END,
+                        values=(
+                            row.get("channel") or "",
+                            row.get("volume_containers") or 0,
+                            row.get("po_containers") or 0,
+                            row.get("total_containers") or 0,
+                        ),
+                    )
+            if self._volume_tree.get_children():
+                self._volume_tree.delete(*self._volume_tree.get_children())
+            for row in report.get("data") or []:
+                row_type = row.get("row_type") or "warehouse"
+                if row_type == "island_header":
+                    self._volume_tree.insert(
+                        "", tk.END, tags=("island_hdr",),
+                        values=(row.get("name") or "", "", "", "", "", "", ""),
+                    )
+                    continue
+                util = row.get("utilization_pct")
+                util_txt = f"{util}%" if util is not None else "-"
+                cap = row.get("capacity_containers")
+                tags = ("island_transit",) if row_type == "island_transit" else ()
+                if row_type == "island_transit":
+                    stock_val = ""
+                    po_val = row.get("po_containers") or 0
+                    m3_val = ""
+                else:
+                    stock_val = row.get("volume_containers") or 0
+                    po_val = 0
+                    m3_val = row.get("volume_m3") or "-"
+                self._volume_tree.insert(
+                    "", tk.END, tags=tags,
+                    values=(
+                        row.get("name") or "",
+                        stock_val,
+                        po_val,
+                        row.get("total_containers") or row.get("volume_containers") or 0,
+                        cap if cap is not None else "-",
+                        util_txt,
+                        m3_val,
+                    ),
+                )
+            src = report.get("source") or "-"
+            err_hint = f" · {report.get('error')}" if report.get("error") else ""
+            ch = ",".join(report.get("filters", {}).get("channels") or []) or "全部"
+            hint = report.get("hint") or ""
+            po = report.get("po") or {}
+            po_total = po.get("total_po_containers") or 0
+            if self._volume_status_lbl:
+                self._volume_status_lbl.configure(
+                    text=(
+                        f"{region} · 渠道 {ch} · 在库+在途合计 {report.get('total_containers', 0)} 柜"
+                        f"（在途 PO {po_total} 柜）· 来源 {src}{err_hint}"
+                        + (f" · {hint}" if hint else "")
+                    ),
+                )
+
+        if force:
+            try:
+                done(None, work())
+            except Exception as exc:
+                done(exc, None)
+            return
+        self._run_bg(work, done)
 
     def _mining_kind_key(self):
         kind = self._mining_kind_var.get()

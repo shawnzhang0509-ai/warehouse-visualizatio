@@ -34,7 +34,29 @@ STANDARD_OUTPUT_NAMES = {
     "parts": "parts",
     "spare_parts": "parts",
     "part_stock": "parts",
+    "po": "po",
+    "purchase_order": "po",
+    "purchase_orders": "po",
+    "po_in_transit": "po",
+    "stock_volume": "stock_volume",
+    "warehouse_volume": "stock_volume",
+    "warehouse_stock_volume": "stock_volume",
+    "sales_8-30": "sales 8-30",
+    "sales_8_30": "sales 8-30",
+    "sales8-30": "sales 8-30",
+    "sales_15": "sales 15",
+    "sales15": "sales 15",
+    "sales_30": "sales 30",
+    "sales30": "sales 30",
+    "weekly_sales": "weekly_sales",
 }
+
+_NON_SQL_CONFIG_FILES = frozenset(
+    {
+        "po_channel_prefixes.txt",
+        "channel_prefixes.txt",
+    }
+)
 
 try:
     import tkinter as tk
@@ -56,6 +78,14 @@ from runner_config import (
     load_runner_config,
     save_runner_config,
 )
+from po_probe import (
+    build_po_row_count_batch,
+    parse_sku_filter,
+    po_template_filter_hints,
+    warn_po_sql_patterns,
+)
+from sql_batch import drain_cursor, fetch_primary_result_set
+from sql_placeholders import apply_sql_placeholders, placeholder_context_for_region, placeholders_in_sql
 
 ROOT_DIR = Path(__file__).parent
 
@@ -139,6 +169,7 @@ def _odbc_conn_str_from_uri(uri):
         f"PWD={parsed['password']};"
         "Encrypt=yes;"
         "TrustServerCertificate=no;"
+        "MARS_Connection=yes;"
         "Connection Timeout=30;"
     )
 
@@ -170,6 +201,8 @@ def _is_stub_sql(sql_text):
 
 def _should_skip_template(file_path, sql_text):
     name = file_path.name.lower()
+    if name in _NON_SQL_CONFIG_FILES:
+        return True
     if name.startswith("example_"):
         return True
     if name.endswith(".example") or ".example." in name:
@@ -275,17 +308,137 @@ def _remove_legacy_xlsx(csv_path, log=None):
         pass
 
 
+def _prepare_template_sql(sql_text, region_key, region_cfg, log_fn):
+    ctx = placeholder_context_for_region(region_key, region_cfg)
+    prepared, notes = apply_sql_placeholders(sql_text, ctx)
+    if placeholders_in_sql(sql_text):
+        if notes:
+            log_fn(f"[{region_key}] SQL 占位符：{'；'.join(notes)}")
+        if placeholders_in_sql(prepared):
+            log_fn(
+                f"[{region_key}] ⚠ SQL 仍含 {{sku}}：请在 region_runner_config 的该地区加 "
+                f'"po_sku_prefix": "130"（前三位），或设环境变量 PO_SKU_PREFIX=130'
+            )
+    return prepared
+
+
+def _run_template_fresh_connection(connection_uri, sql):
+    conn = pyodbc.connect(_odbc_conn_str_from_uri(connection_uri), timeout=120)
+    try:
+        cur = conn.cursor()
+        result = _run_single_template(cur, sql)
+        drain_cursor(cur)
+        return result
+    finally:
+        conn.close()
+
+
+def _po_export_strict_only():
+    return os.getenv("WAREHOUSE_PO_EXPORT_STRICT", "").strip().lower() in ("1", "true", "yes")
+
+
+def _embedded_po_sql_for_region(region_key):
+    if (region_key or "").upper() != "NZ":
+        return None
+    from warehouse_volume import NZ_DEFAULT_PO_SQL
+
+    return NZ_DEFAULT_PO_SQL.strip()
+
+
+def _log_connection_context(cursor, region_key, log_fn):
+    try:
+        cursor.execute("SELECT DB_NAME() AS db_name, @@SERVERNAME AS server_name")
+        row = cursor.fetchone()
+        drain_cursor(cursor)
+        if row:
+            log_fn(f"[{region_key}] PO 诊断 · 当前连接库={row[0]}  服务器={row[1]}")
+    except Exception as exc:
+        log_fn(f"[{region_key}] PO 诊断 · 连接信息失败：{exc}")
+
+
+def _probe_po_template_row_count(cursor, template_sql):
+    count_sql = build_po_row_count_batch(template_sql)
+    if not count_sql:
+        return None
+    cursor.execute(count_sql)
+    row = cursor.fetchone()
+    drain_cursor(cursor)
+    if not row:
+        return None
+    return int(row[0])
+
+
+def _log_po_zero_diagnostic(cursor, region_key, log_fn, template_sql=None):
+    if template_sql:
+        sku = parse_sku_filter(template_sql)
+        if sku is not None:
+            log_fn(f"[{region_key}] PO 诊断 · 模板 @SkuFilter = '{sku}'")
+        for msg in warn_po_sql_patterns(template_sql):
+            log_fn(f"[{region_key}] PO 诊断 · {msg}")
+        hints = po_template_filter_hints(template_sql)
+        if hints:
+            log_fn(f"[{region_key}] PO 诊断 · 模板特征：{'；'.join(hints)}")
+        try:
+            probe = _probe_po_template_row_count(cursor, template_sql)
+            if probe is not None:
+                log_fn(f"[{region_key}] PO 诊断 · 按本机 PO 脚本 COUNT = {probe}")
+        except Exception as exc:
+            log_fn(f"[{region_key}] PO 诊断 · 本机 PO 脚本 COUNT 失败：{exc}")
+        embedded = _embedded_po_sql_for_region(region_key)
+        if embedded:
+            try:
+                fb_cnt = _probe_po_template_row_count(cursor, embedded)
+                if fb_cnt is not None:
+                    log_fn(
+                        f"[{region_key}] PO 诊断 · 内置 NZ 查询 COUNT = {fb_cnt}"
+                        "（容积率页在 po.txt 为 0 时会自动用这条）"
+                    )
+            except Exception as exc:
+                log_fn(f"[{region_key}] PO 诊断 · 内置 NZ COUNT 失败：{exc}")
+    _log_connection_context(cursor, region_key, log_fn)
+    probes = (
+        ("POL QuantityOrdered>0", "SELECT COUNT(*) FROM dbo.PurchaseOrderLines WHERE QuantityOrdered > 0"),
+        ("Sku LIKE 996%", "SELECT COUNT(*) FROM dbo.Products WHERE Sku LIKE '996%'"),
+        (
+            "Sku LIKE '996' 无 %（常误写成完全匹配）",
+            "SELECT COUNT(*) FROM dbo.Products WHERE Sku LIKE '996'",
+        ),
+        ("PO+POL+Products join", (
+            "SELECT COUNT(*) FROM dbo.PurchaseOrders po "
+            "INNER JOIN dbo.PurchaseOrderLines pol ON pol.PurchaseOrderId = po.Id "
+            "INNER JOIN dbo.Products p ON pol.ProductId = p.Id "
+            "WHERE pol.QuantityOrdered > 0"
+        )),
+        (
+            "在途：JOIN 柜且 ActualArrivingDate IS NULL",
+            "SELECT COUNT(*) FROM dbo.PurchaseOrders po "
+            "INNER JOIN dbo.PurchaseOrderLines pol ON pol.PurchaseOrderId = po.Id "
+            "INNER JOIN dbo.Products p ON pol.ProductId = p.Id "
+            "LEFT JOIN dbo.Containers c ON c.PurchaseOrderId = po.Id "
+            "WHERE pol.QuantityOrdered > 0 AND c.ActualArrivingDate IS NULL",
+        ),
+    )
+    for label, sql in probes:
+        try:
+            cursor.execute(sql)
+            row = cursor.fetchone()
+            val = row[0] if row else "?"
+            log_fn(f"[{region_key}] PO 诊断 · {label} = {val}")
+        except Exception as exc:
+            log_fn(f"[{region_key}] PO 诊断 · {label} 失败：{exc}")
+
+
 def _run_single_template(cursor, sql):
     cursor.execute(sql)
-    if not cursor.description:
+    columns, rows, has_result_set = fetch_primary_result_set(cursor)
+    drain_cursor(cursor)
+    if not has_result_set:
         return {
             "columns": [],
             "rows": [],
             "row_count": max(cursor.rowcount, 0),
             "has_result_set": False,
         }
-    columns = [col[0] for col in cursor.description]
-    rows = cursor.fetchall()
     return {
         "columns": columns,
         "rows": rows,
@@ -369,7 +522,8 @@ def execute_region(region_key, region_cfg, log=None, on_template_start=None, on_
     fail_count = 0
 
     try:
-        conn = pyodbc.connect(_odbc_conn_str_from_uri(region_cfg.get("connection_uri", "")), timeout=30)
+        conn_uri = region_cfg.get("connection_uri", "")
+        conn = pyodbc.connect(_odbc_conn_str_from_uri(conn_uri), timeout=30)
         cursor = conn.cursor()
         for tpl in templates:
             tpl_name = tpl["name"]
@@ -377,9 +531,39 @@ def execute_region(region_key, region_cfg, log=None, on_template_start=None, on_
                 on_template_start(tpl_name)
             _log(f"[{region_key}] 执行模板：{tpl_name}")
             try:
-                result = _run_single_template(cursor, tpl["sql"])
+                sql_text = _prepare_template_sql(tpl["sql"], region_key, region_cfg, _log)
+                po_template = _standard_output_stem(tpl_name) == "po"
+                if po_template:
+                    result = _run_template_fresh_connection(conn_uri, sql_text)
+                else:
+                    result = _run_single_template(cursor, sql_text)
                 if result["has_result_set"]:
                     paths = _output_paths(region_cfg.get("output_dir"), region_key, tpl_name)
+                    po_fallback_note = None
+                    if paths["standard_name"] == "po" and result["row_count"] == 0:
+                        cols_preview = ", ".join(result["columns"][:8]) if result["columns"] else "（无列）"
+                        _log(
+                            f"[{region_key}] ⚠ 本机 PO 脚本 0 行：列={cols_preview}。"
+                            "COUNT 见下方诊断；容积率页在脚本 0 行时会自动改用内置 NZ 查询。"
+                        )
+                        _log_po_zero_diagnostic(
+                            cursor, region_key, _log, template_sql=sql_text,
+                        )
+                        if not _po_export_strict_only():
+                            fb_sql = _embedded_po_sql_for_region(region_key)
+                            if fb_sql:
+                                _log(
+                                    f"[{region_key}] PO：本机脚本无数据，改用内置 NZ 查询写 po.csv…"
+                                )
+                                fb = _run_template_fresh_connection(conn_uri, fb_sql)
+                                if fb.get("has_result_set") and fb["row_count"] > 0:
+                                    result = fb
+                                    po_fallback_note = "内置NZ_PO"
+                        else:
+                            _log(
+                                f"[{region_key}] 已设 WAREHOUSE_PO_EXPORT_STRICT=1，"
+                                "不会用内置查询兜底 po.csv。"
+                            )
                     _write_csv(paths["csv"], result["columns"], result["rows"])
                     _remove_legacy_xlsx(paths["csv"], log=lambda m: _log(f"[{region_key}] {m}"))
                     outputs.append(
@@ -390,7 +574,16 @@ def execute_region(region_key, region_cfg, log=None, on_template_start=None, on_
                             "status": "success",
                         }
                     )
-                    _log(f"[{region_key}] 成功：{tpl_name} -> {paths['csv']} ({result['row_count']} 行)")
+                    if po_fallback_note:
+                        _log(
+                            f"[{region_key}] 成功：{tpl_name} -> {paths['csv']} "
+                            f"({result['row_count']} 行，来源={po_fallback_note}；未修改本机 po.txt)"
+                        )
+                    else:
+                        _log(
+                            f"[{region_key}] 成功：{tpl_name} -> {paths['csv']} "
+                            f"({result['row_count']} 行)"
+                        )
                     if paths["standard_name"] == "display" and result["row_count"] < 10:
                         _log(
                             f"[{region_key}] ⚠ 警告：display 只有 {result['row_count']} 行，"
