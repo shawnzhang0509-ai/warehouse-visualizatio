@@ -35,11 +35,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-<<<<<<< HEAD
 APP_VERSION = "1.9.57"
-=======
-APP_VERSION = "1.9.56"
->>>>>>> origin/cursor/inventory-health-e23a
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
