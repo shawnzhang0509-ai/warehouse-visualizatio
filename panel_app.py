@@ -35,7 +35,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.60"
+APP_VERSION = "1.9.61"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -251,6 +251,8 @@ class PanelApp:
         self._onhold_sort_col = None
         self._onhold_sort_reverse = False
         self._filter_combos = []
+        self._island_filter_label = None
+        self._island_filter_combo = None
         self.load_images_var = tk.BooleanVar(value=True)
         self.result_count_var = tk.StringVar(value="")
         self._status_var = tk.StringVar(value="")
@@ -349,12 +351,15 @@ class PanelApp:
             ("组排序", self.group_sort_var, ("字母序", "SKU数量多到少", "库存总数多到少"), 5),
         ]
         for label, var, values, col in filters:
-            tk.Label(filter_bar, text=label, bg="white", fg=C_MUTED, font=("Segoe UI", 9)).grid(
-                row=0, column=col, sticky="w")
+            lbl = tk.Label(filter_bar, text=label, bg="white", fg=C_MUTED, font=("Segoe UI", 9))
+            lbl.grid(row=0, column=col, sticky="w")
             cb = ttk.Combobox(filter_bar, width=10, state="readonly", textvariable=var, values=values)
             cb.grid(row=1, column=col, sticky="w", padx=(0, 10), pady=(2, 0))
             self._filter_combos.append((cb, var))
             cb.bind("<<ComboboxSelected>>", lambda _e: self.root.after_idle(self._on_filter_combo_change))
+            if label == "南北岛":
+                self._island_filter_label = lbl
+                self._island_filter_combo = cb
 
         ttk.Checkbutton(filter_bar, text="行内缩略图", variable=self.load_images_var,
                         command=self._on_toggle_inline_images).grid(row=1, column=6, sticky="w", padx=(4, 0))
@@ -1039,6 +1044,7 @@ class PanelApp:
         import inventory_health_ui as ih_ui
 
         ih_ui.attach_inventory_health_tab(self, self._notebook, {"muted": C_MUTED})
+        self._sync_region_island_ui()
 
         for widget in (
             mining_inner, self._tab_mining, self._tab_onhold, self._tab_transfer,
@@ -1132,6 +1138,50 @@ class PanelApp:
     def _is_store_selected(self):
         store = self.store_combo.get() if self.store_combo else self.store_var.get()
         return store != panel_data.ALL_STORES
+
+    def _sync_region_island_ui(self):
+        """南北岛仅适用于 NZ；CA/AU 等隐藏筛选、列与「南北岛象限」页签。"""
+        region = self._current_region()
+        supported = panel_data.island_stock_supported(region)
+        if self._island_filter_label is not None and self._island_filter_combo is not None:
+            if supported:
+                self._island_filter_label.grid()
+                self._island_filter_combo.grid()
+            else:
+                self._island_filter_label.grid_remove()
+                self._island_filter_combo.grid_remove()
+                if self.island_filter_var.get() != "全部":
+                    self.island_filter_var.set("全部")
+                    self._island_selected_class = None
+        if self._tree is not None:
+            try:
+                if supported:
+                    self._tree.column("island", width=76, stretch=True)
+                else:
+                    self._tree.column("island", width=0, stretch=False)
+            except tk.TclError:
+                pass
+        if self._notebook is not None and self._tab_island is not None:
+            try:
+                if supported:
+                    tabs = self._notebook.tabs()
+                    if str(self._tab_island) not in tabs:
+                        self._notebook.add(self._tab_island, text="南北岛象限")
+                else:
+                    try:
+                        if str(self._notebook.select()) == str(self._tab_island):
+                            self._notebook.select(self._tab_products)
+                    except tk.TclError:
+                        pass
+                    self._notebook.hide(self._tab_island)
+            except tk.TclError:
+                pass
+        try:
+            from inventory_health_ui import sync_inventory_health_island_ui
+
+            sync_inventory_health_island_ui(self)
+        except ImportError:
+            pass
 
     def _sync_filter_combos(self):
         for combo, var in getattr(self, "_filter_combos", ()):
@@ -1384,6 +1434,7 @@ class PanelApp:
             )
             if self.store_var.get() not in stores:
                 self.store_var.set(default_store)
+            self._sync_region_island_ui()
             self.reload()
 
         self._run_bg(lambda: panel_data.list_stores(region), done)
@@ -1693,6 +1744,7 @@ class PanelApp:
         self._prefix_rendered_for = None
         self._owner_rendered_for = None
         self._loaded_full_stock = bool(data.get("summary", {}).get("includes_discontinued"))
+        self._sync_region_island_ui()
         self._refresh_view()
         self.root.after_idle(self._refresh_mining_tabs_if_visible)
 
@@ -1816,10 +1868,11 @@ class PanelApp:
                 and p.get("exempted")
             ):
                 continue
-            island_f = self.island_filter_var.get()
-            if island_f != "全部":
-                if p.get("island_stock_label") != island_f:
-                    continue
+            if panel_data.island_stock_supported(self._current_region()):
+                island_f = self.island_filter_var.get()
+                if island_f != "全部":
+                    if p.get("island_stock_label") != island_f:
+                        continue
             out.append(p)
         return out
 

@@ -59,11 +59,35 @@ def _populate_ih_channel_combo(app):
         app._ih_channel_combo["values"] = values
 
 
+def sync_inventory_health_island_ui(app):
+    """仅 NZ 显示库存健康页的「南北岛」筛选；切换地区时同步显隐。"""
+    region = app._current_region() if hasattr(app, "_current_region") else "NZ"
+    supported = pd.island_stock_supported(region)
+    label = getattr(app, "_ih_island_label", None)
+    combo = getattr(app, "_ih_island_combo", None)
+    if label is None or combo is None:
+        return
+    if supported:
+        if not label.winfo_ismapped():
+            label.pack(side=tk.LEFT, padx=(6, 0), before=getattr(app, "_ih_category_anchor", None))
+        if not combo.winfo_ismapped():
+            combo.pack(side=tk.LEFT, padx=4, before=getattr(app, "_ih_category_anchor", None))
+    else:
+        label.pack_forget()
+        combo.pack_forget()
+        if hasattr(app, "_ih_island_var"):
+            app._ih_island_var.set("全部")
+
+
 def _snapshot_ih_filters(app) -> dict:
     """在主线程读取 Tk 变量；后台线程调用 StringVar.get() 在 Windows 上会死锁。"""
+    region = app._current_region() if hasattr(app, "_current_region") else "NZ"
     ch = app._ih_channel_var.get()
     if str(ch).strip() in ("全部", ""):
         ch = ""
+    island_scope = ""
+    if pd.island_stock_supported(region) and hasattr(app, "_ih_island_var"):
+        island_scope = app._ih_island_var.get()
     return {
         "channel": ch,
         "category": app._ih_category_var.get(),
@@ -71,11 +95,7 @@ def _snapshot_ih_filters(app) -> dict:
         "branch": app._ih_branch_var.get(),
         "group_by": app._ih_group_var.get() or "channel",
         "owner": app._ih_owner_var.get() if hasattr(app, "_ih_owner_var") else "",
-        "island_scope": (
-            app._ih_island_var.get()
-            if hasattr(app, "_ih_island_var")
-            else ""
-        ),
+        "island_scope": island_scope,
         "stockout_th": app._ih_stockout_th.get(),
         "days_th": app._ih_days_th.get(),
         "cover_proxy": app._ih_cover_proxy.get(),
@@ -126,22 +146,21 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
         "<<ComboboxSelected>>",
         lambda _e: app._render_inventory_health(force=True),
     )
-    region0 = app._current_region() if hasattr(app, "_current_region") else "NZ"
-    if pd.island_stock_supported(region0):
-        ttk.Label(toolbar, text="南北岛").pack(side=tk.LEFT, padx=(6, 0))
-        app._ih_island_combo = ttk.Combobox(
-            toolbar,
-            width=6,
-            textvariable=app._ih_island_var,
-            state="readonly",
-            values=("全部", "北岛", "南岛"),
-        )
-        app._ih_island_combo.pack(side=tk.LEFT, padx=4)
-        app._ih_island_combo.bind(
-            "<<ComboboxSelected>>",
-            lambda _e: app._render_inventory_health(force=True),
-        )
-    ttk.Label(toolbar, text="分类").pack(side=tk.LEFT)
+    app._ih_category_anchor = ttk.Label(toolbar, text="分类")
+    app._ih_island_label = ttk.Label(toolbar, text="南北岛")
+    app._ih_island_combo = ttk.Combobox(
+        toolbar,
+        width=6,
+        textvariable=app._ih_island_var,
+        state="readonly",
+        values=("全部", "北岛", "南岛"),
+    )
+    app._ih_island_combo.bind(
+        "<<ComboboxSelected>>",
+        lambda _e: app._render_inventory_health(force=True),
+    )
+    sync_inventory_health_island_ui(app)
+    app._ih_category_anchor.pack(side=tk.LEFT)
     ttk.Entry(toolbar, width=10, textvariable=app._ih_category_var).pack(side=tk.LEFT, padx=4)
     ttk.Label(toolbar, text="SKU").pack(side=tk.LEFT)
     ttk.Entry(toolbar, width=12, textvariable=app._ih_sku_var).pack(side=tk.LEFT, padx=4)
@@ -302,6 +321,7 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
 
 def render_inventory_health(app, force=False):
     region = app._current_region() if hasattr(app, "_current_region") else "NZ"
+    sync_inventory_health_island_ui(app)
     _populate_ih_owner_combo(app)
     _populate_ih_channel_combo(app)
 
