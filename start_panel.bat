@@ -3,6 +3,18 @@ setlocal
 
 cd /d "%~dp0"
 
+findstr /C:"<<<<<<<" panel_app.py >nul 2>nul
+if not errorlevel 1 (
+    echo panel_app.py 含 Git 冲突标记，正在自动恢复...
+    git checkout HEAD -- panel_app.py 2>nul
+    findstr /C:"<<<<<<<" panel_app.py >nul 2>nul
+    if not errorlevel 1 (
+        echo 自动恢复失败。请双击 restore_panel_app.bat 或关闭编辑器后重试。
+        pause
+        exit /b 1
+    )
+)
+
 echo Starting 有货未展示看板 (panel_app.py) ...
 
 set "PYEXE="
