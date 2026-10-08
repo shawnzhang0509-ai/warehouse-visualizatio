@@ -868,7 +868,7 @@ ON_HOLD_SALES_KEYS = [
 ON_HOLD_STOCK_ID_KEYS = ["stockid", "stock_id", "lineid", "line_id", "inventoryid"]
 ON_HOLD_ANALYSIS_MAX_ROWS = 15000
 # 界面 Treeview 最多渲染行数（排序后再截断，避免上千行+缩略图卡死）
-ON_HOLD_UI_MAX_ROWS = 2500
+ON_HOLD_UI_MAX_ROWS = int(os.getenv("PANEL_ONHOLD_UI_MAX", "1000") or "1000")
 PARTS_QTY_KEYS = [
     "partsqty", "parts_qty", "partqty", "quantity", "qty", "sum", "total", "amount",
 ]
@@ -1517,6 +1517,7 @@ def _load_region_bundle(region, force=False):
         storage_map, storage_unmapped = {}, []
     on_hold_by_code = {}
     on_hold_row_count = 0
+    on_hold_status_summary = []
     if on_hold_path and Path(on_hold_path).is_file():
         on_hold_rows = _read_mining_table(on_hold_path)
         on_hold_detail_rows = _parse_on_hold_detail_rows(on_hold_rows)
@@ -1540,6 +1541,11 @@ def _load_region_bundle(region, force=False):
         parts_detail_rows = []
         parts_kit_bom = {}
     blacklist = _load_blacklist(blacklist_path)
+    if on_hold_detail_rows:
+        on_hold_status_summary = aggregate_on_hold_by_status(
+            on_hold_detail_rows=on_hold_detail_rows,
+            blacklist=blacklist,
+        )
     stock_raw_rows = _read_table(stock_path)
     warehouse_transfer_hints = _warehouse_hints_from_stock_rows(stock_raw_rows)
     warehouse_bucket_overrides = _load_warehouse_bucket_overrides(data_dir)
@@ -1581,6 +1587,7 @@ def _load_region_bundle(region, force=False):
         "on_hold_by_code": on_hold_by_code,
         "on_hold_rows": on_hold_rows,
         "on_hold_detail_rows": on_hold_detail_rows,
+        "on_hold_status_summary": on_hold_status_summary,
         "on_hold_row_count": on_hold_row_count,
         "parts_path": str(parts_path) if parts_path else None,
         "parts_mtime": parts_mtime,
@@ -2153,11 +2160,30 @@ def _on_hold_row_blacklisted(code, norm_code, blacklist):
     return bool(norm and norm in blacklist)
 
 
-def aggregate_on_hold_by_status(on_hold_rows=None, on_hold_by_code=None, blacklist=None):
+def aggregate_on_hold_by_status(
+    on_hold_rows=None,
+    on_hold_by_code=None,
+    on_hold_detail_rows=None,
+    blacklist=None,
+):
     """按 StockOnHoldStatus 汇总行数 / SKU 数 / 数量（排除黑名单 SKU）。"""
     blacklist = blacklist or set()
     by_status = defaultdict(lambda: {"row_count": 0, "sku_codes": set(), "total_qty": 0.0})
-    if on_hold_rows:
+    if on_hold_detail_rows:
+        for line in on_hold_detail_rows:
+            if _on_hold_row_blacklisted(line.get("code"), line.get("norm_code"), blacklist):
+                continue
+            status = line.get("status") or "（未标注状态）"
+            qty = float(line.get("qty") or 0)
+            if qty <= 0:
+                continue
+            slot = by_status[status]
+            slot["row_count"] += 1
+            norm = line.get("norm_code") or _norm_code(line.get("code"))
+            if norm:
+                slot["sku_codes"].add(norm)
+            slot["total_qty"] += qty
+    elif on_hold_rows:
         for row in on_hold_rows:
             code = _mining_code_from_row(row)
             if not code:
@@ -2268,11 +2294,12 @@ def list_on_hold_analysis(
 ):
     """On Hold 明细：每行 CSV 一条（同 SKU 不同订单/时间分开），可按状态精确筛选。"""
     blacklist = blacklist if blacklist is not None else (bundle.get("blacklist") or set())
+    detail = bundle.get("on_hold_detail_rows")
     raw_rows = bundle.get("on_hold_rows") or []
-    if raw_rows:
+    if detail is None:
+        detail = _parse_on_hold_detail_rows(raw_rows) if raw_rows else []
+    elif not detail and raw_rows:
         detail = _parse_on_hold_detail_rows(raw_rows)
-    else:
-        detail = list(bundle.get("on_hold_detail_rows") or [])
     catalog_by_norm = catalog_by_norm or {}
     status_filter = str(status_filter or "").strip()
     out = []

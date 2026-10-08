@@ -35,12 +35,12 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.64"
+APP_VERSION = "1.9.65"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
-ON_HOLD_TREE_BATCH = 80
-ON_HOLD_IMAGE_MAX_ROWS = 120
+ON_HOLD_TREE_BATCH = int(os.getenv("PANEL_ONHOLD_TREE_BATCH", "120") or "120")
+ON_HOLD_IMAGE_MAX_ROWS = int(os.getenv("PANEL_ONHOLD_IMAGES_MAX", "0") or "0")
 PLACEHOLDER_COLOR = "#d1d5db"
 SCROLL_UNITS = 8
 AUTO_EXPAND_ALL_GROUPS = 300
@@ -251,6 +251,10 @@ class PanelApp:
         self._onhold_days_combo = None
         self._onhold_sort_col = None
         self._onhold_sort_reverse = False
+        self._onhold_render_seq = 0
+        self._onhold_filter_after_id = None
+        self._catalog_by_norm_cache = None
+        self._catalog_by_norm_cache_key = None
         self._filter_combos = []
         self._island_filter_label = None
         self._island_filter_combo = None
@@ -2375,12 +2379,55 @@ class PanelApp:
                 self._transfer_status_lbl.configure(text=f"借调渲染失败：{exc}")
 
     def _catalog_by_norm(self):
+        cache_key = (
+            self._cached_summary.get("region"),
+            self._cached_summary.get("store"),
+            len(self._cached_products or ()),
+        )
+        if (
+            self._catalog_by_norm_cache is not None
+            and self._catalog_by_norm_cache_key == cache_key
+        ):
+            return self._catalog_by_norm_cache
         out = {}
         for product in self._cached_products or []:
             norm = product.get("norm_code") or panel_data._norm_code(product.get("code"))
             if norm:
                 out[norm] = product
+        self._catalog_by_norm_cache = out
+        self._catalog_by_norm_cache_key = cache_key
         return out
+
+    def _onhold_image_cap(self):
+        if not self._images_enabled():
+            return 0
+        cap = ON_HOLD_IMAGE_MAX_ROWS
+        if cap <= 0:
+            cap = int(os.getenv("PANEL_ONHOLD_IMAGES_MAX", "48") or "48")
+        return max(0, cap)
+
+    def _clear_onhold_tree_async(self, on_done):
+        tree = self._mining_onhold_tree
+        if not tree:
+            on_done()
+            return
+        children = tree.get_children()
+
+        def step(batch_start=0):
+            if not tree.winfo_exists():
+                on_done()
+                return
+            chunk = children[batch_start:batch_start + 300]
+            if chunk:
+                tree.delete(*chunk)
+                self.root.after(1, lambda: step(batch_start + 300))
+            else:
+                on_done()
+
+        if children:
+            step(0)
+        else:
+            on_done()
 
     def _clear_onhold_summary_cards(self):
         if not self._onhold_summary_frame:
@@ -2473,7 +2520,12 @@ class PanelApp:
     def _apply_on_hold_status_filter(self):
         self._sync_island_combo_to_var(self._onhold_status_combo, self._onhold_status_filter_var)
         self._sync_island_combo_to_var(self._onhold_days_combo, self._onhold_days_filter_var)
-        self._render_on_hold_analysis()
+        if self._onhold_filter_after_id is not None:
+            try:
+                self.root.after_cancel(self._onhold_filter_after_id)
+            except tk.TclError:
+                pass
+        self._onhold_filter_after_id = self.root.after(180, self._render_on_hold_analysis)
 
     def _onhold_status_filter_value(self):
         self._sync_island_combo_to_var(self._onhold_status_combo, self._onhold_status_filter_var)
@@ -2505,17 +2557,28 @@ class PanelApp:
     def _render_on_hold_analysis(self):
         if not self._mining_onhold_tree:
             return
+        self._onhold_filter_after_id = None
+        self._onhold_render_seq += 1
+        seq = self._onhold_render_seq
         region = self._cached_summary.get("region") or self._current_region()
         try:
             bundle = panel_data.get_region_bundle(region)
         except Exception:
             bundle = {}
         bl = bundle.get("blacklist") or set()
-        status_rows = panel_data.aggregate_on_hold_by_status(
-            on_hold_rows=bundle.get("on_hold_rows"),
-            on_hold_by_code=bundle.get("on_hold_by_code"),
-            blacklist=bl,
-        )
+        detail = bundle.get("on_hold_detail_rows") or []
+        status_rows = bundle.get("on_hold_status_summary")
+        if status_rows is None:
+            if detail:
+                status_rows = panel_data.aggregate_on_hold_by_status(
+                    on_hold_detail_rows=detail, blacklist=bl,
+                )
+            else:
+                status_rows = panel_data.aggregate_on_hold_by_status(
+                    on_hold_rows=bundle.get("on_hold_rows"),
+                    on_hold_by_code=bundle.get("on_hold_by_code"),
+                    blacklist=bl,
+                )
         self._render_on_hold_summary(status_rows)
         options = ["全部状态"] + [r["status"] for r in status_rows]
         if self._onhold_status_combo:
@@ -2529,26 +2592,57 @@ class PanelApp:
         status_f = self._onhold_status_filter_value()
         days_f = self._onhold_days_filter_value()
         min_days = panel_data.parse_on_hold_min_days(days_f)
-        rows, total_matched = panel_data.list_on_hold_analysis(
-            bundle,
-            status_filter=status_f,
-            catalog_by_norm=self._catalog_by_norm(),
-            min_hold_days=min_days,
-            blacklist=bl,
-        )
-        try:
-            rows = self._sort_onhold_rows(rows)
-        except Exception:
-            pass
-        ui_cap = panel_data.ON_HOLD_UI_MAX_ROWS
-        total_sorted = len(rows)
-        if ui_cap and total_sorted > ui_cap:
-            rows = rows[:ui_cap]
-        self._mining_onhold_render_token += 1
-        token = self._mining_onhold_render_token
-        self._mining_onhold_row_data = {}
-        if self._mining_onhold_tree.get_children():
-            self._mining_onhold_tree.delete(*self._mining_onhold_tree.get_children())
+        catalog_snap = self._catalog_by_norm()
+        if self._onhold_status_lbl:
+            self._onhold_status_lbl.configure(text="正在筛选 On Hold…")
+
+        def worker():
+            rows, total_matched = panel_data.list_on_hold_analysis(
+                bundle,
+                status_filter=status_f,
+                catalog_by_norm=catalog_snap,
+                min_hold_days=min_days,
+                blacklist=bl,
+            )
+            try:
+                rows = self._sort_onhold_rows(rows)
+            except Exception:
+                pass
+            ui_cap = panel_data.ON_HOLD_UI_MAX_ROWS
+            total_sorted = len(rows)
+            if ui_cap and total_sorted > ui_cap:
+                rows = rows[:ui_cap]
+            return rows, total_matched, total_sorted, ui_cap
+
+        def done(err, result):
+            if seq != self._onhold_render_seq:
+                return
+            if err:
+                if self._onhold_status_lbl:
+                    self._onhold_status_lbl.configure(text=f"On Hold 加载失败：{err}")
+                return
+            rows, total_matched, total_sorted, ui_cap = result
+            self._mining_onhold_render_token += 1
+            token = self._mining_onhold_render_token
+            self._mining_onhold_row_data = {}
+
+            def paint():
+                self._paint_onhold_rows(
+                    bundle, rows, total_matched, total_sorted, ui_cap,
+                    status_f, min_days, bl, token,
+                )
+
+            self._clear_onhold_tree_async(paint)
+
+        self._run_bg(worker, done)
+
+    def _paint_onhold_rows(
+        self, bundle, rows, total_matched, total_sorted, ui_cap,
+        status_f, min_days, bl, token,
+    ):
+        if not self._mining_onhold_tree:
+            return
+        image_cap = self._onhold_image_cap()
 
         def _onhold_status_hint(inserted):
             if not rows and not total_matched:
@@ -2579,12 +2673,13 @@ class PanelApp:
                 hint += " · 无日期行已排除"
             elif no_date and rows:
                 hint += f" · {no_date} 条无冻结日期"
-            if total_sorted > ON_HOLD_IMAGE_MAX_ROWS:
-                hint += f" · 仅前 {ON_HOLD_IMAGE_MAX_ROWS} 行加载缩略图"
+            if image_cap and total_sorted > image_cap:
+                hint += f" · 仅前 {image_cap} 行加载缩略图"
             return hint
 
         if self._onhold_status_lbl and not rows:
             self._onhold_status_lbl.configure(text=_onhold_status_hint(0))
+            return
 
         def fill_onhold_batch(start=0):
             if token != self._mining_onhold_render_token:
@@ -2618,7 +2713,7 @@ class PanelApp:
                         tags=("hold", "alt") if idx % 2 else ("hold",),
                     )
                     self._mining_onhold_row_data[iid] = row
-                    if idx < ON_HOLD_IMAGE_MAX_ROWS:
+                    if image_cap and idx < image_cap:
                         raw = self._image_url_for_item(row)
                         if raw:
                             self._schedule_onhold_row_image(iid, raw, token)
@@ -2629,7 +2724,7 @@ class PanelApp:
                     self._onhold_status_lbl.configure(
                         text=f"加载中 {end} / {len(rows)} 行…",
                     )
-                self.root.after(1, lambda s=end: fill_onhold_batch(s))
+                self.root.after(8, lambda s=end: fill_onhold_batch(s))
             elif self._onhold_status_lbl:
                 self._onhold_status_lbl.configure(text=_onhold_status_hint(len(rows)))
 
