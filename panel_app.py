@@ -35,7 +35,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.67"
+APP_VERSION = "1.9.68"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -46,6 +46,8 @@ SCROLL_UNITS = 8
 AUTO_EXPAND_ALL_GROUPS = 300
 MAX_EXPAND_GROUP_ITEMS = 80
 LOAD_IMAGES = os.getenv("PANEL_LOAD_IMAGES", "").lower() in ("1", "true", "yes")
+TREE_INSERT_BATCH_MS = int(os.getenv("PANEL_TREE_BATCH_MS", "16") or "16")
+WINDOW_RESIZE_DEBOUNCE_MS = int(os.getenv("PANEL_RESIZE_DEBOUNCE_MS", "280") or "280")
 
 C_HEADER = "#1e4f8a"
 C_BG = "#f0f4f8"
@@ -216,6 +218,10 @@ class PanelApp:
         self._stat_cards = {}
         self._stat_card_meta = {}
         self._quick_filter = None
+        self._pending_filtered_products = None
+        self._window_resizing = False
+        self._window_resize_after_id = None
+        self._last_root_geom = (0, 0)
 
         try:
             from runner_config import ensure_runner_config
@@ -261,7 +267,7 @@ class PanelApp:
         self._filter_combos = []
         self._island_filter_label = None
         self._island_filter_combo = None
-        self.load_images_var = tk.BooleanVar(value=True)
+        self.load_images_var = tk.BooleanVar(value=LOAD_IMAGES)
         self.result_count_var = tk.StringVar(value="")
         self._status_var = tk.StringVar(value="")
 
@@ -270,9 +276,39 @@ class PanelApp:
         self._inventory_health_attached = False
         self._build_ui(stores, regions)
         self.search_var.trace_add("write", lambda *_: self._debounce_refresh())
+        self.root.bind("<Configure>", self._on_window_configure, add="+")
         self.root.update_idletasks()
-        self.root.after_idle(self._attach_inventory_health_tab_if_needed)
-        self.root.after_idle(self.reload)
+        self.root.after(80, self._deferred_startup)
+
+    def _deferred_startup(self):
+        self._attach_inventory_health_tab_if_needed()
+        self.reload()
+
+    def _ui_interaction_paused(self):
+        return bool(getattr(self, "_window_resizing", False))
+
+    def _on_window_configure(self, event):
+        if event.widget is not self.root:
+            return
+        geom = (int(event.width), int(event.height))
+        if geom == self._last_root_geom:
+            return
+        self._last_root_geom = geom
+        self._window_resizing = True
+        if self._window_resize_after_id:
+            try:
+                self.root.after_cancel(self._window_resize_after_id)
+            except tk.TclError:
+                pass
+        self._window_resize_after_id = self.root.after(
+            WINDOW_RESIZE_DEBOUNCE_MS, self._on_window_configure_done,
+        )
+
+    def _on_window_configure_done(self):
+        self._window_resize_after_id = None
+        self._window_resizing = False
+        if self._images_enabled():
+            self._debounce_visible_images()
 
     def _setup_styles(self):
         style = ttk.Style(self.root)
@@ -1141,7 +1177,7 @@ class PanelApp:
     def _debounce_visible_images(self):
         if self._scroll_after_id:
             self.root.after_cancel(self._scroll_after_id)
-        self._scroll_after_id = self.root.after(80, self._load_visible_images)
+        self._scroll_after_id = self.root.after(160, self._load_visible_images)
 
     def _debounce_refresh(self):
         if self._filter_after_id:
@@ -1442,8 +1478,8 @@ class PanelApp:
         threading.Thread(target=_thread, daemon=True).start()
 
     def _schedule_store_prewarm(self, region, current_store, include_discontinued=False):
-        """后台预热其余店面（仅预热在产数据，避免与停产加载抢 CPU）。"""
-        if os.getenv("PANEL_SKIP_PREWARM", "").strip().lower() in ("1", "true", "yes"):
+        """后台预热其余店面（默认关闭；设 PANEL_PREWARM=1 开启）。"""
+        if os.getenv("PANEL_PREWARM", "").strip().lower() not in ("1", "true", "yes"):
             return
         stores = list(self.store_combo.cget("values")) if self.store_combo else []
         others = [
@@ -1549,7 +1585,7 @@ class PanelApp:
             self._tree.item(iid, image=photo or self._placeholder_photo)
 
     def _schedule_row_image(self, iid, raw, render_token):
-        if not raw:
+        if not raw or self._ui_interaction_paused():
             return
         cache_key = f"{raw}@{THUMB[0]}x{THUMB[1]}"
         if cache_key in self._img_cache:
@@ -1678,7 +1714,7 @@ class PanelApp:
             self._open_image_for_item(item)
 
     def _load_visible_images(self):
-        if not self._images_enabled() or not self._tree:
+        if not self._images_enabled() or not self._tree or self._ui_interaction_paused():
             return
         token = self._render_token
         for iid in self._visible_iids()[:IMAGE_BATCH]:
@@ -2085,8 +2121,13 @@ class PanelApp:
             elif disc_total == 0 and not self._loaded_full_stock:
                 self.result_count_var.set("停产数据未加载，请再次选择「停产 → 已停产」或点「刷新数据」")
         self._status_var.set(f"正在渲染 {len(filtered)} 条…")
-        self.root.update_idletasks()
-        self._render_tree(filtered)
+        self._pending_filtered_products = filtered
+        if self._products_tab_selected():
+            self._render_tree(filtered)
+        else:
+            self._status_var.set(
+                f"就绪 · {len(filtered)} 条（在「产品明细」页渲染表格；当前未打开该页以加快响应）"
+            )
         prefix_key = (s.get("region"), s.get("store"))
         if (
             prefix_key != self._prefix_rendered_for
@@ -2177,6 +2218,14 @@ class PanelApp:
             return ("warn",)
         return ("low",)
 
+    def _products_tab_selected(self):
+        if not self._notebook or not self._tab_products:
+            return True
+        try:
+            return str(self._notebook.select()) == str(self._tab_products)
+        except tk.TclError:
+            return True
+
     def _on_notebook_tab_change(self, _event=None):
         if not self._notebook:
             return
@@ -2184,6 +2233,10 @@ class PanelApp:
             selected = self._notebook.select()
         except Exception:
             return
+        if selected == str(self._tab_products):
+            pending = self._pending_filtered_products
+            if pending is not None and self._cached_products:
+                self.root.after_idle(lambda p=pending: self._render_tree(p))
         mining_tabs = tuple(
             str(t) for t in (
                 self._tab_mining, self._tab_onhold, self._tab_transfer, self._tab_volume,
@@ -2727,7 +2780,7 @@ class PanelApp:
             self._mining_onhold_tree.item(iid, image=photo or self._placeholder_photo)
 
     def _schedule_onhold_row_image(self, iid, raw, render_token):
-        if not raw or not self._images_enabled():
+        if not raw or not self._images_enabled() or self._ui_interaction_paused():
             return
         cache_key = f"{raw}@{THUMB[0]}x{THUMB[1]}"
         if cache_key in self._img_cache:
@@ -4140,15 +4193,6 @@ class PanelApp:
     def _render_tree(self, products):
         self._render_token += 1
         render_token = self._render_token
-        self._lazy_groups.clear()
-        self._group_labels.clear()
-        if self._tree.get_children():
-            self._tree.delete(*self._tree.get_children())
-        self._products_by_iid.clear()
-        self._iid_to_url.clear()
-        self._pending_urls.clear()
-        self._loading_urls.clear()
-
         grouped = self._group_products(products)
         store_specific = self._cached_summary.get(
             "store_specific", self._is_store_selected()
@@ -4189,22 +4233,55 @@ class PanelApp:
             return parent
 
         def fill_batch(start=0):
-            if render_token != self._render_token:
+            if render_token != self._render_token or self._ui_interaction_paused():
+                if render_token == self._render_token and self._ui_interaction_paused():
+                    self.root.after(
+                        WINDOW_RESIZE_DEBOUNCE_MS + 40,
+                        lambda s=start: fill_batch(s),
+                    )
                 return
             end = min(start + 60, len(grouped))
             for family_label, items in grouped[start:end]:
                 insert_group(family_label, items)
             if end < len(grouped):
-                self.root.after(1, lambda s=end: fill_batch(s))
+                self.root.after(TREE_INSERT_BATCH_MS, lambda s=end: fill_batch(s))
             else:
                 self._update_group_tool_buttons()
                 self._load_visible_images()
 
-        if grouped:
-            self.root.after_idle(lambda: fill_batch(0))
-        else:
-            self._update_group_tool_buttons()
-            self._load_visible_images()
+        def start_render():
+            self._lazy_groups.clear()
+            self._group_labels.clear()
+            self._products_by_iid.clear()
+            self._iid_to_url.clear()
+            self._pending_urls.clear()
+            self._loading_urls.clear()
+            if grouped:
+                self.root.after_idle(lambda: fill_batch(0))
+            else:
+                self._update_group_tool_buttons()
+                self._load_visible_images()
+
+        children = list(self._tree.get_children()) if self._tree else []
+        if not self._tree:
+            return
+        if len(children) <= 200:
+            if children:
+                self._tree.delete(*children)
+            start_render()
+            return
+
+        def clear_chunk(offset=0):
+            if render_token != self._render_token:
+                return
+            chunk = children[offset:offset + 350]
+            if chunk:
+                self._tree.delete(*chunk)
+                self.root.after(1, lambda: clear_chunk(offset + 350))
+            else:
+                start_render()
+
+        clear_chunk(0)
 
     def run(self):
         self.root.mainloop()
