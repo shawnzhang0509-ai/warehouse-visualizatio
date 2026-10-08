@@ -94,6 +94,49 @@ class ExportFilteredTests(unittest.TestCase):
         codes = [r["code"] for r in rows]
         self.assertEqual(codes, ["111-001"])
         self.assertEqual(total, 1)
+        self.assertEqual(rows[0].get("sales_name"), "")
+
+    def test_on_hold_sales_name_column(self):
+        bundle = {
+            "on_hold_rows": [
+                {
+                    "Sku": "222-001",
+                    "ProductName": "Sofa",
+                    "StockOnHoldStatus": "On Hold - Paid Order",
+                    "OrderNo": "O1",
+                    "SalesName": "Alice Chen",
+                    "Qty": 2,
+                    "WarehouseName": "Calgary",
+                },
+            ]
+        }
+        rows, total = panel_data.list_on_hold_analysis(bundle, status_filter="")
+        self.assertEqual(total, 1)
+        self.assertEqual(rows[0]["sales_name"], "Alice Chen")
+        export_rows = [panel_data.format_onhold_export_row(r) for r in rows]
+        self.assertEqual(export_rows[0]["sales_name"], "Alice Chen")
+
+    def test_list_on_hold_export_csv(self):
+        bundle = {
+            "on_hold_rows": [
+                {
+                    "Sku": "111-001",
+                    "ProductName": "Keep",
+                    "StockOnHoldStatus": "On Hold - Unpaid Order",
+                    "OrderNo": "A1",
+                    "TicketNo": "T1",
+                    "OnHoldDate": "2025-01-01",
+                    "Qty": 1,
+                    "WarehouseName": "CHCH",
+                },
+            ]
+        }
+        rows, total = panel_data.list_on_hold_analysis(
+            bundle,
+            status_filter="On Hold - Unpaid Order",
+            min_hold_days=360,
+            max_rows=0,
+        )
         export_rows = [panel_data.format_onhold_export_row(r) for r in rows]
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "onhold.csv"

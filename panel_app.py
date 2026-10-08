@@ -35,7 +35,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.61"
+APP_VERSION = "1.9.62"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -110,6 +110,7 @@ ONHOLD_SORTABLE_COLS = {
     "status": lambda r: (r.get("status") or "").lower(),
     "order_no": lambda r: (r.get("order_no") or "").lower(),
     "ticket_no": lambda r: (r.get("ticket_no") or "").lower(),
+    "sales_name": lambda r: (r.get("sales_name") or "").lower(),
     "hold_days": lambda r: (
         r.get("hold_days") if r.get("hold_days") is not None else -1
     ),
@@ -884,7 +885,10 @@ class PanelApp:
         self._onhold_status_lbl.pack(anchor="e", padx=8, pady=(0, 4))
         onhold_wrap = tk.Frame(onhold_tab, bg="white")
         onhold_wrap.pack(fill=tk.BOTH, expand=True)
-        ohcols = ("code", "name", "status", "order_no", "ticket_no", "hold_days", "hold_since", "qty", "warehouse")
+        ohcols = (
+            "code", "name", "status", "order_no", "ticket_no", "sales_name",
+            "hold_days", "hold_since", "qty", "warehouse",
+        )
         self._mining_onhold_tree = ttk.Treeview(
             onhold_wrap, columns=ohcols, show="tree headings", selectmode="browse",
         )
@@ -893,6 +897,7 @@ class PanelApp:
         onhold_headings = {
             "code": ("编码", 92), "name": ("名称", 180), "status": ("On Hold 类型", 128),
             "order_no": ("订单号", 88), "ticket_no": ("Ticket", 72),
+            "sales_name": ("销售", 72),
             "hold_days": ("冻结天数", 64), "hold_since": ("起始日", 84), "qty": ("数量", 52),
             "warehouse": ("仓", 120),
         }
@@ -2596,6 +2601,7 @@ class PanelApp:
                             row.get("status") or "-",
                             row.get("order_no") or "-",
                             row.get("ticket_no") or "-",
+                            row.get("sales_name") or "-",
                             hold_days_text,
                             row.get("hold_since") or "-",
                             qty_disp,

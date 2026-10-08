@@ -858,6 +858,13 @@ ON_HOLD_TICKET_KEYS = [
     "ticket_id", "serviceticket", "service_ticket", "caseno", "case_no", "工单号",
     "工单", "ticketref", "notes",
 ]
+ON_HOLD_SALES_KEYS = [
+    "salesname", "sales_name", "salesperson", "sales_person", "salesrep", "sales_rep",
+    "salesrepname", "sales_rep_name", "sellername", "seller_name", "soldby", "sold_by",
+    "salesstaff", "sales_staff", "salesman", "saleswoman", "salesassociate",
+    "accountmanager", "account_manager", "repname", "rep_name",
+    "销售", "销售名", "销售名字", "销售姓名", "销售员", "销售人员", "销售顾问", "业务员",
+]
 ON_HOLD_STOCK_ID_KEYS = ["stockid", "stock_id", "lineid", "line_id", "inventoryid"]
 ON_HOLD_ANALYSIS_MAX_ROWS = 15000
 # 界面 Treeview 最多渲染行数（排序后再截断，避免上千行+缩略图卡死）
@@ -1961,6 +1968,22 @@ def _pick_on_hold_order_no(row):
     return ""
 
 
+def _pick_on_hold_sales_name(row):
+    val = _pick_fuzzy(row, ON_HOLD_SALES_KEYS)
+    if val is not None and str(val).strip():
+        return str(val).strip()
+    lower = _column_key_map(row)
+    for col_norm, cell in lower.items():
+        if not any(tok in col_norm for tok in ("sales", "seller", "soldby", "repname", "销售", "业务员")):
+            continue
+        if any(skip in col_norm for skip in ("order", "sku", "product", "qty", "status", "hold", "warehouse")):
+            continue
+        text = str(cell or "").strip()
+        if text:
+            return text
+    return ""
+
+
 def _pick_on_hold_ticket_no(row, order_no=""):
     val = _pick_fuzzy(row, ON_HOLD_TICKET_KEYS)
     if val is not None and str(val).strip():
@@ -2052,6 +2075,7 @@ def _parse_on_hold_detail_rows(rows):
         ).strip()
         order_no = _pick_on_hold_order_no(row)
         ticket_no = _pick_on_hold_ticket_no(row, order_no=order_no)
+        sales_name = _pick_on_hold_sales_name(row)
         hold_at = _parse_hold_datetime(_pick_fuzzy(row, ON_HOLD_DATE_KEYS))
         hold_days = _hold_days_from_row(row, hold_at)
         qty = _on_hold_qty_from_row(row)
@@ -2066,6 +2090,7 @@ def _parse_on_hold_detail_rows(rows):
             "status": status,
             "order_no": order_no,
             "ticket_no": ticket_no,
+            "sales_name": sales_name,
             "warehouse": warehouse,
             "qty": qty,
             "hold_at": hold_at,
@@ -2279,6 +2304,7 @@ def list_on_hold_analysis(
             "status": display_status,
             "order_no": line.get("order_no") or "",
             "ticket_no": line.get("ticket_no") or "",
+            "sales_name": line.get("sales_name") or "",
             "hold_days": line.get("hold_days"),
             "hold_since": line.get("hold_since") or "",
             "hold_at": line.get("hold_at"),
@@ -3541,7 +3567,7 @@ def write_export_csv(path, fieldnames, rows):
 
 
 ONHOLD_EXPORT_FIELDS = (
-    "code", "name", "family", "status", "order_no", "ticket_no",
+    "code", "name", "family", "status", "order_no", "ticket_no", "sales_name",
     "hold_days", "hold_since", "qty", "warehouse",
 )
 ONHOLD_EXPORT_HEADERS = {
@@ -3551,6 +3577,7 @@ ONHOLD_EXPORT_HEADERS = {
     "status": "On Hold 类型",
     "order_no": "订单号",
     "ticket_no": "Ticket",
+    "sales_name": "销售",
     "hold_days": "冻结天数",
     "hold_since": "起始日",
     "qty": "数量",
@@ -3590,6 +3617,7 @@ def format_onhold_export_row(row):
         "status": row.get("status") or "",
         "order_no": row.get("order_no") or "",
         "ticket_no": row.get("ticket_no") or "",
+        "sales_name": row.get("sales_name") or "",
         "hold_days": "" if hold_days is None else hold_days,
         "hold_since": row.get("hold_since") or "",
         "qty": qty_disp,

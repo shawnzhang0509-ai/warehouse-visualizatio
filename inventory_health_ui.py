@@ -67,11 +67,25 @@ def sync_inventory_health_island_ui(app):
     combo = getattr(app, "_ih_island_combo", None)
     if label is None or combo is None:
         return
+    pack_before = None
+    anchor = getattr(app, "_ih_category_anchor", None)
+    if anchor is not None:
+        try:
+            if anchor.winfo_ismapped():
+                pack_before = anchor
+        except tk.TclError:
+            pack_before = None
     if supported:
         if not label.winfo_ismapped():
-            label.pack(side=tk.LEFT, padx=(6, 0), before=getattr(app, "_ih_category_anchor", None))
+            if pack_before is not None:
+                label.pack(side=tk.LEFT, padx=(6, 0), before=pack_before)
+            else:
+                label.pack(side=tk.LEFT, padx=(6, 0))
         if not combo.winfo_ismapped():
-            combo.pack(side=tk.LEFT, padx=4, before=getattr(app, "_ih_category_anchor", None))
+            if pack_before is not None:
+                combo.pack(side=tk.LEFT, padx=4, before=pack_before)
+            else:
+                combo.pack(side=tk.LEFT, padx=4)
     else:
         label.pack_forget()
         combo.pack_forget()
@@ -159,7 +173,9 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
         "<<ComboboxSelected>>",
         lambda _e: app._render_inventory_health(force=True),
     )
-    sync_inventory_health_island_ui(app)
+    if pd.island_stock_supported(app._current_region() if hasattr(app, "_current_region") else "NZ"):
+        app._ih_island_label.pack(side=tk.LEFT, padx=(6, 0))
+        app._ih_island_combo.pack(side=tk.LEFT, padx=4)
     app._ih_category_anchor.pack(side=tk.LEFT)
     ttk.Entry(toolbar, width=10, textvariable=app._ih_category_var).pack(side=tk.LEFT, padx=4)
     ttk.Label(toolbar, text="SKU").pack(side=tk.LEFT)

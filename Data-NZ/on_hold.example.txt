@@ -2,6 +2,7 @@
 -- 复制为 on_hold.txt 后按业务修改；on_hold.txt 不提交 Git（每人本地 SQL）
 --
 -- 列名看板会自动识别：WarehouseName、Sku、OnHoldQty、StockOnHoldStatus 等
+-- 可选销售姓名：SalesName / 销售 / 销售名字 等（显示在 On Hold 分析「销售」列）
 -- 可选冻结日期列（用于「On Hold 分析」算天数）：OnHoldDate / HoldSince / ModifiedOn 等
 
 -- 分析页按「每一行」展示，请勿按 SKU 汇总；需带订单号或 Ticket、冻结日期、仓名
