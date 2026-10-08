@@ -59,36 +59,38 @@ def _populate_ih_channel_combo(app):
         app._ih_channel_combo["values"] = values
 
 
+def _widget_is_pack_managed(widget) -> bool:
+    if widget is None:
+        return False
+    try:
+        widget.pack_info()
+        return True
+    except tk.TclError:
+        return False
+
+
 def sync_inventory_health_island_ui(app):
     """仅 NZ 显示库存健康页的「南北岛」筛选；切换地区时同步显隐。"""
     region = app._current_region() if hasattr(app, "_current_region") else "NZ"
     supported = pd.island_stock_supported(region)
-    label = getattr(app, "_ih_island_label", None)
-    combo = getattr(app, "_ih_island_combo", None)
-    if label is None or combo is None:
+    slot = getattr(app, "_ih_island_slot", None)
+    if slot is None:
         return
-    pack_before = None
     anchor = getattr(app, "_ih_category_anchor", None)
-    if anchor is not None:
-        try:
-            if anchor.winfo_ismapped():
-                pack_before = anchor
-        except tk.TclError:
-            pack_before = None
     if supported:
-        if not label.winfo_ismapped():
-            if pack_before is not None:
-                label.pack(side=tk.LEFT, padx=(6, 0), before=pack_before)
-            else:
-                label.pack(side=tk.LEFT, padx=(6, 0))
-        if not combo.winfo_ismapped():
-            if pack_before is not None:
-                combo.pack(side=tk.LEFT, padx=4, before=pack_before)
-            else:
-                combo.pack(side=tk.LEFT, padx=4)
+        if not _widget_is_pack_managed(slot):
+            try:
+                if _widget_is_pack_managed(anchor):
+                    slot.pack(side=tk.LEFT, padx=(6, 0), before=anchor)
+                else:
+                    slot.pack(side=tk.LEFT, padx=(6, 0))
+            except tk.TclError:
+                slot.pack(side=tk.LEFT, padx=(6, 0))
     else:
-        label.pack_forget()
-        combo.pack_forget()
+        try:
+            slot.pack_forget()
+        except tk.TclError:
+            pass
         if hasattr(app, "_ih_island_var"):
             app._ih_island_var.set("全部")
 
@@ -160,22 +162,22 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
         "<<ComboboxSelected>>",
         lambda _e: app._render_inventory_health(force=True),
     )
-    app._ih_category_anchor = ttk.Label(toolbar, text="分类")
-    app._ih_island_label = ttk.Label(toolbar, text="南北岛")
+    app._ih_island_slot = tk.Frame(toolbar)
+    app._ih_island_label = ttk.Label(app._ih_island_slot, text="南北岛")
+    app._ih_island_label.pack(side=tk.LEFT)
     app._ih_island_combo = ttk.Combobox(
-        toolbar,
+        app._ih_island_slot,
         width=6,
         textvariable=app._ih_island_var,
         state="readonly",
         values=("全部", "北岛", "南岛"),
     )
+    app._ih_island_combo.pack(side=tk.LEFT, padx=4)
     app._ih_island_combo.bind(
         "<<ComboboxSelected>>",
         lambda _e: app._render_inventory_health(force=True),
     )
-    if pd.island_stock_supported(app._current_region() if hasattr(app, "_current_region") else "NZ"):
-        app._ih_island_label.pack(side=tk.LEFT, padx=(6, 0))
-        app._ih_island_combo.pack(side=tk.LEFT, padx=4)
+    app._ih_category_anchor = ttk.Label(toolbar, text="分类")
     app._ih_category_anchor.pack(side=tk.LEFT)
     ttk.Entry(toolbar, width=10, textvariable=app._ih_category_var).pack(side=tk.LEFT, padx=4)
     ttk.Label(toolbar, text="SKU").pack(side=tk.LEFT)
@@ -333,6 +335,7 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
         wraplength=900, justify=tk.LEFT,
     )
     formula.pack(anchor="w", padx=8, pady=(0, 6))
+    sync_inventory_health_island_ui(app)
 
 
 def render_inventory_health(app, force=False):

@@ -35,7 +35,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.62"
+APP_VERSION = "1.9.63"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -1049,7 +1049,7 @@ class PanelApp:
         import inventory_health_ui as ih_ui
 
         ih_ui.attach_inventory_health_tab(self, self._notebook, {"muted": C_MUTED})
-        self._sync_region_island_ui()
+        self.root.after_idle(self._sync_region_island_ui)
 
         for widget in (
             mining_inner, self._tab_mining, self._tab_onhold, self._tab_transfer,
