@@ -35,7 +35,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.65"
+APP_VERSION = "1.9.66"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -175,6 +175,9 @@ class PanelApp:
         self._volume_channel_pick_var = None
         self._volume_channel_options = []
         self._volume_last_report = None
+        self._volume_wh_row_meta = {}
+        self._volume_channel_row_meta = {}
+        self._volume_split_island_var = tk.BooleanVar(value=True)
         self._onhold_status_lbl = None
         self._transfer_status_lbl = None
         self._mining_rendered_for = None
@@ -987,6 +990,21 @@ class PanelApp:
         tk.Label(vol_toolbar, text="或手动", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(side=tk.LEFT)
         ttk.Entry(vol_toolbar, width=16, textvariable=self._volume_channel_var).pack(side=tk.LEFT, padx=(6, 8))
         ttk.Button(vol_toolbar, text="应用筛选", command=self._refresh_volume_tab).pack(side=tk.LEFT)
+        self._volume_split_island_cb = ttk.Checkbutton(
+            vol_toolbar,
+            text="渠道分南北岛",
+            variable=self._volume_split_island_var,
+            command=self._refresh_volume_tab,
+        )
+        self._volume_split_island_cb.pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Button(
+            vol_toolbar, text="展开渠道岛",
+            command=self._volume_expand_all_channels,
+        ).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(
+            vol_toolbar, text="折叠渠道岛",
+            command=self._volume_collapse_all_channels,
+        ).pack(side=tk.LEFT, padx=(4, 0))
         self._volume_status_lbl = tk.Label(
             vol_tab,
             text="在库：ERP；在途：po.csv 或刷新时自动执行 Data-NZ/PO.txt（与 SSMS 同库）",
@@ -1001,7 +1019,7 @@ class PanelApp:
         vol_panes.add(wh_frame, minsize=420)
         tk.Label(
             ch_frame,
-            text="按渠道合计（在库+在途 PO；双击筛选）",
+            text="按渠道合计（在库+在途 PO；双击筛选；可展开北岛/南岛）",
             bg="white", fg=C_TEXT, font=("Segoe UI", 9, "bold"),
         ).pack(anchor="w", padx=4, pady=(0, 4))
         ch_wrap = tk.Frame(ch_frame, bg="white")
@@ -1009,9 +1027,11 @@ class PanelApp:
         self._volume_channel_tree = ttk.Treeview(
             ch_wrap,
             columns=("channel", "stock", "po", "total"),
-            show="headings",
+            show="tree headings",
             style="Prefix.Treeview",
         )
+        self._volume_channel_tree.heading("#0", text="")
+        self._volume_channel_tree.column("#0", width=18, stretch=False)
         self._volume_channel_tree.heading("channel", text="渠道")
         self._volume_channel_tree.heading("stock", text="在库(柜)")
         self._volume_channel_tree.heading("po", text="在途(柜)")
@@ -1025,8 +1045,9 @@ class PanelApp:
         self._volume_channel_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         ch_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._volume_channel_tree.bind("<Double-1>", self._on_volume_channel_double_click)
+        self._volume_channel_tree.bind("<<TreeviewSelect>>", self._on_volume_channel_select)
         tk.Label(
-            wh_frame, text="按南北岛（在库分仓；在途仅南北岛总在途）",
+            wh_frame, text="按南北岛（在库分仓；点在途行看渠道明细）",
             bg="white", fg=C_TEXT, font=("Segoe UI", 9, "bold"),
         ).pack(anchor="w", padx=4, pady=(0, 4))
         wh_wrap = tk.Frame(wh_frame, bg="white")
@@ -1052,6 +1073,37 @@ class PanelApp:
         vol_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._volume_tree.tag_configure("island_hdr", font=("Segoe UI", 9, "bold"), background="#f1f5f9")
         self._volume_tree.tag_configure("island_transit", background="#e0f2fe")
+        self._volume_tree.bind("<<TreeviewSelect>>", self._on_volume_wh_select)
+        detail_wrap = tk.Frame(vol_tab, bg="white")
+        detail_wrap.pack(fill=tk.BOTH, expand=False, padx=4, pady=(0, 6))
+        self._volume_detail_title = tk.Label(
+            detail_wrap,
+            text="岛别渠道明细：点右侧「北岛/南岛总在途」或左侧渠道下的岛行",
+            bg="white", fg=C_MUTED, font=("Segoe UI", 9),
+        )
+        self._volume_detail_title.pack(anchor="w", padx=4, pady=(0, 2))
+        detail_inner = tk.Frame(detail_wrap, bg="white", height=140)
+        detail_inner.pack(fill=tk.BOTH, expand=True)
+        detail_inner.pack_propagate(False)
+        self._volume_detail_tree = ttk.Treeview(
+            detail_inner,
+            columns=("channel", "stock", "po", "total"),
+            show="headings",
+            height=5,
+        )
+        for col, text, w in (
+            ("channel", "渠道", 64),
+            ("stock", "在库(柜)", 80),
+            ("po", "在途(柜)", 80),
+            ("total", "合计(柜)", 80),
+        ):
+            self._volume_detail_tree.heading(col, text=text)
+            self._volume_detail_tree.column(col, width=w, anchor="center")
+        det_scroll = ttk.Scrollbar(detail_inner, orient="vertical", command=self._volume_detail_tree.yview)
+        self._volume_detail_tree.configure(yscrollcommand=det_scroll.set)
+        self._volume_detail_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        det_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._volume_detail_tree.tag_configure("sum", font=("Segoe UI", 9, "bold"), background="#f8fafc")
 
         for widget in (
             mining_inner, self._tab_mining, self._tab_onhold, self._tab_transfer,
@@ -1189,6 +1241,14 @@ class PanelApp:
             sync_inventory_health_island_ui(self)
         except ImportError:
             pass
+        vol_cb = getattr(self, "_volume_split_island_cb", None)
+        if vol_cb is not None:
+            if supported:
+                vol_cb.pack_configure(side=tk.LEFT, padx=(12, 0))
+            else:
+                vol_cb.pack_forget()
+                if getattr(self, "_volume_split_island_var", None):
+                    self._volume_split_island_var.set(False)
 
     def _sync_filter_combos(self):
         for combo, var in getattr(self, "_filter_combos", ()):
@@ -1383,6 +1443,8 @@ class PanelApp:
 
     def _schedule_store_prewarm(self, region, current_store, include_discontinued=False):
         """后台预热其余店面（仅预热在产数据，避免与停产加载抢 CPU）。"""
+        if os.getenv("PANEL_SKIP_PREWARM", "").strip().lower() in ("1", "true", "yes"):
+            return
         stores = list(self.store_combo.cget("values")) if self.store_combo else []
         others = [
             s for s in stores
@@ -1720,6 +1782,8 @@ class PanelApp:
 
     def _apply_loaded_data(self, data, region):
         self._cached_products = data["products"]
+        self._catalog_by_norm_cache = None
+        self._catalog_by_norm_cache_key = None
         self._cached_summary = data["summary"]
         self._cached_blacklist_meta = {
             "blacklist_count": data.get("blacklist_count", 0),
@@ -2177,16 +2241,179 @@ class PanelApp:
             self._volume_channel_var.set(pick)
         self._refresh_volume_tab()
 
+    def _volume_island_ui_enabled(self):
+        region = self._cached_summary.get("region") or self._current_region()
+        return (
+            panel_data.island_stock_supported(region)
+            and bool(self._volume_split_island_var.get())
+        )
+
+    def _volume_fill_channel_tree(self, channel_rows):
+        tree = self._volume_channel_tree
+        if not tree:
+            return
+        self._volume_channel_row_meta = {}
+        if tree.get_children():
+            tree.delete(*tree.get_children())
+        split = self._volume_island_ui_enabled()
+        for row in channel_rows or []:
+            ch = row.get("channel") or ""
+            pid = tree.insert(
+                "", tk.END,
+                values=(
+                    ch,
+                    row.get("volume_containers") or 0,
+                    row.get("po_containers") or 0,
+                    row.get("total_containers") or 0,
+                ),
+            )
+            self._volume_channel_row_meta[pid] = {"kind": "channel", "channel": ch, "row": row}
+            islands = row.get("islands") or {}
+            if split and islands:
+                for isl in ("北岛", "南岛"):
+                    isl_d = islands.get(isl) or {}
+                    cid = tree.insert(
+                        pid, tk.END,
+                        values=(
+                            f"  {isl}",
+                            isl_d.get("volume_containers") or 0,
+                            isl_d.get("po_containers") or 0,
+                            isl_d.get("total_containers") or 0,
+                        ),
+                    )
+                    self._volume_channel_row_meta[cid] = {
+                        "kind": "island", "channel": ch, "island": isl, "row": isl_d,
+                    }
+                tree.item(pid, open=False)
+
+    def _volume_expand_all_channels(self):
+        tree = self._volume_channel_tree
+        if not tree:
+            return
+        for iid in tree.get_children():
+            tree.item(iid, open=True)
+
+    def _volume_collapse_all_channels(self):
+        tree = self._volume_channel_tree
+        if not tree:
+            return
+        for iid in tree.get_children():
+            tree.item(iid, open=False)
+
+    def _volume_fill_island_detail(self, title, rows, sum_stock=0.0, sum_po=0.0):
+        tree = self._volume_detail_tree
+        if not tree:
+            return
+        if self._volume_detail_title:
+            self._volume_detail_title.configure(text=title)
+        if tree.get_children():
+            tree.delete(*tree.get_children())
+        for r in rows or []:
+            st = r.get("volume_containers") or 0
+            po = r.get("po_containers") or 0
+            tree.insert(
+                "", tk.END,
+                values=(r.get("channel") or "", st, po, round(float(st) + float(po), 2)),
+            )
+        if rows:
+            tree.insert(
+                "", tk.END,
+                values=(
+                    "合计",
+                    round(sum_stock, 2),
+                    round(sum_po, 2),
+                    round(sum_stock + sum_po, 2),
+                ),
+                tags=("sum",),
+            )
+
+    def _volume_show_island_po_detail(self, island):
+        report = self._volume_last_report or {}
+        po = report.get("po") or {}
+        rows = list((po.get("island_channel_po") or {}).get(island) or [])
+        stock_rows = list((report.get("island_channel_stock") or {}).get(island) or [])
+        stock_map = {r["channel"]: r.get("volume_containers") or 0 for r in stock_rows}
+        merged = []
+        channels = sorted(
+            set(stock_map) | {r["channel"] for r in rows},
+            key=lambda c: (-(float(stock_map.get(c, 0)) + float(
+                next((x.get("po_containers") or 0 for x in rows if x["channel"] == c), 0)
+            )), c),
+        )
+        sum_st = sum_po = 0.0
+        for ch in channels:
+            po_v = float(next((x.get("po_containers") or 0 for x in rows if x["channel"] == ch), 0))
+            st_v = float(stock_map.get(ch, 0))
+            if po_v <= 0 and st_v <= 0:
+                continue
+            merged.append({
+                "channel": ch,
+                "volume_containers": round(st_v, 2),
+                "po_containers": round(po_v, 2),
+            })
+            sum_st += st_v
+            sum_po += po_v
+        total_po = float((po.get("island_totals") or {}).get(island) or sum_po)
+        title = (
+            f"{island} 渠道明细（在途合计 {round(total_po, 2)} 柜；在库分渠道见下表）"
+        )
+        self._volume_fill_island_detail(title, merged, sum_st, sum_po)
+
+    def _on_volume_channel_select(self, _event=None):
+        tree = self._volume_channel_tree
+        if not tree:
+            return
+        sel = tree.selection()
+        if not sel:
+            return
+        meta = (self._volume_channel_row_meta or {}).get(sel[0])
+        if not meta or meta.get("kind") != "island":
+            return
+        isl = meta.get("island") or ""
+        ch = meta.get("channel") or ""
+        row = meta.get("row") or {}
+        self._volume_fill_island_detail(
+            f"渠道 {ch} · {isl}（在库 {row.get('volume_containers') or 0} / 在途 {row.get('po_containers') or 0} 柜）",
+            [{"channel": ch, **row}],
+            float(row.get("volume_containers") or 0),
+            float(row.get("po_containers") or 0),
+        )
+
+    def _on_volume_wh_select(self, _event=None):
+        tree = self._volume_tree
+        if not tree:
+            return
+        sel = tree.selection()
+        if not sel:
+            return
+        meta = (self._volume_wh_row_meta or {}).get(sel[0]) or {}
+        row_type = meta.get("row_type")
+        island = meta.get("island")
+        if row_type == "island_transit" and island:
+            self._volume_show_island_po_detail(island)
+        elif row_type == "island_header" and island:
+            self._volume_show_island_po_detail(island)
+
     def _on_volume_channel_double_click(self, _event=None):
         if not self._volume_channel_tree:
             return
         sel = self._volume_channel_tree.selection()
         if not sel:
             return
-        vals = self._volume_channel_tree.item(sel[0], "values")
-        if not vals:
-            return
-        ch = str(vals[0]).strip()
+        meta = (self._volume_channel_row_meta or {}).get(sel[0]) or {}
+        ch = meta.get("channel") or ""
+        if meta.get("kind") == "island":
+            vals = self._volume_channel_tree.item(sel[0], "values")
+            if vals:
+                ch = str(vals[0]).strip().lstrip("└").strip()
+        if not ch:
+            vals = self._volume_channel_tree.item(sel[0], "values")
+            if vals:
+                ch = str(vals[0]).strip()
+        if not ch or ch.startswith("北") or ch.startswith("南"):
+            parent = self._volume_channel_tree.parent(sel[0])
+            if parent:
+                ch = (self._volume_channel_row_meta.get(parent) or {}).get("channel") or ch
         if not ch:
             return
         self._volume_channel_var.set(ch)
@@ -2211,7 +2438,9 @@ class PanelApp:
                     r for r in stock_channels if str(r.get("channel") or "").upper() in channels
                 ]
             po_report = report.get("po") or wv.build_po_report(region, channels or None)
-            channel_rows = wv.merge_channel_breakdown(stock_channels, po_report)
+            channel_rows = wv.merge_channel_breakdown(
+                stock_channels, po_report, region=region,
+            )
             channel_names = [r["channel"] for r in channel_rows]
             return report, channel_rows, channel_names
 
@@ -2225,28 +2454,21 @@ class PanelApp:
             self._volume_channel_options = ["全部渠道"] + channel_names
             if getattr(self, "_volume_channel_combo", None):
                 self._volume_channel_combo.configure(values=self._volume_channel_options)
-            if self._volume_channel_tree:
-                if self._volume_channel_tree.get_children():
-                    self._volume_channel_tree.delete(*self._volume_channel_tree.get_children())
-                for row in channel_rows or []:
-                    self._volume_channel_tree.insert(
-                        "", tk.END,
-                        values=(
-                            row.get("channel") or "",
-                            row.get("volume_containers") or 0,
-                            row.get("po_containers") or 0,
-                            row.get("total_containers") or 0,
-                        ),
-                    )
+            self._volume_fill_channel_tree(channel_rows)
+            self._volume_wh_row_meta = {}
             if self._volume_tree.get_children():
                 self._volume_tree.delete(*self._volume_tree.get_children())
             for row in report.get("data") or []:
                 row_type = row.get("row_type") or "warehouse"
                 if row_type == "island_header":
-                    self._volume_tree.insert(
+                    iid = self._volume_tree.insert(
                         "", tk.END, tags=("island_hdr",),
                         values=(row.get("name") or "", "", "", "", "", "", ""),
                     )
+                    self._volume_wh_row_meta[iid] = {
+                        "row_type": row_type,
+                        "island": row.get("island"),
+                    }
                     continue
                 util = row.get("utilization_pct")
                 util_txt = f"{util}%" if util is not None else "-"
@@ -2260,7 +2482,7 @@ class PanelApp:
                     stock_val = row.get("volume_containers") or 0
                     po_val = 0
                     m3_val = row.get("volume_m3") or "-"
-                self._volume_tree.insert(
+                iid = self._volume_tree.insert(
                     "", tk.END, tags=tags,
                     values=(
                         row.get("name") or "",
@@ -2272,6 +2494,10 @@ class PanelApp:
                         m3_val,
                     ),
                 )
+                self._volume_wh_row_meta[iid] = {
+                    "row_type": row_type,
+                    "island": row.get("island"),
+                }
             src = report.get("source") or "-"
             err_hint = f" · {report.get('error')}" if report.get("error") else ""
             ch = ",".join(report.get("filters", {}).get("channels") or []) or "全部"
