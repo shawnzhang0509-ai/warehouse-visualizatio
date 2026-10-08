@@ -389,27 +389,28 @@ def _priority(stockout: float | None, demand_m3: float | None, days: float | Non
     return 4
 
 
-def _load_po_by_sku(region: str, island_scope: str = "") -> dict[str, float]:
+def _load_po_by_sku(region: str, island_scope: str = "") -> tuple[dict[str, float], str | None]:
     """在途体积：只读 Output-{region}/po.csv，绝不连数据库。"""
     if wv is None:
-        return {}
+        return {}, None
     try:
-        lines, _path = wv.load_po_lines_from_csv(region)
+        lines, path, stats = wv.load_po_lines_from_csv(region)
     except Exception:
-        return {}
+        return {}, None
     scope = normalize_island_scope(island_scope)
     out: dict[str, float] = defaultdict(float)
     for line in lines or []:
         if scope:
             isl = str(line.get("island") or "").strip()
-            if isl != scope:
+            if isl and isl != scope:
                 continue
         sku = str(line.get("sku") or "").strip()
         if not sku:
             continue
         m3 = float(line.get("volume_m3") or 0.0)
         out[pd.sku_join_key(sku)] += m3
-    return dict(out)
+    note = wv._po_stats_message(stats, path) if stats.get("raw_rows") else None
+    return dict(out), note
 
 
 def build_inventory_health_report(
@@ -482,7 +483,9 @@ def build_inventory_health_report(
     t_phase = _time.perf_counter()
 
     _bump("读 po.csv（在途）…")
-    po_by_sku = _load_po_by_sku(region_key, island_f)
+    po_by_sku, po_note = _load_po_by_sku(region_key, island_f)
+    if po_note:
+        warnings.append(f"在途 PO：{po_note}")
     timings["po_csv"] = _time.perf_counter() - t_phase
     t_phase = _time.perf_counter()
 

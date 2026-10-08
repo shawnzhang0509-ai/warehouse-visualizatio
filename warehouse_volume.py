@@ -39,7 +39,10 @@ PO_QTY_KEYS = [
 PO_M3_KEYS = [
     "volumem3", "volume_m3", "totaloccupiedvolume", "occupiedvolume", "volume",
 ]
-PO_UNIT_VOL_KEYS = ["volumewithbox", "volume_with_box", "unitvolume", "unit_volume"]
+PO_UNIT_VOL_KEYS = [
+    "volumewithbox", "volume_with_box", "unitvolume", "unit_volume",
+    "priceradarvolume", "price_radar_volume",
+]
 PO_CHANNEL_KEYS = ["channel", "channelname", "channel_code", "skuchannel"]
 PO_WAREHOUSE_KEYS = [
     "warehousename", "warehouse_name", "warehouse", "destinationwarehouse", "destwarehouse",
@@ -320,8 +323,19 @@ def _looks_like_checkin_date(text: str) -> bool:
     return True
 
 
+def _po_include_checked_in_rows() -> bool:
+    """默认排除已 Check-in 行；设 WAREHOUSE_PO_INCLUDE_CHECKIN=1 可恢复旧行为（全算在途）。"""
+    if os.getenv("WAREHOUSE_PO_INCLUDE_CHECKIN", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    # 兼容旧开关：仅 STRICT=1 时排除（与默认相反，保留给已配置用户）
+    if os.getenv("WAREHOUSE_PO_STRICT_CHECKIN", "").strip().lower() in ("1", "true", "yes"):
+        return False
+    return False
+
+
 def _po_strict_checkin() -> bool:
-    return os.getenv("WAREHOUSE_PO_STRICT_CHECKIN", "").strip().lower() in ("1", "true", "yes")
+    """已弃用命名：未 INCLUDE 时即排除 Check-in。"""
+    return not _po_include_checked_in_rows()
 
 
 def _po_row_has_checkin(row: dict) -> bool:
@@ -567,7 +581,7 @@ def _parse_po_rows(rows: list[dict]) -> tuple[list[dict], dict[str, int]]:
         "volume_fallback_qty": 0,
     }
     for row in rows:
-        if _po_strict_checkin() and _po_row_has_checkin(row):
+        if not _po_include_checked_in_rows() and _po_row_has_checkin(row):
             stats["skipped_checkin"] += 1
             continue
         sku = str(_pick_fuzzy(row, PO_SKU_KEYS) or "").strip()
@@ -634,14 +648,18 @@ def _po_stats_message(stats: dict[str, int], path: Path | None) -> str | None:
     return "；".join(parts)
 
 
-def load_po_lines_from_csv(region: str | None = None) -> tuple[list[dict], Path | None]:
+def load_po_lines_from_csv(
+    region: str | None = None,
+) -> tuple[list[dict], Path | None, dict[str, int]]:
     """只读 Output-{region}/po.csv，不连数据库（库存健康等批量场景用）。"""
     region = normalize_region(region)
     path, csv_rows = _read_region_csv(region, PO_FILE_STEMS)
+    empty = {"raw_rows": 0, "skipped_checkin": 0, "skipped_no_sku": 0, "skipped_no_qty": 0, "zero_volume": 0}
     if not csv_rows:
-        return [], path
-    lines, _stats = _parse_po_rows(csv_rows)
-    return lines, path
+        return [], path, empty
+    lines, stats = _parse_po_rows(csv_rows)
+    stats["data_source"] = "po_csv"
+    return lines, path, stats
 
 
 def load_po_lines(region: str | None = None) -> tuple[list[dict], str | None, Path | None, dict[str, int]]:
