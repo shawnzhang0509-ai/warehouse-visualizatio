@@ -484,8 +484,6 @@ def build_inventory_health_report(
 
     _bump("读 po.csv（在途）…")
     po_by_sku, po_note = _load_po_by_sku(region_key, island_f)
-    if po_note:
-        warnings.append(f"在途 PO：{po_note}")
     timings["po_csv"] = _time.perf_counter() - t_phase
     t_phase = _time.perf_counter()
 
@@ -494,6 +492,8 @@ def build_inventory_health_report(
 
     rows_out: list[InventoryHealthRow] = []
     warnings: list[str] = list(sales_warns)
+    if po_note:
+        warnings.append(f"在途 PO：{po_note}")
     if island_demand_note:
         warnings.append(island_demand_note)
     if warnings_weekly_skip:
