@@ -25,7 +25,7 @@ if not "%errorlevel%"=="0" (
 )
 
 echo Starting panel_app.py ...
-%PYEXE% panel_app.py
+%PYEXE% -u panel_app.py
 set "EXIT_CODE=%errorlevel%"
 if not "%EXIT_CODE%"=="0" (
     echo panel_app.py exited with code %EXIT_CODE%.

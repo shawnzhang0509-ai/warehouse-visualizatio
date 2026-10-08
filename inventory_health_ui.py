@@ -10,13 +10,22 @@ from tkinter import ttk
 
 import panel_data as pd
 import inventory_health as ih
-import inventory_health_chart as ihc
 from channel_prefixes import (
     family_for_channel_link,
     list_merged_channel_filter_options,
     load_channel_families_for_region,
     load_region_po_channel_prefixes,
 )
+
+_ih_chart_mod = None
+
+
+def _ih_chart():
+    """延迟加载 Matplotlib，避免启动时卡在 import（尤其 Windows + 新 Python）。"""
+    global _ih_chart_mod
+    if _ih_chart_mod is None:
+        import inventory_health_chart as _ih_chart_mod
+    return _ih_chart_mod
 
 
 def _ui_after(app, delay_ms: int, callback):
@@ -232,7 +241,7 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
         chart_tool,
         text="超长库存图 (0)",
         state=tk.DISABLED,
-        command=lambda: ihc.open_long_days_chart(
+        command=lambda: _ih_chart().open_long_days_chart(
             app.root,
             getattr(app, "_ih_report", None) or {},
             getattr(app, "_ih_thresholds", {}),
@@ -244,15 +253,15 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
         chart_tool,
         text="分渠道图",
         state=tk.DISABLED,
-        command=lambda: ihc.run_inventory_health_drilldown(app),
+        command=lambda: _ih_chart().run_inventory_health_drilldown(app),
     )
     app._ih_family_btn.pack(side=tk.LEFT, padx=(0, 6))
 
     def _ih_chart_zoom():
-        ihc.open_inventory_health_chart_viewer(app, fullscreen=False)
+        _ih_chart().open_inventory_health_chart_viewer(app, fullscreen=False)
 
     def _ih_chart_fullscreen():
-        ihc.open_inventory_health_chart_viewer(app, fullscreen=True)
+        _ih_chart().open_inventory_health_chart_viewer(app, fullscreen=True)
 
     ttk.Button(chart_tool, text="放大查看", command=_ih_chart_zoom).pack(side=tk.LEFT, padx=(0, 4))
     ttk.Button(chart_tool, text="全屏", command=_ih_chart_fullscreen).pack(side=tk.LEFT)
@@ -303,14 +312,14 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
     def _on_ih_tree_select(_event=None):
         sel = app._ih_tree.selection()
         if not sel:
-            ihc.highlight_chart_link(app, None)
+            _ih_chart().highlight_chart_link(app, None)
             app._ih_selected_family = None
             if getattr(app, "_ih_family_btn", None):
                 app._ih_family_btn.configure(state=tk.DISABLED)
             return
         link = app._ih_row_link.get(sel[0], "")
-        ihc.highlight_chart_link(app, link or None)
-        ihc.sync_inventory_health_drilldown_btn(app, link)
+        _ih_chart().highlight_chart_link(app, link or None)
+        _ih_chart().sync_inventory_health_drilldown_btn(app, link)
 
     app._ih_tree.bind("<<TreeviewSelect>>", _on_ih_tree_select)
 
@@ -427,11 +436,11 @@ def _apply_chart(app, report, th):
         app._ih_thresholds = th.__dict__
         chart_report = dict(report)
         chart_report["rows"] = ih.rows_for_family_chart(report, th)
-        app._ih_chart_widget, _fig, chart_meta, canvas = ihc.render_bubble_chart(
+        app._ih_chart_widget, _fig, chart_meta, canvas = _ih_chart().render_bubble_chart(
             app._ih_chart_frame, chart_report, th.__dict__,
         )
         if canvas is not None and _fig is not None:
-            ihc.bind_chart_interaction(app, canvas, _fig, chart_meta)
+            _ih_chart().bind_chart_interaction(app, canvas, _fig, chart_meta)
         n_out = int(chart_meta.get("outlier_count") or 0)
         if getattr(app, "_ih_outlier_btn", None) is not None:
             app._ih_outlier_btn.configure(text=f"超长库存图 ({n_out})")

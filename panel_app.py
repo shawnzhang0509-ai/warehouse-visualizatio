@@ -35,7 +35,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.63"
+APP_VERSION = "1.9.64"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -126,7 +126,7 @@ class PanelApp:
         if tk is None:
             raise RuntimeError("当前 Python 缺少 Tkinter，无法启动桌面界面。")
         self.root = tk.Tk()
-        self.root.title("有货未展示看板")
+        self.root.title(f"有货未展示看板 v{APP_VERSION}")
         self.root.geometry("1360x860")
         self.root.minsize(1080, 700)
         self.root.configure(bg=C_BG)
@@ -260,9 +260,12 @@ class PanelApp:
 
         self._region_labels = {r["key"]: r["label"] for r in regions}
         self._setup_styles()
+        self._inventory_health_attached = False
         self._build_ui(stores, regions)
         self.search_var.trace_add("write", lambda *_: self._debounce_refresh())
-        self.reload()
+        self.root.update_idletasks()
+        self.root.after_idle(self._attach_inventory_health_tab_if_needed)
+        self.root.after_idle(self.reload)
 
     def _setup_styles(self):
         style = ttk.Style(self.root)
@@ -1045,11 +1048,6 @@ class PanelApp:
         vol_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._volume_tree.tag_configure("island_hdr", font=("Segoe UI", 9, "bold"), background="#f1f5f9")
         self._volume_tree.tag_configure("island_transit", background="#e0f2fe")
-
-        import inventory_health_ui as ih_ui
-
-        ih_ui.attach_inventory_health_tab(self, self._notebook, {"muted": C_MUTED})
-        self.root.after_idle(self._sync_region_island_ui)
 
         for widget in (
             mining_inner, self._tab_mining, self._tab_onhold, self._tab_transfer,
@@ -2142,7 +2140,17 @@ class PanelApp:
         elif getattr(self, "_tab_inventory_health", None) and selected == str(self._tab_inventory_health):
             self._render_inventory_health()
 
+    def _attach_inventory_health_tab_if_needed(self):
+        if getattr(self, "_inventory_health_attached", False):
+            return
+        import inventory_health_ui as ih_ui
+
+        ih_ui.attach_inventory_health_tab(self, self._notebook, {"muted": C_MUTED})
+        self._inventory_health_attached = True
+        self._sync_region_island_ui()
+
     def _render_inventory_health(self, force=False):
+        self._attach_inventory_health_tab_if_needed()
         from inventory_health_ui import render_inventory_health
 
         render_inventory_health(self, force=force)
@@ -3841,7 +3849,10 @@ def main():
     if tk is None:
         print("当前 Python 缺少 Tkinter，无法启动桌面界面。")
         return 1
-    PanelApp().run()
+    print(f"启动看板 v{APP_VERSION}…", flush=True)
+    app = PanelApp()
+    print("界面已就绪。", flush=True)
+    app.run()
     return 0
 
 
