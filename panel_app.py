@@ -35,7 +35,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.66"
+APP_VERSION = "1.9.67"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -2678,6 +2678,38 @@ class PanelApp:
                 font=("Segoe UI", 9), wraplength=920, justify="left",
             ).pack(anchor="w")
             return
+        try:
+            bundle = panel_data.get_region_bundle(
+                self._cached_summary.get("region") or self._current_region(),
+            )
+        except Exception:
+            bundle = {}
+        parse_st = panel_data.on_hold_parse_stats(bundle)
+        raw_n = int(parse_st.get("raw_rows") or 0)
+        det_n = int(parse_st.get("detail_rows") or 0)
+        if raw_n > det_n:
+            tk.Label(
+                self._onhold_summary_frame,
+                text=(
+                    f"CSV 共 {raw_n} 行 → 可分析 {det_n} 行"
+                    f"（未识别 SKU {parse_st.get('skipped_no_code', 0)}，"
+                    f"数量≤0 {parse_st.get('skipped_zero_qty', 0)}）"
+                ),
+                bg="#fff7ed", fg="#c2410c", font=("Segoe UI", 9), padx=8, pady=4,
+            ).pack(side=tk.LEFT, padx=(0, 8), pady=2)
+        elif raw_n > 0:
+            tk.Label(
+                self._onhold_summary_frame,
+                text=f"on_hold.csv 共 {raw_n} 行（每行一条订单/冻结记录）",
+                bg="#f1f5f9", fg="#475569", font=("Segoe UI", 9), padx=8, pady=4,
+            ).pack(side=tk.LEFT, padx=(0, 8), pady=2)
+        no_date = int(parse_st.get("no_hold_date") or 0)
+        if no_date > 0:
+            tk.Label(
+                self._onhold_summary_frame,
+                text=f"无冻结日期 {no_date} 行（选「360天以上」时不会出现在下表）",
+                bg="#fef3c7", fg="#92400e", font=("Segoe UI", 9), padx=8, pady=4,
+            ).pack(side=tk.LEFT, padx=(0, 8), pady=2)
         for row in status_rows[:8]:
             text = (
                 f"{row.get('status')}：{row.get('sku_count', 0)} SKU · "
@@ -2823,7 +2855,7 @@ class PanelApp:
             self._onhold_status_lbl.configure(text="正在筛选 On Hold…")
 
         def worker():
-            rows, total_matched = panel_data.list_on_hold_analysis(
+            rows, total_matched, filter_stats = panel_data.list_on_hold_analysis(
                 bundle,
                 status_filter=status_f,
                 catalog_by_norm=catalog_snap,
@@ -2838,7 +2870,7 @@ class PanelApp:
             total_sorted = len(rows)
             if ui_cap and total_sorted > ui_cap:
                 rows = rows[:ui_cap]
-            return rows, total_matched, total_sorted, ui_cap
+            return rows, total_matched, total_sorted, ui_cap, filter_stats
 
         def done(err, result):
             if seq != self._onhold_render_seq:
@@ -2847,7 +2879,7 @@ class PanelApp:
                 if self._onhold_status_lbl:
                     self._onhold_status_lbl.configure(text=f"On Hold 加载失败：{err}")
                 return
-            rows, total_matched, total_sorted, ui_cap = result
+            rows, total_matched, total_sorted, ui_cap, filter_stats = result
             self._mining_onhold_render_token += 1
             token = self._mining_onhold_render_token
             self._mining_onhold_row_data = {}
@@ -2855,7 +2887,7 @@ class PanelApp:
             def paint():
                 self._paint_onhold_rows(
                     bundle, rows, total_matched, total_sorted, ui_cap,
-                    status_f, min_days, bl, token,
+                    status_f, min_days, bl, token, filter_stats,
                 )
 
             self._clear_onhold_tree_async(paint)
@@ -2864,8 +2896,9 @@ class PanelApp:
 
     def _paint_onhold_rows(
         self, bundle, rows, total_matched, total_sorted, ui_cap,
-        status_f, min_days, bl, token,
+        status_f, min_days, bl, token, filter_stats=None,
     ):
+        filter_stats = filter_stats or {}
         if not self._mining_onhold_tree:
             return
         image_cap = self._onhold_image_cap()
@@ -2873,6 +2906,17 @@ class PanelApp:
         def _onhold_status_hint(inserted):
             if not rows and not total_matched:
                 diag = panel_data.diagnose_on_hold_bundle(bundle)
+                st = panel_data.on_hold_parse_stats(bundle)
+                if int(st.get("detail_rows") or 0) > 0 and min_days:
+                    sm = int(filter_stats.get("status_matched") or 0)
+                    nd = int(filter_stats.get("excluded_no_hold_date") or 0)
+                    ud = int(filter_stats.get("excluded_under_min_days") or 0)
+                    if sm > 0 or nd > 0:
+                        return (
+                            f"冻结≥{min_days}天 → 表格 0 条。"
+                            f"当前状态匹配 {sm} 条，其中无日期 {nd} 条、不足 {ud} 天。"
+                            f"请改「全部天数」可看全部 {st.get('detail_rows')} 条。"
+                        )
                 return diag or "On Hold 0 条"
             if not rows and total_matched:
                 return (
@@ -3708,7 +3752,7 @@ class PanelApp:
         status_f = self._onhold_status_filter_value()
         days_f = self._onhold_days_filter_value()
         min_days = panel_data.parse_on_hold_min_days(days_f)
-        rows, _total = panel_data.list_on_hold_analysis(
+        rows, _total, _fs = panel_data.list_on_hold_analysis(
             bundle,
             status_filter=status_f,
             catalog_by_norm=self._catalog_by_norm(),

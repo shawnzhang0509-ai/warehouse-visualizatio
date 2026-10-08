@@ -85,7 +85,7 @@ class ExportFilteredTests(unittest.TestCase):
                 },
             ]
         }
-        rows, total = panel_data.list_on_hold_analysis(
+        rows, total, _stats = panel_data.list_on_hold_analysis(
             bundle,
             status_filter="On Hold - Unpaid Order",
             min_hold_days=360,
@@ -110,7 +110,7 @@ class ExportFilteredTests(unittest.TestCase):
                 },
             ]
         }
-        rows, total = panel_data.list_on_hold_analysis(bundle, status_filter="")
+        rows, total, _stats = panel_data.list_on_hold_analysis(bundle, status_filter="")
         self.assertEqual(total, 1)
         self.assertEqual(rows[0]["sales_name"], "Alice Chen")
         export_rows = [panel_data.format_onhold_export_row(r) for r in rows]
@@ -131,7 +131,7 @@ class ExportFilteredTests(unittest.TestCase):
                 },
             ]
         }
-        rows, total = panel_data.list_on_hold_analysis(
+        rows, total, _stats = panel_data.list_on_hold_analysis(
             bundle,
             status_filter="On Hold - Unpaid Order",
             min_hold_days=360,

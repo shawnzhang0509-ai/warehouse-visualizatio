@@ -2230,6 +2230,32 @@ def list_on_hold_status_options(bundle):
     return [r["status"] for r in rows]
 
 
+def on_hold_parse_stats(bundle) -> dict[str, int]:
+    """对比 CSV 原始行数与可进入分析表的行数（帮助解释「1000 行只显示几百」）。"""
+    raw = bundle.get("on_hold_rows") or []
+    detail = bundle.get("on_hold_detail_rows")
+    if detail is None and raw:
+        detail = _parse_on_hold_detail_rows(raw)
+    detail = detail or []
+    skipped_no_code = 0
+    skipped_zero_qty = 0
+    for row in raw:
+        code = _mining_code_from_row(row)
+        if not code:
+            skipped_no_code += 1
+            continue
+        if _on_hold_qty_from_row(row) <= 0:
+            skipped_zero_qty += 1
+    no_hold_date = sum(1 for line in detail if line.get("hold_days") is None)
+    return {
+        "raw_rows": len(raw),
+        "detail_rows": len(detail),
+        "skipped_no_code": skipped_no_code,
+        "skipped_zero_qty": skipped_zero_qty,
+        "no_hold_date": no_hold_date,
+    }
+
+
 def diagnose_on_hold_bundle(bundle):
     """说明 On Hold 为 0 的常见原因（文件缺失 / 空文件 / 列名不匹配）。"""
     path = bundle.get("on_hold_path")
@@ -2303,6 +2329,12 @@ def list_on_hold_analysis(
     catalog_by_norm = catalog_by_norm or {}
     status_filter = str(status_filter or "").strip()
     out = []
+    filter_stats = {
+        "status_matched": 0,
+        "excluded_no_hold_date": 0,
+        "excluded_under_min_days": 0,
+        "excluded_blacklist": 0,
+    }
     for line in detail:
         status_raw = line.get("status") or "（未标注状态）"
         tokens = _on_hold_status_tokens(status_raw)
@@ -2311,17 +2343,23 @@ def list_on_hold_analysis(
         norm_filter = _normalize_on_hold_status(status_filter)
         norm_tokens = [_normalize_on_hold_status(t) for t in tokens]
         hold_days = line.get("hold_days")
+        filter_stats["status_matched"] += 1
+        norm = line.get("norm_code") or ""
+        if _on_hold_row_blacklisted(line.get("code"), norm, blacklist):
+            filter_stats["excluded_blacklist"] += 1
+            continue
         if min_hold_days is not None and min_hold_days > 0:
-            if hold_days is None or hold_days < min_hold_days:
+            if hold_days is None:
+                filter_stats["excluded_no_hold_date"] += 1
+                continue
+            if hold_days < min_hold_days:
+                filter_stats["excluded_under_min_days"] += 1
                 continue
         display_status = (
             status_filter
             if norm_filter and norm_filter not in ("", "全部状态") and norm_filter in norm_tokens
             else status_raw
         )
-        norm = line.get("norm_code") or ""
-        if _on_hold_row_blacklisted(line.get("code"), norm, blacklist):
-            continue
         cat = catalog_by_norm.get(norm) or {}
         out.append({
             "norm_code": norm,
@@ -2352,8 +2390,8 @@ def list_on_hold_analysis(
     out.sort(key=_sort_hold_key, reverse=True)
     cap = max_rows if max_rows is not None else ON_HOLD_ANALYSIS_MAX_ROWS
     if cap and len(out) > cap:
-        return out[:cap], len(out)
-    return out, len(out)
+        return out[:cap], len(out), filter_stats
+    return out, len(out), filter_stats
 
 
 def _load_parts_inventory(rows):
