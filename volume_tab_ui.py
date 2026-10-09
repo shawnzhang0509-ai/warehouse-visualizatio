@@ -303,7 +303,7 @@ def draw_warehouse_util_bars(
     y += 18
     canvas.create_text(
         left, y,
-        text="在库=条长+容积率(红线85%)  |  浅蓝=在途PO(柜)",
+        text=f"条长=柜数（在库与在途同一刻度，满格≈{scale_max:.0f}柜）· 右侧小条=容积率",
         anchor="w", fill=C_MUTED, font=("Segoe UI", 8),
     )
     y += 16
@@ -323,7 +323,7 @@ def draw_warehouse_util_bars(
             util_f = float(util) if util is not None else None
             warn = util_f is not None and util_f >= UTIL_WARN_PCT
             bar_color = C_WARN if warn else C_STOCK
-            bw = bar_max * (stock / max_stock)
+            bw = bar_max * (stock / scale_max)
             canvas.create_text(20, y + 11, text=name, anchor="w", fill=C_TEXT, font=("Segoe UI", 9))
             x0 = left
             if bw > 0.5:
@@ -357,7 +357,7 @@ def draw_warehouse_util_bars(
                 label = f"{island}在途 PO"
                 canvas.create_text(20, y + 11, text=label, anchor="w", fill=C_PO, font=("Segoe UI", 9, "bold"))
                 x0 = left
-                pw = bar_max * (po / max_po)
+                pw = bar_max * (po / scale_max)
                 if pw > 0.5:
                     canvas.create_rectangle(x0, y + 6, x0 + pw, y + 20, fill=C_PO_LIGHT, outline="")
                 canvas.create_text(
