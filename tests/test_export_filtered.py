@@ -96,6 +96,35 @@ class ExportFilteredTests(unittest.TestCase):
         self.assertEqual(total, 1)
         self.assertEqual(rows[0].get("sales_name"), "")
 
+    def test_on_hold_ticket_only_for_by_ticket_status(self):
+        bundle = {
+            "on_hold_rows": [
+                {
+                    "Sku": "333-001",
+                    "ProductName": "Paid",
+                    "StockOnHoldStatus": "On Hold - Paid Order",
+                    "OrderNo": "SO12345.DJFTE",
+                    "TicketNo": "SHOULD-NOT-SHOW",
+                    "Qty": 1,
+                    "WarehouseName": "CHCH",
+                },
+                {
+                    "Sku": "333-002",
+                    "ProductName": "Ticket row",
+                    "StockOnHoldStatus": "On Hold - By Ticket",
+                    "OrderNo": "SO99",
+                    "TicketNo": "TK-100",
+                    "Qty": 1,
+                    "WarehouseName": "CHCH",
+                },
+            ]
+        }
+        rows, total, _stats = panel_data.list_on_hold_analysis(bundle, status_filter="")
+        self.assertEqual(total, 2)
+        by_code = {r["code"]: r for r in rows}
+        self.assertEqual(by_code["333-001"]["ticket_no"], "")
+        self.assertEqual(by_code["333-002"]["ticket_no"], "TK-100")
+
     def test_on_hold_sales_name_column(self):
         bundle = {
             "on_hold_rows": [

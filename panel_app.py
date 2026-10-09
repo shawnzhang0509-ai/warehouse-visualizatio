@@ -35,7 +35,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.69"
+APP_VERSION = "1.9.70"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -325,6 +325,13 @@ class PanelApp:
         style.configure("Tool.TButton", padding=(10, 4))
         style.configure("Vertical.TScrollbar", width=18, arrowsize=14)
         style.configure("Prefix.Treeview", rowheight=34, font=("Segoe UI", 10))
+        style.configure("Main.TNotebook", tabmargins=(4, 6, 4, 0))
+        style.configure(
+            "Main.TNotebook.Tab",
+            padding=(14, 10),
+            font=("Segoe UI", 11, "bold"),
+        )
+        style.map("Main.TNotebook.Tab", expand=[("selected", [1, 1, 1, 0])])
 
     def _build_ui(self, stores, regions):
         header = tk.Frame(self.root, bg=C_HEADER, padx=16, pady=10)
@@ -381,9 +388,27 @@ class PanelApp:
             command=self._export_current_filtered,
         )
         self._export_btn.grid(row=1, column=6, sticky="w", pady=(2, 0))
+        tk.Label(toolbar, textvariable=self._status_var, bg="white", fg=C_CARD_GAP,
+                 font=("Segoe UI", 9)).grid(row=0, column=7, rowspan=2, sticky="e", padx=(16, 0))
+        toolbar.columnconfigure(7, weight=1)
+        self._toolbar = toolbar
 
-        filter_bar = tk.Frame(self.root, bg="white", padx=14, pady=8)
-        filter_bar.pack(fill=tk.X, padx=12, pady=(6, 0))
+        table_wrap = tk.Frame(self.root, bg="white")
+        table_wrap.pack(fill=tk.BOTH, expand=True, padx=12, pady=(8, 12))
+
+        self._notebook = ttk.Notebook(table_wrap, style="Main.TNotebook")
+        self._notebook.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self._tab_products = ttk.Frame(self._notebook)
+        tab_prefix = ttk.Frame(self._notebook)
+        self._notebook.add(self._tab_products, text="产品明细")
+        self._notebook.add(tab_prefix, text="SKU前三位汇总")
+
+        products_chrome = tk.Frame(self._tab_products, bg=C_BG)
+        products_chrome.pack(fill=tk.X)
+
+        filter_bar = tk.Frame(products_chrome, bg="white", padx=14, pady=8)
+        filter_bar.pack(fill=tk.X, padx=0, pady=(0, 0))
+        self._filter_bar = filter_bar
 
         tk.Label(filter_bar, text="搜索", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).grid(row=0, column=0, sticky="w")
         search_entry = ttk.Entry(filter_bar, textvariable=self.search_var, width=28)
@@ -413,12 +438,11 @@ class PanelApp:
 
         tk.Label(filter_bar, textvariable=self.result_count_var, bg="white", fg=C_MUTED,
                  font=("Segoe UI", 9)).grid(row=1, column=7, sticky="e", padx=(12, 0))
-        tk.Label(filter_bar, textvariable=self._status_var, bg="white", fg=C_CARD_GAP,
-                 font=("Segoe UI", 9)).grid(row=0, column=7, sticky="e", padx=(12, 0))
         filter_bar.columnconfigure(7, weight=1)
 
-        cards = tk.Frame(self.root, bg=C_BG, padx=12, pady=8)
+        cards = tk.Frame(products_chrome, bg=C_BG, padx=12, pady=8)
         cards.pack(fill=tk.X)
+        self._cards_frame = cards
         card_defs = [
             ("gap", "有货未展示", "0", C_CARD_GAP_BG, C_CARD_GAP_BG_ACTIVE, C_CARD_GAP, True,
              "含在产与停产 · 点击筛选"),
@@ -428,7 +452,8 @@ class PanelApp:
              "同系列已陈列 · 点击筛选"),
             ("in_stock", "有货产品", "0", C_CARD_OK_BG, C_CARD_OK_BG_ACTIVE, C_CARD_OK, True,
              "切换有货/无货 · 点击筛选"),
-            ("rate", "有货率", "-", C_CARD_INFO_BG, C_CARD_INFO_BG, C_CARD_INFO, False, ""),
+            ("rate", "有货率(在产)", "-", C_CARD_INFO_BG, C_CARD_INFO_BG, C_CARD_INFO, False,
+             "仅统计在产 SKU；分母=纳入分析·在产"),
             ("total", "纳入分析", "0", C_CARD_NEUTRAL_BG, C_CARD_NEUTRAL_BG, C_CARD_NEUTRAL, False,
              "在产 SKU 基准；选「全部/停产」会变"),
         ]
@@ -448,7 +473,7 @@ class PanelApp:
             )
             val_lbl.pack(anchor="w", pady=(2, 0))
             hint = None
-            if filterable or key == "total":
+            if filterable or key in ("total", "rate"):
                 hint = tk.Label(
                     card, text=hint_idle, bg=bg, fg=fg, font=("Segoe UI", 8),
                     cursor="hand2" if filterable else "arrow",
@@ -474,8 +499,9 @@ class PanelApp:
         self._stock_source_lbl = tk.Label(cards, text="", bg=C_BG, fg=C_MUTED, font=("Segoe UI", 9))
         self._stock_source_lbl.pack(side=tk.RIGHT, padx=8)
 
-        info_row = tk.Frame(self.root, bg=C_BG)
+        info_row = tk.Frame(products_chrome, bg=C_BG)
         info_row.pack(fill=tk.X, padx=12, pady=(0, 6))
+        self._products_chrome = products_chrome
         self._blacklist_lbl = tk.Label(
             info_row,
             text="黑名单：加载中…",
@@ -487,16 +513,6 @@ class PanelApp:
             text="黑名单文件列名：sku / 编码 / ProductCode",
             bg=C_BG, fg="#94a3b8", font=("Segoe UI", 8),
         ).pack(side=tk.RIGHT, padx=(8, 0))
-
-        table_wrap = tk.Frame(self.root, bg="white")
-        table_wrap.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
-
-        self._notebook = ttk.Notebook(table_wrap)
-        self._notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-        self._tab_products = ttk.Frame(self._notebook)
-        tab_prefix = ttk.Frame(self._notebook)
-        self._notebook.add(self._tab_products, text="产品明细")
-        self._notebook.add(tab_prefix, text="SKU前三位汇总")
 
         inner = tk.Frame(self._tab_products, bg="white")
         inner.pack(fill=tk.BOTH, expand=True)
@@ -1160,6 +1176,7 @@ class PanelApp:
             widget.bind("<MouseWheel>", self._on_prefix_wheel)
             widget.bind("<Button-4>", lambda _e: self._scroll_prefix(-1))
             widget.bind("<Button-5>", lambda _e: self._scroll_prefix(1))
+        self.root.after_idle(self._sync_product_toolbar_buttons)
 
     def _make_placeholder_photo(self):
         if Image is not None and ImageTk is not None:
@@ -1425,9 +1442,9 @@ class PanelApp:
                 for w in meta["widgets"]:
                     w.configure(bg=meta["bg"], fg=meta["fg"])
                 hint_lbl = meta.get("hint")
-                if hint_lbl is not None and key == "total":
+                if hint_lbl is not None and key in ("total", "rate"):
                     hint_lbl.configure(
-                        text=hint_overrides.get("total", meta.get("hint_idle", "")),
+                        text=hint_overrides.get(key, meta.get("hint_idle", "")),
                         bg=meta["bg"], fg=meta["fg"],
                     )
                 continue
@@ -2073,6 +2090,10 @@ class PanelApp:
         disc_total = sum(1 for p in self._cached_products if p.get("discontinued"))
         self._stat_labels["in_stock"].configure(text=str(s.get("in_stock_count", 0)))
         self._stat_labels["rate"].configure(text=pct(s.get("in_stock_rate")))
+        hint_overrides["rate"] = (
+            "仅统计在产 SKU；分母=纳入分析·在产"
+            + (f"（{active_total} 个）" if active_total else "")
+        )
         if disc_f == "已停产":
             hint_overrides["total"] = (
                 f"停产 SKU {disc_total} 个"
@@ -2252,6 +2273,22 @@ class PanelApp:
         except tk.TclError:
             return True
 
+    def _sync_product_toolbar_buttons(self, selected_tab=None):
+        if not self._notebook:
+            return
+        if selected_tab is None:
+            try:
+                selected_tab = self._notebook.select()
+            except Exception:
+                return
+        on_products = selected_tab == str(self._tab_products)
+        if getattr(self, "_export_btn", None):
+            self._export_btn.configure(state=tk.NORMAL if on_products else tk.DISABLED)
+        if not on_products:
+            for btn in (getattr(self, "_expand_all_btn", None), getattr(self, "_collapse_all_btn", None)):
+                if btn is not None:
+                    btn.configure(state=tk.DISABLED)
+
     def _on_notebook_tab_change(self, _event=None):
         if not self._notebook:
             return
@@ -2259,6 +2296,7 @@ class PanelApp:
             selected = self._notebook.select()
         except Exception:
             return
+        self._sync_product_toolbar_buttons(selected)
         if selected == str(self._tab_products):
             pending = self._pending_filtered_products
             if pending is not None and self._cached_products:
@@ -3052,7 +3090,9 @@ class PanelApp:
                             row.get("name") or "",
                             row.get("status") or "-",
                             row.get("order_no") or "-",
-                            row.get("ticket_no") or "-",
+                            (row.get("ticket_no") or "-")
+                            if panel_data._on_hold_status_is_by_ticket(row.get("status"))
+                            else "",
                             row.get("sales_name") or "-",
                             hold_days_text,
                             row.get("hold_since") or "-",

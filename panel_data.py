@@ -1991,7 +1991,15 @@ def _pick_on_hold_sales_name(row):
     return ""
 
 
-def _pick_on_hold_ticket_no(row, order_no=""):
+def _on_hold_status_is_by_ticket(status):
+    norm = _normalize_on_hold_status(status).lower()
+    return "by ticket" in norm or "工单" in norm
+
+
+def _pick_on_hold_ticket_no(row, order_no="", *, status=""):
+    """Ticket 仅对 On Hold - By Ticket 有意义；订单号后缀不得误显示为 Ticket。"""
+    if status and not _on_hold_status_is_by_ticket(status):
+        return ""
     val = _pick_fuzzy(row, ON_HOLD_TICKET_KEYS)
     if val is not None and str(val).strip():
         text = str(val).strip()
@@ -2081,7 +2089,7 @@ def _parse_on_hold_detail_rows(rows):
             _pick(row, STORE_KEYS + ["warehousename"]) or _pick_fuzzy(row, STORE_KEYS + ["warehousename"]) or ""
         ).strip()
         order_no = _pick_on_hold_order_no(row)
-        ticket_no = _pick_on_hold_ticket_no(row, order_no=order_no)
+        ticket_no = _pick_on_hold_ticket_no(row, order_no=order_no, status=status)
         sales_name = _pick_on_hold_sales_name(row)
         hold_at = _parse_hold_datetime(_pick_fuzzy(row, ON_HOLD_DATE_KEYS))
         hold_days = _hold_days_from_row(row, hold_at)
