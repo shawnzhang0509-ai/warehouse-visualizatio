@@ -36,7 +36,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.73"
+APP_VERSION = "1.9.74"
 APP_TITLE = "ifurniture运营提效看板"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
@@ -1055,21 +1055,11 @@ class PanelApp:
         tk.Label(vol_toolbar, text="或手动", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(side=tk.LEFT)
         ttk.Entry(vol_toolbar, width=16, textvariable=self._volume_channel_var).pack(side=tk.LEFT, padx=(6, 8))
         ttk.Button(vol_toolbar, text="应用筛选", command=self._refresh_volume_tab).pack(side=tk.LEFT)
-        self._volume_split_island_cb = ttk.Checkbutton(
+        tk.Label(
             vol_toolbar,
-            text="渠道分南北岛",
-            variable=self._volume_split_island_var,
-            command=self._refresh_volume_tab,
-        )
-        self._volume_split_island_cb.pack(side=tk.LEFT, padx=(12, 0))
-        ttk.Button(
-            vol_toolbar, text="展开渠道岛",
-            command=self._volume_expand_all_channels,
-        ).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(
-            vol_toolbar, text="折叠渠道岛",
-            command=self._volume_collapse_all_channels,
-        ).pack(side=tk.LEFT, padx=(4, 0))
+            text="NZ：渠道图已分北岛/南岛；可拖动图表中间竖条调宽度",
+            bg="white", fg="#94a3b8", font=("Segoe UI", 8),
+        ).pack(side=tk.LEFT, padx=(12, 0))
         self._volume_status_lbl = tk.Label(
             vol_tab,
             text="在库：ERP；在途：po.csv 或刷新时自动执行 Data-NZ/PO.txt（与 SSMS 同库）",
@@ -1097,22 +1087,20 @@ class PanelApp:
             self._volume_kpi_value_labels[key] = vl
             self._volume_kpi_hint_labels[key] = hl
 
-        vol_charts = tk.Frame(vol_tab, bg="white")
-        vol_charts.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
-        vol_charts.grid_columnconfigure(0, weight=1)
-        vol_charts.grid_columnconfigure(1, weight=0)
-        vol_charts.grid_rowconfigure(0, weight=1)
+        self._volume_charts_panes = tk.PanedWindow(
+            vol_tab, orient=tk.HORIZONTAL, bg="white", sashwidth=8, sashrelief=tk.RAISED,
+        )
+        self._volume_charts_panes.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
         ch_chart_frame = tk.Frame(
-            vol_charts, bg="white", highlightthickness=1, highlightbackground="#e2e8f0",
+            self._volume_charts_panes, bg="white", highlightthickness=1, highlightbackground="#e2e8f0",
         )
         wh_chart_outer = tk.Frame(
-            vol_charts, bg="white", highlightthickness=1, highlightbackground="#e2e8f0",
-            width=360,
+            self._volume_charts_panes, bg="white", highlightthickness=1, highlightbackground="#e2e8f0",
         )
-        ch_chart_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
-        wh_chart_outer.grid(row=0, column=1, sticky="ns")
-        wh_chart_outer.grid_propagate(False)
-        self._volume_charts_frame = vol_charts
+        self._volume_charts_panes.add(ch_chart_frame, minsize=360)
+        self._volume_charts_panes.add(wh_chart_outer, minsize=280)
+        self._volume_charts_panes.bind("<Configure>", lambda _e: self._volume_maybe_set_default_sash())
+        self._volume_sash_set = False
         ch_scroll = ttk.Scrollbar(ch_chart_frame, orient="vertical")
         self._volume_channel_canvas = tk.Canvas(
             ch_chart_frame, bg="white", highlightthickness=0, height=320,
@@ -1163,11 +1151,17 @@ class PanelApp:
         wh_frame = tk.Frame(vol_panes, bg="white")
         vol_panes.add(ch_frame, minsize=220)
         vol_panes.add(wh_frame, minsize=420)
+        ch_tbl_hdr = tk.Frame(ch_frame, bg="white")
+        ch_tbl_hdr.pack(fill=tk.X, padx=4, pady=(0, 4))
         tk.Label(
-            ch_frame,
-            text="按渠道合计（在库+在途 PO；双击筛选；可展开北岛/南岛）",
+            ch_tbl_hdr,
+            text="数据表：渠道合计（北岛/南岛子行；双击筛选）",
             bg="white", fg=C_TEXT, font=("Segoe UI", 9, "bold"),
-        ).pack(anchor="w", padx=4, pady=(0, 4))
+        ).pack(side=tk.LEFT)
+        ttk.Button(ch_tbl_hdr, text="展开北/南岛", command=self._volume_expand_all_channels).pack(
+            side=tk.LEFT, padx=(8, 4),
+        )
+        ttk.Button(ch_tbl_hdr, text="折叠", command=self._volume_collapse_all_channels).pack(side=tk.LEFT)
         ch_wrap = tk.Frame(ch_frame, bg="white")
         ch_wrap.pack(fill=tk.BOTH, expand=True)
         self._volume_channel_tree = ttk.Treeview(
@@ -1390,15 +1384,6 @@ class PanelApp:
             sync_inventory_health_island_ui(self)
         except ImportError:
             pass
-        vol_cb = getattr(self, "_volume_split_island_cb", None)
-        if vol_cb is not None:
-            if supported:
-                vol_cb.pack_configure(side=tk.LEFT, padx=(12, 0))
-            else:
-                vol_cb.pack_forget()
-                if getattr(self, "_volume_split_island_var", None):
-                    self._volume_split_island_var.set(False)
-
     def _sync_filter_combos(self):
         for combo, var in getattr(self, "_filter_combos", ()):
             self._sync_island_combo_to_var(combo, var)
@@ -2524,18 +2509,25 @@ class PanelApp:
             mode = str(self._volume_channel_chart_mode_var.get() or "全部").strip()
             top_n = 10 if mode.upper().startswith("TOP") else None
             wh_stock = vol_ui.volume_kpis_from_report(report).get("stock_containers")
+            region = (report.get("region") or self._cached_summary.get("region") or self._current_region())
+            group_islands = panel_data.island_stock_supported(region) and top_n is None
             vol_ui.draw_channel_chart(
                 self._volume_channel_canvas,
                 rows,
                 top_n=top_n,
                 warehouse_stock_total=wh_stock,
+                group_by_island=group_islands,
                 on_channel_click=self._volume_on_channel_chart_click,
             )
             bbox = self._volume_channel_canvas.bbox("all")
             if bbox:
                 self._volume_channel_canvas.configure(scrollregion=bbox)
         if self._volume_wh_canvas:
-            vol_ui.draw_warehouse_util_bars(self._volume_wh_canvas, report)
+            vol_ui.draw_warehouse_util_bars(
+                self._volume_wh_canvas,
+                report,
+                on_island_transit_click=self._volume_show_island_po_detail,
+            )
             bbox = self._volume_wh_canvas.bbox("all")
             if bbox:
                 self._volume_wh_canvas.configure(scrollregion=bbox)
@@ -2563,10 +2555,20 @@ class PanelApp:
 
     def _volume_island_ui_enabled(self):
         region = self._cached_summary.get("region") or self._current_region()
-        return (
-            panel_data.island_stock_supported(region)
-            and bool(self._volume_split_island_var.get())
-        )
+        return panel_data.island_stock_supported(region)
+
+    def _volume_maybe_set_default_sash(self):
+        panes = getattr(self, "_volume_charts_panes", None)
+        if not panes or getattr(self, "_volume_sash_set", False):
+            return
+        w = int(panes.winfo_width() or 0)
+        if w < 400:
+            return
+        try:
+            panes.sash_place(0, int(w * 0.68), 0)
+            self._volume_sash_set = True
+        except tk.TclError:
+            pass
 
     def _volume_fill_channel_tree(self, channel_rows):
         tree = self._volume_channel_tree
@@ -2604,7 +2606,7 @@ class PanelApp:
                     self._volume_channel_row_meta[cid] = {
                         "kind": "island", "channel": ch, "island": isl, "row": isl_d,
                     }
-                tree.item(pid, open=False)
+                tree.item(pid, open=True)
 
     def _volume_expand_all_channels(self):
         tree = self._volume_channel_tree

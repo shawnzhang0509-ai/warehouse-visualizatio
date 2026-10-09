@@ -52,6 +52,45 @@ def volume_kpis_from_report(report: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def island_transit_by_island(report: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    out: dict[str, dict[str, Any]] = {}
+    for row in report.get("data") or []:
+        if row.get("row_type") == "island_transit" and row.get("island"):
+            out[str(row["island"])] = row
+    return out
+
+
+def channel_rows_split_by_island(
+    channel_rows: list[dict[str, Any]],
+    islands: tuple[str, ...] = ("北岛", "南岛"),
+) -> list[tuple[str, list[dict[str, Any]]]]:
+    """把渠道行拆成北岛/南岛两组（用 merge 结果里的 islands 字段）。"""
+    buckets: dict[str, list[dict[str, Any]]] = {isl: [] for isl in islands}
+    for row in channel_rows or []:
+        isl_map = row.get("islands") or {}
+        ch = row.get("channel") or ""
+        if not isl_map:
+            continue
+        for isl in islands:
+            d = isl_map.get(isl) or {}
+            st = float(d.get("volume_containers") or 0)
+            po = float(d.get("po_containers") or 0)
+            if st <= 0 and po <= 0:
+                continue
+            buckets[isl].append({
+                "channel": ch,
+                "volume_containers": round(st, 2),
+                "po_containers": round(po, 2),
+                "total_containers": round(float(d.get("total_containers") or st + po), 2),
+            })
+    groups: list[tuple[str, list[dict[str, Any]]]] = []
+    for isl in islands:
+        rows = sorted(buckets[isl], key=lambda r: -float(r.get("total_containers") or 0))
+        if rows:
+            groups.append((isl, rows))
+    return groups
+
+
 def warehouse_rows_grouped(report: dict[str, Any]) -> list[tuple[str, list[dict[str, Any]]]]:
     groups: list[tuple[str, list[dict[str, Any]]]] = []
     current_island = None
@@ -75,66 +114,19 @@ def _truncate(text: str, max_len: int) -> str:
     return text if len(text) <= max_len else text[: max_len - 1] + "…"
 
 
-def draw_channel_chart(
+def _draw_channel_rows_block(
     canvas,
-    channel_rows: list[dict[str, Any]],
+    rows: list[dict[str, Any]],
     *,
-    top_n: int | None = None,
-    warehouse_stock_total: float | None = None,
-    on_channel_click=None,
-):
-    """渠道横向堆叠条；top_n=None 为全部渠道（可滚动）。"""
-    canvas.delete("all")
-    canvas._volume_bar_meta = []  # type: ignore[attr-defined]
-    w = max(int(canvas.winfo_width() or 400), 280)
-    sorted_rows = sorted(
-        list(channel_rows or []),
-        key=lambda r: -float(r.get("total_containers") or 0),
-    )
-    if top_n is not None and top_n > 0:
-        rows = sorted_rows[:top_n]
-    else:
-        rows = sorted_rows
-    if not rows:
-        canvas.create_text(12, 24, text="暂无渠道数据", anchor="w", fill=C_MUTED, font=("Segoe UI", 10))
-        canvas.configure(scrollregion=(0, 0, w, 48))
-        return
-    max_total = max(float(r.get("total_containers") or 0) for r in rows) or 1.0
-    wh_stock = float(warehouse_stock_total or 0)
-    if wh_stock <= 0:
-        wh_stock = sum(float(r.get("volume_containers") or 0) for r in sorted_rows) or 1.0
-    left = 52
-    right_pad = 168
-    bar_max = max(w - left - right_pad, 72)
-    row_h = 26
-    y = 8
-    title = (
-        f"渠道库存（共 {len(rows)} 个，按合计降序）"
-        if len(rows) == len(sorted_rows)
-        else f"渠道库存 TOP{len(rows)}"
-    )
-    canvas.create_text(
-        12, y, text=title, anchor="w",
-        fill=C_TEXT, font=("Segoe UI", 10, "bold"),
-    )
-    y += 22
-    legend_y = y
-    canvas.create_rectangle(left, legend_y, left + 12, legend_y + 10, fill=C_STOCK, outline="")
-    canvas.create_text(left + 16, legend_y + 5, text="在库", anchor="w", fill=C_MUTED, font=("Segoe UI", 8))
-    canvas.create_rectangle(left + 52, legend_y, left + 64, legend_y + 10, fill=C_PO_LIGHT, outline="")
-    canvas.create_text(left + 68, legend_y + 5, text="在途", anchor="w", fill=C_MUTED, font=("Segoe UI", 8))
-    canvas.create_text(
-        left + bar_max + 8, legend_y + 5,
-        text="在库柜 · 渠内% · 占整库%",
-        anchor="w", fill=C_MUTED, font=("Segoe UI", 8),
-    )
-    y += 18
-    canvas.create_text(
-        12, y,
-        text=f"占整库分母 = 在库合计 {wh_stock:.2f} 柜（与顶部 KPI 一致）",
-        anchor="w", fill="#94a3b8", font=("Segoe UI", 8),
-    )
-    y += 14
+    y: int,
+    w: int,
+    left: int,
+    bar_max: int,
+    row_h: int,
+    wh_stock: float,
+    max_total: float,
+    on_channel_click,
+) -> int:
     for row in rows:
         ch = str(row.get("channel") or "")
         st = float(row.get("volume_containers") or 0)
@@ -157,30 +149,112 @@ def draw_channel_chart(
                 text=f"{stock_pct:.0f}%", anchor="center", fill="white",
                 font=("Segoe UI", 8, "bold"),
             )
-        share_x0 = left
         share_bar_max = min(bar_max, 100)
         share_w = share_bar_max * min(wh_share, 100) / 100
         if share_w > 1:
             canvas.create_rectangle(
-                share_x0, y + 20, share_x0 + share_w, y + 23,
-                fill="#cbd5e1", outline="",
+                x0, y + 20, x0 + share_w, y + 23, fill="#cbd5e1", outline="",
             )
         canvas.create_text(
             left + bar_max + 8, y + 11,
             text=f"{st:.2f}  {stock_pct:.0f}%  {wh_share:.1f}%",
             anchor="w", fill=C_TEXT, font=("Segoe UI", 9),
         )
-        y += 4
         if on_channel_click and bw > 0:
-            tag = f"ch_{ch}"
-            rect = canvas.create_rectangle(
+            tag = f"ch_{ch}_{y}"
+            canvas.create_rectangle(
                 x0, y + 2, x0 + bw, y + 20, fill="", outline="", tags=(tag, "channel_bar"),
             )
-            canvas._volume_bar_meta.append({"id": rect, "channel": ch})  # type: ignore[attr-defined]
             canvas.tag_bind(tag, "<Button-1>", lambda _e, c=ch: on_channel_click(c))
             canvas.tag_bind(tag, "<Enter>", lambda _e: canvas.configure(cursor="hand2"))
             canvas.tag_bind(tag, "<Leave>", lambda _e: canvas.configure(cursor=""))
         y += row_h + 2
+    return y
+
+
+def draw_channel_chart(
+    canvas,
+    channel_rows: list[dict[str, Any]],
+    *,
+    top_n: int | None = None,
+    warehouse_stock_total: float | None = None,
+    group_by_island: bool = False,
+    on_channel_click=None,
+):
+    """渠道横向堆叠条；top_n=None 为全部渠道（可滚动）。"""
+    canvas.delete("all")
+    canvas._volume_bar_meta = []  # type: ignore[attr-defined]
+    w = max(int(canvas.winfo_width() or 400), 280)
+    island_groups = channel_rows_split_by_island(channel_rows) if group_by_island else []
+    flat_rows = sorted(
+        list(channel_rows or []),
+        key=lambda r: -float(r.get("total_containers") or 0),
+    )
+    if top_n is not None and top_n > 0:
+        flat_rows = flat_rows[:top_n]
+    if not flat_rows and not island_groups:
+        canvas.create_text(12, 24, text="暂无渠道数据", anchor="w", fill=C_MUTED, font=("Segoe UI", 10))
+        canvas.configure(scrollregion=(0, 0, w, 48))
+        return
+    all_for_max = flat_rows[:]
+    if island_groups:
+        for _isl, chunk in island_groups:
+            all_for_max.extend(chunk)
+    max_total = max(float(r.get("total_containers") or 0) for r in all_for_max) or 1.0
+    wh_stock = float(warehouse_stock_total or 0)
+    if wh_stock <= 0:
+        wh_stock = sum(float(r.get("volume_containers") or 0) for r in flat_rows) or 1.0
+    left = 52
+    right_pad = 168
+    bar_max = max(w - left - right_pad, 72)
+    row_h = 30
+    y = 8
+    n_ch = sum(len(c) for _, c in island_groups) if island_groups else len(flat_rows)
+    if island_groups:
+        title = f"渠道库存（北岛/南岛分开，共 {n_ch} 条渠道行）"
+    elif top_n is not None and top_n > 0:
+        title = f"渠道库存 TOP{len(flat_rows)}"
+    else:
+        title = f"渠道库存（共 {len(flat_rows)} 个，按合计降序）"
+    canvas.create_text(
+        12, y, text=title, anchor="w",
+        fill=C_TEXT, font=("Segoe UI", 10, "bold"),
+    )
+    y += 22
+    legend_y = y
+    canvas.create_rectangle(left, legend_y, left + 12, legend_y + 10, fill=C_STOCK, outline="")
+    canvas.create_text(left + 16, legend_y + 5, text="在库", anchor="w", fill=C_MUTED, font=("Segoe UI", 8))
+    canvas.create_rectangle(left + 52, legend_y, left + 64, legend_y + 10, fill=C_PO_LIGHT, outline="")
+    canvas.create_text(left + 68, legend_y + 5, text="在途", anchor="w", fill=C_MUTED, font=("Segoe UI", 8))
+    canvas.create_text(
+        left + bar_max + 8, legend_y + 5,
+        text="在库柜 · 渠内% · 占整库%",
+        anchor="w", fill=C_MUTED, font=("Segoe UI", 8),
+    )
+    y += 18
+    canvas.create_text(
+        12, y,
+        text=f"占整库分母 = 在库合计 {wh_stock:.2f} 柜（与顶部 KPI 一致）",
+        anchor="w", fill="#94a3b8", font=("Segoe UI", 8),
+    )
+    y += 14
+    if island_groups:
+        for isl, chunk in island_groups:
+            canvas.create_text(
+                12, y + 10, text=f"■ {isl}", anchor="w",
+                fill=C_TEXT, font=("Segoe UI", 9, "bold"),
+            )
+            y += row_h - 2
+            y = _draw_channel_rows_block(
+                canvas, chunk, y=y, w=w, left=left, bar_max=bar_max, row_h=row_h,
+                wh_stock=wh_stock, max_total=max_total, on_channel_click=on_channel_click,
+            )
+            y += 6
+    else:
+        y = _draw_channel_rows_block(
+            canvas, flat_rows, y=y, w=w, left=left, bar_max=bar_max, row_h=row_h,
+            wh_stock=wh_stock, max_total=max_total, on_channel_click=on_channel_click,
+        )
     canvas.configure(scrollregion=(0, 0, w, y + 8))
 
 
@@ -189,12 +263,14 @@ def draw_warehouse_util_bars(
     report: dict[str, Any],
     *,
     on_wh_select=None,
+    on_island_transit_click=None,
     hide_zero_stock: bool = True,
 ):
     canvas.delete("all")
     canvas._volume_wh_meta = []  # type: ignore[attr-defined]
     w = max(int(canvas.winfo_width() or 480), 320)
     groups = warehouse_rows_grouped(report)
+    transit_map = island_transit_by_island(report)
     if hide_zero_stock:
         trimmed: list[tuple[str, list[dict[str, Any]]]] = []
         for island, rows in groups:
@@ -212,10 +288,14 @@ def draw_warehouse_util_bars(
             max_stock = max(max_stock, float(r.get("volume_containers") or 0))
     if max_stock <= 0:
         max_stock = 1.0
-    left = 168
-    util_w = 72
-    right_pad = 52
-    bar_max = max(w - left - util_w - right_pad, 60)
+    left = 118
+    util_w = 56
+    right_pad = 44
+    bar_max = max(w - left - util_w - right_pad, 48)
+    max_po = max(
+        (float(t.get("po_containers") or 0) for t in transit_map.values()),
+        default=0.0,
+    ) or 1.0
     y = 8
     canvas.create_text(
         12, y, text="仓库容积率", anchor="w", fill=C_TEXT, font=("Segoe UI", 10, "bold"),
@@ -223,7 +303,7 @@ def draw_warehouse_util_bars(
     y += 18
     canvas.create_text(
         left, y,
-        text="条长=在库(柜)  |  右侧=容积率，红线 85%",
+        text="在库=条长+容积率(红线85%)  |  浅蓝=在途PO(柜)",
         anchor="w", fill=C_MUTED, font=("Segoe UI", 8),
     )
     y += 16
@@ -270,6 +350,36 @@ def draw_warehouse_util_bars(
                 )
                 canvas.tag_bind(tag, "<Button-1>", lambda _e, r=row: on_wh_select(r))
             y += row_h
+        tr = transit_map.get(island)
+        if tr:
+            po = float(tr.get("po_containers") or 0)
+            if po > 0:
+                label = f"{island}在途 PO"
+                canvas.create_text(20, y + 11, text=label, anchor="w", fill=C_PO, font=("Segoe UI", 9, "bold"))
+                x0 = left
+                pw = bar_max * (po / max_po)
+                if pw > 0.5:
+                    canvas.create_rectangle(x0, y + 6, x0 + pw, y + 20, fill=C_PO_LIGHT, outline="")
+                canvas.create_text(
+                    x0 + bar_max + 4, y + 13, text=f"{po:.2f} 柜", anchor="w",
+                    fill=C_PO, font=("Segoe UI", 9, "bold"),
+                )
+                canvas.create_text(
+                    left + bar_max + util_w + 14, y + 13, text="点击查看渠道",
+                    anchor="w", fill=C_MUTED, font=("Segoe UI", 8),
+                )
+                if on_island_transit_click:
+                    tag = f"transit_{island}"
+                    canvas.create_rectangle(
+                        0, y, w, y + row_h, fill="", outline="", tags=(tag, "transit_row"),
+                    )
+                    canvas.tag_bind(
+                        tag, "<Button-1>",
+                        lambda _e, isl=island: on_island_transit_click(isl),
+                    )
+                    canvas.tag_bind(tag, "<Enter>", lambda _e: canvas.configure(cursor="hand2"))
+                    canvas.tag_bind(tag, "<Leave>", lambda _e: canvas.configure(cursor=""))
+                y += row_h
         y += 4
     canvas.configure(scrollregion=(0, 0, w, y + 12))
 
