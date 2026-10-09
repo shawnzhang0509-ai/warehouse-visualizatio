@@ -35,7 +35,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.68"
+APP_VERSION = "1.9.69"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -429,7 +429,8 @@ class PanelApp:
             ("in_stock", "有货产品", "0", C_CARD_OK_BG, C_CARD_OK_BG_ACTIVE, C_CARD_OK, True,
              "切换有货/无货 · 点击筛选"),
             ("rate", "有货率", "-", C_CARD_INFO_BG, C_CARD_INFO_BG, C_CARD_INFO, False, ""),
-            ("total", "纳入分析", "0", C_CARD_NEUTRAL_BG, C_CARD_NEUTRAL_BG, C_CARD_NEUTRAL, False, ""),
+            ("total", "纳入分析", "0", C_CARD_NEUTRAL_BG, C_CARD_NEUTRAL_BG, C_CARD_NEUTRAL, False,
+             "在产 SKU 基准；选「全部/停产」会变"),
         ]
         for i, (key, title, val, bg, bg_active, fg, filterable, hint_idle) in enumerate(card_defs):
             card = tk.Frame(cards, bg=bg, padx=16, pady=10, cursor="hand2" if filterable else "arrow",
@@ -447,15 +448,16 @@ class PanelApp:
             )
             val_lbl.pack(anchor="w", pady=(2, 0))
             hint = None
-            if filterable:
+            if filterable or key == "total":
                 hint = tk.Label(
                     card, text=hint_idle, bg=bg, fg=fg, font=("Segoe UI", 8),
-                    cursor="hand2",
+                    cursor="hand2" if filterable else "arrow",
                 )
                 hint.pack(anchor="w")
                 self._stat_hints[key] = hint
-                for w in (card, title_lbl, val_lbl, hint):
-                    w.bind("<Button-1>", lambda _e, k=key: self._on_stat_card_click(k))
+                if filterable:
+                    for w in (card, title_lbl, val_lbl, hint):
+                        w.bind("<Button-1>", lambda _e, k=key: self._on_stat_card_click(k))
             self._stat_labels[key] = val_lbl
             self._stat_cards[key] = card
             self._stat_card_meta[key] = {
@@ -1422,6 +1424,12 @@ class PanelApp:
                 )
                 for w in meta["widgets"]:
                     w.configure(bg=meta["bg"], fg=meta["fg"])
+                hint_lbl = meta.get("hint")
+                if hint_lbl is not None and key == "total":
+                    hint_lbl.configure(
+                        text=hint_overrides.get("total", meta.get("hint_idle", "")),
+                        bg=meta["bg"], fg=meta["fg"],
+                    )
                 continue
 
             is_selected = selected.get(key, False)
@@ -2061,9 +2069,29 @@ class PanelApp:
             self._stat_labels["gap"].configure(text="—", font=("Segoe UI", 14, "bold"))
             self._stat_labels["exempted"].configure(text="—", font=("Segoe UI", 14, "bold"))
             self._stat_labels["warehouse_only"].configure(text="—", font=("Segoe UI", 14, "bold"))
+        active_total = sum(1 for p in self._cached_products if not p.get("discontinued"))
+        disc_total = sum(1 for p in self._cached_products if p.get("discontinued"))
         self._stat_labels["in_stock"].configure(text=str(s.get("in_stock_count", 0)))
         self._stat_labels["rate"].configure(text=pct(s.get("in_stock_rate")))
-        self._stat_labels["total"].configure(text=str(s.get("total_non_discontinue", 0)))
+        if disc_f == "已停产":
+            hint_overrides["total"] = (
+                f"停产 SKU {disc_total} 个"
+                + ("" if self._loaded_full_stock else "（停产数据加载中或未选「已停产」）")
+            )
+            self._stat_labels["total"].configure(text=str(disc_total))
+        elif disc_f == "全部":
+            combined = active_total + disc_total
+            hint_overrides["total"] = f"在产 {active_total} + 停产 {disc_total}"
+            if not self._loaded_full_stock and disc_total == 0:
+                hint_overrides["total"] += " · 停产未加载，请稍候或再选一次「全部」"
+            self._stat_labels["total"].configure(text=str(combined))
+        else:
+            hint_overrides["total"] = (
+                f"在产 {active_total} 个（有货率 {pct(s.get('in_stock_rate'))} 的分母）"
+            )
+            self._stat_labels["total"].configure(
+                text=str(s.get("total_non_discontinue", active_total)),
+            )
         stock_line = (
             f"店面：{s.get('store', '-')}  |  "
             f"库存文件：{s.get('stock_files', 'stock.csv')}  |  "
@@ -2100,8 +2128,6 @@ class PanelApp:
         self._apply_stat_card_styles(hint_overrides)
 
         filtered = self._apply_client_filters(self._cached_products)
-        active_total = sum(1 for p in self._cached_products if not p.get("discontinued"))
-        disc_total = sum(1 for p in self._cached_products if p.get("discontinued"))
         if disc_f == "已停产":
             self.result_count_var.set(f"显示 {len(filtered)} / 停产 {disc_total} 条")
         elif disc_f == "在产":
