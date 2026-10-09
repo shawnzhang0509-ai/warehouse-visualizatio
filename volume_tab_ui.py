@@ -16,6 +16,13 @@ C_CARD_BG = "#ffffff"
 C_SECTION_BG = "#f8fafc"
 C_ISLAND_BAR = "#1d4ed8"
 C_ISLAND_BAR_2 = "#38bdf8"
+C_WH_SHARE_BG = "#dbeafe"
+C_WH_SHARE_FG = "#1e40af"
+C_WH_SHARE_BORDER = "#2563eb"
+CHART_COL_QTY_W = 50
+CHART_COL_CHAN_PCT_W = 36
+CHART_COL_WH_SHARE_W = 54
+WH_STOCK_NUM_W = 72
 
 
 def volume_kpis_from_report(report: dict[str, Any]) -> dict[str, Any]:
@@ -114,6 +121,27 @@ def _truncate(text: str, max_len: int) -> str:
     return text if len(text) <= max_len else text[: max_len - 1] + "…"
 
 
+def _channel_chart_columns(w: int, left: int, bar_max: int) -> tuple[int, int, int]:
+    col_qty = left + bar_max + 6
+    col_chan_pct = col_qty + CHART_COL_QTY_W
+    col_wh_share_r = max(w - 6, col_chan_pct + CHART_COL_WH_SHARE_W)
+    return col_qty, col_chan_pct, col_wh_share_r
+
+
+def _draw_wh_share_pill(canvas, right_x: int, cy: int, pct: float):
+    pill_w = CHART_COL_WH_SHARE_W
+    x0 = right_x - pill_w
+    canvas.create_rectangle(
+        x0, cy - 9, right_x, cy + 9,
+        fill=C_WH_SHARE_BG, outline=C_WH_SHARE_BORDER, width=1,
+    )
+    canvas.create_text(
+        x0 + pill_w / 2, cy,
+        text=f"{pct:.1f}%", anchor="center",
+        fill=C_WH_SHARE_FG, font=("Segoe UI", 10, "bold"),
+    )
+
+
 def _draw_channel_rows_block(
     canvas,
     rows: list[dict[str, Any]],
@@ -127,6 +155,7 @@ def _draw_channel_rows_block(
     max_total: float,
     on_channel_click,
 ) -> int:
+    col_qty, col_chan_pct, col_wh_share_r = _channel_chart_columns(w, left, bar_max)
     for row in rows:
         ch = str(row.get("channel") or "")
         st = float(row.get("volume_containers") or 0)
@@ -149,17 +178,15 @@ def _draw_channel_rows_block(
                 text=f"{stock_pct:.0f}%", anchor="center", fill="white",
                 font=("Segoe UI", 8, "bold"),
             )
-        share_bar_max = min(bar_max, 100)
-        share_w = share_bar_max * min(wh_share, 100) / 100
-        if share_w > 1:
-            canvas.create_rectangle(
-                x0, y + 20, x0 + share_w, y + 23, fill="#cbd5e1", outline="",
-            )
         canvas.create_text(
-            left + bar_max + 8, y + 11,
-            text=f"{st:.2f}  {stock_pct:.0f}%  {wh_share:.1f}%",
-            anchor="w", fill=C_TEXT, font=("Segoe UI", 9),
+            col_qty, y + 11, text=f"{st:.2f}", anchor="w",
+            fill=C_TEXT, font=("Segoe UI", 9),
         )
+        canvas.create_text(
+            col_chan_pct, y + 11, text=f"{stock_pct:.0f}%", anchor="w",
+            fill=C_MUTED, font=("Segoe UI", 9),
+        )
+        _draw_wh_share_pill(canvas, col_wh_share_r, y + 11, wh_share)
         if on_channel_click and bw > 0:
             tag = f"ch_{ch}_{y}"
             canvas.create_rectangle(
@@ -205,8 +232,9 @@ def draw_channel_chart(
     if wh_stock <= 0:
         wh_stock = sum(float(r.get("volume_containers") or 0) for r in flat_rows) or 1.0
     left = 52
-    right_pad = 168
-    bar_max = max(w - left - right_pad, 72)
+    right_cols = CHART_COL_QTY_W + CHART_COL_CHAN_PCT_W + CHART_COL_WH_SHARE_W + 20
+    bar_max = max(w - left - right_cols, 72)
+    col_qty, col_chan_pct, col_wh_share_r = _channel_chart_columns(w, left, bar_max)
     row_h = 30
     y = 8
     n_ch = sum(len(c) for _, c in island_groups) if island_groups else len(flat_rows)
@@ -226,10 +254,11 @@ def draw_channel_chart(
     canvas.create_text(left + 16, legend_y + 5, text="在库", anchor="w", fill=C_MUTED, font=("Segoe UI", 8))
     canvas.create_rectangle(left + 52, legend_y, left + 64, legend_y + 10, fill=C_PO_LIGHT, outline="")
     canvas.create_text(left + 68, legend_y + 5, text="在途", anchor="w", fill=C_MUTED, font=("Segoe UI", 8))
+    canvas.create_text(col_qty, legend_y + 5, text="在库柜", anchor="w", fill=C_MUTED, font=("Segoe UI", 8))
+    canvas.create_text(col_chan_pct, legend_y + 5, text="渠内%", anchor="w", fill=C_MUTED, font=("Segoe UI", 8))
     canvas.create_text(
-        left + bar_max + 8, legend_y + 5,
-        text="在库柜 · 渠内% · 占整库%",
-        anchor="w", fill=C_MUTED, font=("Segoe UI", 8),
+        col_wh_share_r - CHART_COL_WH_SHARE_W / 2, legend_y + 5, text="占整库%",
+        anchor="center", fill=C_WH_SHARE_FG, font=("Segoe UI", 8, "bold"),
     )
     y += 18
     canvas.create_text(
@@ -293,9 +322,12 @@ def draw_warehouse_util_bars(
     # 在库条与在途 PO 条共用同一柜数刻度，避免各自拉满导致长短失真
     scale_max = max(max_stock, max_po, 1.0)
     left = 118
-    util_w = 56
-    right_pad = 44
-    bar_max = max(w - left - util_w - right_pad, 48)
+    util_w = 52
+    util_pct_w = 44
+    bar_max = max(w - left - WH_STOCK_NUM_W - util_w - util_pct_w - 12, 40)
+    stock_qty_x = left + bar_max + 4
+    util_x0 = left + bar_max + WH_STOCK_NUM_W + 6
+    util_pct_x = util_x0 + util_w + 6
     y = 8
     canvas.create_text(
         12, y, text="仓库容积率", anchor="w", fill=C_TEXT, font=("Segoe UI", 10, "bold"),
@@ -308,7 +340,7 @@ def draw_warehouse_util_bars(
     )
     y += 16
     row_h = 30
-    warn_x = left + bar_max + 8 + int(util_w * UTIL_WARN_PCT / 100)
+    warn_x = util_x0 + int(util_w * UTIL_WARN_PCT / 100)
 
     for island, rows in groups:
         canvas.create_text(
@@ -328,21 +360,23 @@ def draw_warehouse_util_bars(
             x0 = left
             if bw > 0.5:
                 canvas.create_rectangle(x0, y + 6, x0 + bw, y + 20, fill=bar_color, outline="")
-            canvas.create_text(x0 + bar_max + 4, y + 13, text=f"{stock:.2f}", anchor="w", fill=C_MUTED, font=("Segoe UI", 8))
-            ux0 = left + bar_max + 8
-            canvas.create_rectangle(ux0, y + 8, ux0 + util_w, y + 18, fill="#e2e8f0", outline="")
+            canvas.create_text(
+                stock_qty_x, y + 13, text=f"{stock:.2f} 柜", anchor="w",
+                fill=C_TEXT, font=("Segoe UI", 10, "bold"),
+            )
+            canvas.create_rectangle(util_x0, y + 8, util_x0 + util_w, y + 18, fill="#e2e8f0", outline="")
             canvas.create_line(warn_x, y + 6, warn_x, y + 20, fill="#ef4444", width=2)
             if util_f is not None:
                 uw = max(2, int(util_w * min(util_f, 100) / 100))
                 ucolor = C_WARN if warn else C_STOCK_LIGHT
-                canvas.create_rectangle(ux0, y + 8, ux0 + uw, y + 18, fill=ucolor, outline="")
+                canvas.create_rectangle(util_x0, y + 8, util_x0 + uw, y + 18, fill=ucolor, outline="")
                 canvas.create_text(
-                    ux0 + util_w + 6, y + 13,
-                    text=f"{util_f:.1f}%", anchor="w",
+                    util_pct_x, y + 13,
+                    text=f"容积率 {util_f:.1f}%", anchor="w",
                     fill=C_WARN if warn else C_TEXT, font=("Segoe UI", 9, "bold" if warn else "normal"),
                 )
             else:
-                canvas.create_text(ux0 + util_w + 6, y + 13, text="-", anchor="w", fill=C_MUTED, font=("Segoe UI", 9))
+                canvas.create_text(util_pct_x, y + 13, text="容积率 -", anchor="w", fill=C_MUTED, font=("Segoe UI", 9))
             if on_wh_select:
                 tag = f"wh_{name}"
                 canvas.create_rectangle(
@@ -361,12 +395,12 @@ def draw_warehouse_util_bars(
                 if pw > 0.5:
                     canvas.create_rectangle(x0, y + 6, x0 + pw, y + 20, fill=C_PO_LIGHT, outline="")
                 canvas.create_text(
-                    x0 + bar_max + 4, y + 13, text=f"{po:.2f} 柜", anchor="w",
-                    fill=C_PO, font=("Segoe UI", 9, "bold"),
+                    stock_qty_x, y + 13, text=f"{po:.2f} 柜", anchor="w",
+                    fill=C_PO, font=("Segoe UI", 10, "bold"),
                 )
                 canvas.create_text(
-                    left + bar_max + util_w + 14, y + 13, text="点击查看渠道",
-                    anchor="w", fill=C_MUTED, font=("Segoe UI", 8),
+                    util_pct_x, y + 13, text="在途 · 点击查看渠道",
+                    anchor="w", fill=C_PO, font=("Segoe UI", 8),
                 )
                 if on_island_transit_click:
                     tag = f"transit_{island}"

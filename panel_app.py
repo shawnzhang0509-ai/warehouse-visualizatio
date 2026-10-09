@@ -36,7 +36,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.75"
+APP_VERSION = "1.9.76"
 APP_TITLE = "ifurniture运营提效看板"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
