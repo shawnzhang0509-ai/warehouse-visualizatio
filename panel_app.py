@@ -1,4 +1,4 @@
-"""有货未展示看板 —— 纯本地桌面软件（Tkinter，不走浏览器）。
+"""ifurniture运营提效看板 —— 纯本地桌面软件（Tkinter，不走浏览器）。
 
 表格每行内嵌产品缩略图；支持搜索、筛选、排序、按系列分组。
 
@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 import panel_data
+import volume_tab_ui as vol_ui
 
 try:
     import tkinter as tk
@@ -35,7 +36,8 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.70"
+APP_VERSION = "1.9.71"
+APP_TITLE = "ifurniture运营提效看板"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
@@ -128,7 +130,7 @@ class PanelApp:
         if tk is None:
             raise RuntimeError("当前 Python 缺少 Tkinter，无法启动桌面界面。")
         self.root = tk.Tk()
-        self.root.title(f"有货未展示看板 v{APP_VERSION}")
+        self.root.title(f"{APP_TITLE} v{APP_VERSION}")
         self.root.geometry("1360x860")
         self.root.minsize(1080, 700)
         self.root.configure(bg=C_BG)
@@ -180,6 +182,14 @@ class PanelApp:
         self._volume_wh_row_meta = {}
         self._volume_channel_row_meta = {}
         self._volume_split_island_var = tk.BooleanVar(value=True)
+        self._volume_show_tables_var = tk.BooleanVar(value=False)
+        self._volume_kpi_value_labels = {}
+        self._volume_kpi_hint_labels = {}
+        self._volume_channel_canvas = None
+        self._volume_wh_canvas = None
+        self._volume_island_canvas = None
+        self._volume_last_channel_rows = []
+        self._volume_chart_after_id = None
         self._onhold_status_lbl = None
         self._transfer_status_lbl = None
         self._mining_rendered_for = None
@@ -336,7 +346,7 @@ class PanelApp:
     def _build_ui(self, stores, regions):
         header = tk.Frame(self.root, bg=C_HEADER, padx=16, pady=10)
         header.pack(fill=tk.X)
-        tk.Label(header, text="有货未展示看板", bg=C_HEADER, fg="white",
+        tk.Label(header, text=APP_TITLE, bg=C_HEADER, fg="white",
                  font=("Segoe UI", 16, "bold")).pack(side=tk.LEFT)
         tk.Label(header, text=f"v{APP_VERSION}", bg=C_HEADER, fg="#93c5fd",
                  font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(8, 0), pady=(6, 0))
@@ -1065,8 +1075,63 @@ class PanelApp:
             bg="white", fg=C_MUTED, font=("Segoe UI", 9),
         )
         self._volume_status_lbl.pack(anchor="w", padx=8, pady=(0, 4))
-        vol_panes = tk.PanedWindow(vol_tab, orient=tk.HORIZONTAL, bg="white", sashwidth=6)
-        vol_panes.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 6))
+
+        vol_kpi = tk.Frame(vol_tab, bg=C_BG, padx=8, pady=6)
+        vol_kpi.pack(fill=tk.X)
+        kpi_defs = (
+            ("total", "总柜数（在库+在途）", "—", "#eff6ff", "#1d4ed8"),
+            ("stock", "在库", "—", "#f0fdf4", "#15803d"),
+            ("po", "在途 PO", "—", "#fff7ed", "#c2410c"),
+            ("sku", "纳入分析 SKU", "—", "#f8fafc", "#475569"),
+            ("warn", "容积率≥85% 仓库", "—", "#fef2f2", "#b91c1c"),
+        )
+        for i, (key, title, val, bg, fg) in enumerate(kpi_defs):
+            card = tk.Frame(vol_kpi, bg=bg, padx=14, pady=10, highlightthickness=1, highlightbackground="#e2e8f0")
+            card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0 if i == 0 else 6, 0))
+            tk.Label(card, text=title, bg=bg, fg=C_MUTED, font=("Segoe UI", 9)).pack(anchor="w")
+            vl = tk.Label(card, text=val, bg=bg, fg=fg, font=("Segoe UI", 20, "bold"))
+            vl.pack(anchor="w", pady=(2, 0))
+            hl = tk.Label(card, text="", bg=bg, fg=C_MUTED, font=("Segoe UI", 8))
+            hl.pack(anchor="w")
+            self._volume_kpi_value_labels[key] = vl
+            self._volume_kpi_hint_labels[key] = hl
+
+        vol_charts = tk.PanedWindow(vol_tab, orient=tk.HORIZONTAL, bg="white", sashwidth=6)
+        vol_charts.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+        ch_chart_frame = tk.Frame(vol_charts, bg="white", highlightthickness=1, highlightbackground="#e2e8f0")
+        wh_chart_outer = tk.Frame(vol_charts, bg="white", highlightthickness=1, highlightbackground="#e2e8f0")
+        vol_charts.add(ch_chart_frame, minsize=300)
+        vol_charts.add(wh_chart_outer, minsize=380)
+        self._volume_channel_canvas = tk.Canvas(
+            ch_chart_frame, bg="white", highlightthickness=0, height=320,
+        )
+        self._volume_channel_canvas.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        wh_scroll = ttk.Scrollbar(wh_chart_outer, orient="vertical")
+        self._volume_wh_canvas = tk.Canvas(
+            wh_chart_outer, bg="white", highlightthickness=0,
+            yscrollcommand=wh_scroll.set,
+        )
+        wh_scroll.config(command=self._volume_wh_canvas.yview)
+        self._volume_wh_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=4)
+        wh_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._volume_island_canvas = tk.Canvas(
+            vol_tab, bg="white", highlightthickness=0, height=52,
+        )
+        self._volume_island_canvas.pack(fill=tk.X, padx=8, pady=(0, 4))
+        for cv in (self._volume_channel_canvas, self._volume_wh_canvas, self._volume_island_canvas):
+            cv.bind("<Configure>", lambda _e: self._volume_schedule_chart_redraw())
+        self._volume_island_canvas.bind("<Button-1>", self._volume_on_island_strip_click)
+        self._volume_island_canvas.bind("<Enter>", lambda _e: self._volume_island_canvas.configure(cursor="hand2"))
+        self._volume_island_canvas.bind("<Leave>", lambda _e: self._volume_island_canvas.configure(cursor=""))
+
+        ttk.Checkbutton(
+            vol_toolbar, text="显示数据表",
+            variable=self._volume_show_tables_var,
+            command=self._volume_toggle_table_panes,
+        ).pack(side=tk.LEFT, padx=(12, 0))
+
+        self._volume_legacy_panes = tk.PanedWindow(vol_tab, orient=tk.HORIZONTAL, bg="white", sashwidth=6)
+        vol_panes = self._volume_legacy_panes
         ch_frame = tk.Frame(vol_panes, bg="white")
         wh_frame = tk.Frame(vol_panes, bg="white")
         vol_panes.add(ch_frame, minsize=220)
@@ -1128,11 +1193,12 @@ class PanelApp:
         self._volume_tree.tag_configure("island_hdr", font=("Segoe UI", 9, "bold"), background="#f1f5f9")
         self._volume_tree.tag_configure("island_transit", background="#e0f2fe")
         self._volume_tree.bind("<<TreeviewSelect>>", self._on_volume_wh_select)
-        detail_wrap = tk.Frame(vol_tab, bg="white")
+        self._volume_detail_wrap = tk.Frame(vol_tab, bg="white")
+        detail_wrap = self._volume_detail_wrap
         detail_wrap.pack(fill=tk.BOTH, expand=False, padx=4, pady=(0, 6))
         self._volume_detail_title = tk.Label(
             detail_wrap,
-            text="岛别渠道明细：点右侧「北岛/南岛总在途」或左侧渠道下的岛行",
+            text="岛别渠道明细：点击上方南北岛在途条，或勾选「显示数据表」后在表中点总在途行",
             bg="white", fg=C_MUTED, font=("Segoe UI", 9),
         )
         self._volume_detail_title.pack(anchor="w", padx=4, pady=(0, 2))
@@ -1158,6 +1224,7 @@ class PanelApp:
         self._volume_detail_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         det_scroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._volume_detail_tree.tag_configure("sum", font=("Segoe UI", 9, "bold"), background="#f8fafc")
+        self._volume_toggle_table_panes()
 
         for widget in (
             mining_inner, self._tab_mining, self._tab_onhold, self._tab_transfer,
@@ -2340,6 +2407,107 @@ class PanelApp:
 
         render_inventory_health(self, force=force)
 
+    def _volume_toggle_table_panes(self):
+        panes = getattr(self, "_volume_legacy_panes", None)
+        if not panes:
+            return
+        if self._volume_show_tables_var.get():
+            panes.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 4), before=self._volume_detail_wrap)
+        else:
+            panes.pack_forget()
+
+    def _volume_schedule_chart_redraw(self):
+        if self._volume_chart_after_id:
+            try:
+                self.root.after_cancel(self._volume_chart_after_id)
+            except tk.TclError:
+                pass
+        self._volume_chart_after_id = self.root.after(120, self._volume_redraw_charts)
+
+    def _volume_sku_count_for_kpi(self):
+        if self._cached_products:
+            active = sum(1 for p in self._cached_products if not p.get("discontinued"))
+            disc = sum(1 for p in self._cached_products if p.get("discontinued"))
+            if self._loaded_full_stock:
+                return active + disc
+            return active
+        s = self._cached_summary or {}
+        return s.get("total_non_discontinue")
+
+    def _volume_update_kpi_cards(self, report):
+        kpis = vol_ui.volume_kpis_from_report(report)
+        labels = self._volume_kpi_value_labels
+        hints = self._volume_kpi_hint_labels
+        if labels.get("total"):
+            labels["total"].configure(text=f"{kpis['total_containers']:.2f}")
+        if labels.get("stock"):
+            labels["stock"].configure(text=f"{kpis['stock_containers']:.2f}")
+            sp = kpis.get("stock_pct")
+            hints["stock"].configure(text=f"占总量 {sp}%" if sp is not None else "")
+        if labels.get("po"):
+            labels["po"].configure(text=f"{kpis['po_containers']:.2f}")
+            pp = kpis.get("po_pct")
+            hints["po"].configure(
+                text=f"占总量 {pp}% · 近一半可能在海上" if pp and pp >= 40 else (f"占总量 {pp}%" if pp else ""),
+            )
+        sku_n = self._volume_sku_count_for_kpi()
+        if labels.get("sku"):
+            labels["sku"].configure(text=str(sku_n) if sku_n is not None else "—")
+            hints["sku"].configure(text="与产品明细「纳入分析」一致（需已加载店面）" if sku_n else "请先选店面并加载产品")
+        high = kpis.get("high_util") or []
+        if labels.get("warn"):
+            labels["warn"].configure(text=str(len(high)))
+            if high:
+                top = " · ".join(f"{n} {u:.1f}%" for n, u in high[:2])
+                hints["warn"].configure(text=top + (" …" if len(high) > 2 else ""))
+            else:
+                hints["warn"].configure(text="无仓库超 85% 警戒线")
+        return kpis
+
+    def _volume_on_channel_chart_click(self, channel):
+        if self._volume_channel_var:
+            self._volume_channel_var.set(channel)
+        if self._volume_channel_pick_var:
+            pick = channel if channel in (self._volume_channel_options or []) else channel
+            self._volume_channel_pick_var.set(pick)
+        self._refresh_volume_tab()
+
+    def _volume_on_island_strip_click(self, event):
+        canvas = self._volume_island_canvas
+        if not canvas:
+            return
+        w = max(int(canvas.winfo_width() or 400), 400)
+        x0, x1 = 12, w - 12
+        bar_w = x1 - x0
+        kpis = vol_ui.volume_kpis_from_report(self._volume_last_report or {})
+        north = float(kpis.get("north_po") or 0)
+        south = float(kpis.get("south_po") or 0)
+        total = north + south
+        if total <= 0:
+            return
+        rel = (event.x - x0) / bar_w if bar_w > 0 else 0.5
+        island = "北岛" if rel < (north / total) else "南岛"
+        self._volume_show_island_po_detail(island)
+
+    def _volume_redraw_charts(self):
+        self._volume_chart_after_id = None
+        report = self._volume_last_report or {}
+        rows = self._volume_last_channel_rows or []
+        if self._volume_channel_canvas:
+            vol_ui.draw_channel_top10(
+                self._volume_channel_canvas,
+                rows,
+                on_channel_click=self._volume_on_channel_chart_click,
+            )
+        if self._volume_wh_canvas:
+            vol_ui.draw_warehouse_util_bars(self._volume_wh_canvas, report)
+            bbox = self._volume_wh_canvas.bbox("all")
+            if bbox:
+                self._volume_wh_canvas.configure(scrollregion=bbox)
+        kpis = vol_ui.volume_kpis_from_report(report)
+        if self._volume_island_canvas:
+            vol_ui.draw_island_po_strip(self._volume_island_canvas, kpis)
+
     def _volume_channel_list(self):
         raw = str(self._volume_channel_var.get() if self._volume_channel_var else "").strip()
         if not raw:
@@ -2568,6 +2736,8 @@ class PanelApp:
                 return
             report, channel_rows, channel_names = payload
             self._volume_last_report = report
+            self._volume_last_channel_rows = channel_rows
+            self._volume_update_kpi_cards(report)
             self._volume_channel_options = ["全部渠道"] + channel_names
             if getattr(self, "_volume_channel_combo", None):
                 self._volume_channel_combo.configure(values=self._volume_channel_options)
@@ -2629,6 +2799,7 @@ class PanelApp:
                         + (f" · {hint}" if hint else "")
                     ),
                 )
+            self._volume_redraw_charts()
 
         if force:
             try:
