@@ -155,6 +155,12 @@ EXCLUDED_WAREHOUSE_NAMES = [
     "APEX Center",
     "China_Admin Supplies",
     "SleepLAB-Onehunga",
+    # 店仓/陈列仓：容积率页暂不参与对比（先看中心仓）
+    "CHCH Display",
+    "CHCH Display Colombo",
+    "CHCH Shop Storage",
+    "CHCH Treffers",
+    "CHCH Colombo Shop Storage",
 ]
 
 _MASTER_LOCK = Lock()

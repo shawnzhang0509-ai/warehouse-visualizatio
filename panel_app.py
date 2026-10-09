@@ -36,7 +36,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.71"
+APP_VERSION = "1.9.72"
 APP_TITLE = "ifurniture运营提效看板"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
@@ -183,6 +183,7 @@ class PanelApp:
         self._volume_channel_row_meta = {}
         self._volume_split_island_var = tk.BooleanVar(value=True)
         self._volume_show_tables_var = tk.BooleanVar(value=False)
+        self._volume_channel_chart_mode_var = tk.StringVar(value="全部")
         self._volume_kpi_value_labels = {}
         self._volume_kpi_hint_labels = {}
         self._volume_channel_canvas = None
@@ -1102,10 +1103,14 @@ class PanelApp:
         wh_chart_outer = tk.Frame(vol_charts, bg="white", highlightthickness=1, highlightbackground="#e2e8f0")
         vol_charts.add(ch_chart_frame, minsize=300)
         vol_charts.add(wh_chart_outer, minsize=380)
+        ch_scroll = ttk.Scrollbar(ch_chart_frame, orient="vertical")
         self._volume_channel_canvas = tk.Canvas(
             ch_chart_frame, bg="white", highlightthickness=0, height=320,
+            yscrollcommand=ch_scroll.set,
         )
-        self._volume_channel_canvas.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        ch_scroll.config(command=self._volume_channel_canvas.yview)
+        self._volume_channel_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=4)
+        ch_scroll.pack(side=tk.RIGHT, fill=tk.Y, pady=4)
         wh_scroll = ttk.Scrollbar(wh_chart_outer, orient="vertical")
         self._volume_wh_canvas = tk.Canvas(
             wh_chart_outer, bg="white", highlightthickness=0,
@@ -1124,6 +1129,18 @@ class PanelApp:
         self._volume_island_canvas.bind("<Enter>", lambda _e: self._volume_island_canvas.configure(cursor="hand2"))
         self._volume_island_canvas.bind("<Leave>", lambda _e: self._volume_island_canvas.configure(cursor=""))
 
+        tk.Label(vol_toolbar, text="渠道图", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(
+            side=tk.LEFT, padx=(12, 0),
+        )
+        self._volume_channel_chart_combo = ttk.Combobox(
+            vol_toolbar, width=8, state="readonly",
+            textvariable=self._volume_channel_chart_mode_var,
+            values=("全部", "TOP10"),
+        )
+        self._volume_channel_chart_combo.pack(side=tk.LEFT, padx=(4, 0))
+        self._volume_channel_chart_combo.bind(
+            "<<ComboboxSelected>>", lambda _e: self._volume_schedule_chart_redraw(),
+        )
         ttk.Checkbutton(
             vol_toolbar, text="显示数据表",
             variable=self._volume_show_tables_var,
@@ -2494,11 +2511,17 @@ class PanelApp:
         report = self._volume_last_report or {}
         rows = self._volume_last_channel_rows or []
         if self._volume_channel_canvas:
-            vol_ui.draw_channel_top10(
+            mode = str(self._volume_channel_chart_mode_var.get() or "全部").strip()
+            top_n = 10 if mode.upper().startswith("TOP") else None
+            vol_ui.draw_channel_chart(
                 self._volume_channel_canvas,
                 rows,
+                top_n=top_n,
                 on_channel_click=self._volume_on_channel_chart_click,
             )
+            bbox = self._volume_channel_canvas.bbox("all")
+            if bbox:
+                self._volume_channel_canvas.configure(scrollregion=bbox)
         if self._volume_wh_canvas:
             vol_ui.draw_warehouse_util_bars(self._volume_wh_canvas, report)
             bbox = self._volume_wh_canvas.bbox("all")

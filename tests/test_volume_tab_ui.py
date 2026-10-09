@@ -1,6 +1,7 @@
 import unittest
 
 import volume_tab_ui as vol_ui
+import warehouse_volume as wv
 
 
 class VolumeTabUiTests(unittest.TestCase):
@@ -18,6 +19,17 @@ class VolumeTabUiTests(unittest.TestCase):
         self.assertEqual(k["total_containers"], 230.0)
         self.assertEqual(len(k["high_util"]), 1)
         self.assertEqual(k["north_po_pct"], 75.0)
+
+    def test_chch_display_warehouses_excluded_from_volume(self):
+        master = {}
+        for name in (
+            "CHCH Display",
+            "CHCH Display Colombo",
+            "CHCH Shop Storage",
+            "CHCH Treffers",
+            "CHCH Colombo Shop Storage",
+        ):
+            self.assertTrue(wv._volume_stock_warehouse_excluded(name, master))
 
 
 if __name__ == "__main__":

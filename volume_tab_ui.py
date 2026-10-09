@@ -75,29 +75,42 @@ def _truncate(text: str, max_len: int) -> str:
     return text if len(text) <= max_len else text[: max_len - 1] + "…"
 
 
-def draw_channel_top10(
+def draw_channel_chart(
     canvas,
     channel_rows: list[dict[str, Any]],
     *,
-    top_n: int = 10,
+    top_n: int | None = None,
     on_channel_click=None,
 ):
+    """渠道横向堆叠条；top_n=None 为全部渠道（可滚动）。"""
     canvas.delete("all")
     canvas._volume_bar_meta = []  # type: ignore[attr-defined]
     w = max(int(canvas.winfo_width() or 400), 280)
-    rows = list(channel_rows or [])[:top_n]
+    sorted_rows = sorted(
+        list(channel_rows or []),
+        key=lambda r: -float(r.get("total_containers") or 0),
+    )
+    if top_n is not None and top_n > 0:
+        rows = sorted_rows[:top_n]
+    else:
+        rows = sorted_rows
     if not rows:
         canvas.create_text(12, 24, text="暂无渠道数据", anchor="w", fill=C_MUTED, font=("Segoe UI", 10))
         canvas.configure(scrollregion=(0, 0, w, 48))
         return
     max_total = max(float(r.get("total_containers") or 0) for r in rows) or 1.0
     left = 52
-    right_pad = 88
+    right_pad = 118
     bar_max = max(w - left - right_pad, 80)
     row_h = 26
     y = 8
+    title = (
+        f"渠道库存（共 {len(rows)} 个，按合计降序）"
+        if len(rows) == len(sorted_rows)
+        else f"渠道库存 TOP{len(rows)}"
+    )
     canvas.create_text(
-        12, y, text="渠道库存 TOP10", anchor="w",
+        12, y, text=title, anchor="w",
         fill=C_TEXT, font=("Segoe UI", 10, "bold"),
     )
     y += 22
@@ -106,6 +119,10 @@ def draw_channel_top10(
     canvas.create_text(left + 16, legend_y + 5, text="在库", anchor="w", fill=C_MUTED, font=("Segoe UI", 8))
     canvas.create_rectangle(left + 52, legend_y, left + 64, legend_y + 10, fill=C_PO_LIGHT, outline="")
     canvas.create_text(left + 68, legend_y + 5, text="在途", anchor="w", fill=C_MUTED, font=("Segoe UI", 8))
+    canvas.create_text(
+        left + bar_max + 8, legend_y + 5, text="合计 · 在库占比", anchor="w",
+        fill=C_MUTED, font=("Segoe UI", 8),
+    )
     y += 20
     for row in rows:
         ch = str(row.get("channel") or "")
@@ -121,9 +138,16 @@ def draw_channel_top10(
             canvas.create_rectangle(x0, y + 4, x0 + sw, y + 18, fill=C_STOCK, outline="")
         if pw > 0:
             canvas.create_rectangle(x0 + sw, y + 4, x0 + sw + pw, y + 18, fill=C_PO_LIGHT, outline="")
+        stock_pct = (st / total * 100) if total > 0 else 0.0
+        if bw > 28 and stock_pct > 0:
+            canvas.create_text(
+                x0 + min(sw, bw) / 2, y + 11,
+                text=f"{stock_pct:.0f}%", anchor="center", fill="white",
+                font=("Segoe UI", 8, "bold"),
+            )
         canvas.create_text(
             left + bar_max + 8, y + 11,
-            text=f"{total:.2f}", anchor="w", fill=C_TEXT, font=("Segoe UI", 9),
+            text=f"{total:.2f}  在库{stock_pct:.0f}%", anchor="w", fill=C_TEXT, font=("Segoe UI", 9),
         )
         if on_channel_click and bw > 0:
             tag = f"ch_{ch}"
@@ -138,11 +162,24 @@ def draw_channel_top10(
     canvas.configure(scrollregion=(0, 0, w, y + 8))
 
 
-def draw_warehouse_util_bars(canvas, report: dict[str, Any], *, on_wh_select=None):
+def draw_warehouse_util_bars(
+    canvas,
+    report: dict[str, Any],
+    *,
+    on_wh_select=None,
+    hide_zero_stock: bool = True,
+):
     canvas.delete("all")
     canvas._volume_wh_meta = []  # type: ignore[attr-defined]
     w = max(int(canvas.winfo_width() or 480), 320)
     groups = warehouse_rows_grouped(report)
+    if hide_zero_stock:
+        trimmed: list[tuple[str, list[dict[str, Any]]]] = []
+        for island, rows in groups:
+            kept = [r for r in rows if float(r.get("volume_containers") or 0) > 0.01]
+            if kept:
+                trimmed.append((island, kept))
+        groups = trimmed
     if not groups:
         canvas.create_text(12, 24, text="暂无仓库在库数据", anchor="w", fill=C_MUTED, font=("Segoe UI", 10))
         canvas.configure(scrollregion=(0, 0, w, 48))
