@@ -80,6 +80,7 @@ def draw_channel_chart(
     channel_rows: list[dict[str, Any]],
     *,
     top_n: int | None = None,
+    warehouse_stock_total: float | None = None,
     on_channel_click=None,
 ):
     """渠道横向堆叠条；top_n=None 为全部渠道（可滚动）。"""
@@ -99,9 +100,12 @@ def draw_channel_chart(
         canvas.configure(scrollregion=(0, 0, w, 48))
         return
     max_total = max(float(r.get("total_containers") or 0) for r in rows) or 1.0
+    wh_stock = float(warehouse_stock_total or 0)
+    if wh_stock <= 0:
+        wh_stock = sum(float(r.get("volume_containers") or 0) for r in sorted_rows) or 1.0
     left = 52
-    right_pad = 118
-    bar_max = max(w - left - right_pad, 80)
+    right_pad = 168
+    bar_max = max(w - left - right_pad, 72)
     row_h = 26
     y = 8
     title = (
@@ -120,10 +124,17 @@ def draw_channel_chart(
     canvas.create_rectangle(left + 52, legend_y, left + 64, legend_y + 10, fill=C_PO_LIGHT, outline="")
     canvas.create_text(left + 68, legend_y + 5, text="在途", anchor="w", fill=C_MUTED, font=("Segoe UI", 8))
     canvas.create_text(
-        left + bar_max + 8, legend_y + 5, text="合计 · 在库占比", anchor="w",
-        fill=C_MUTED, font=("Segoe UI", 8),
+        left + bar_max + 8, legend_y + 5,
+        text="在库柜 · 渠内% · 占整库%",
+        anchor="w", fill=C_MUTED, font=("Segoe UI", 8),
     )
-    y += 20
+    y += 18
+    canvas.create_text(
+        12, y,
+        text=f"占整库分母 = 在库合计 {wh_stock:.2f} 柜（与顶部 KPI 一致）",
+        anchor="w", fill="#94a3b8", font=("Segoe UI", 8),
+    )
+    y += 14
     for row in rows:
         ch = str(row.get("channel") or "")
         st = float(row.get("volume_containers") or 0)
@@ -139,16 +150,27 @@ def draw_channel_chart(
         if pw > 0:
             canvas.create_rectangle(x0 + sw, y + 4, x0 + sw + pw, y + 18, fill=C_PO_LIGHT, outline="")
         stock_pct = (st / total * 100) if total > 0 else 0.0
+        wh_share = (st / wh_stock * 100) if wh_stock > 0 else 0.0
         if bw > 28 and stock_pct > 0:
             canvas.create_text(
                 x0 + min(sw, bw) / 2, y + 11,
                 text=f"{stock_pct:.0f}%", anchor="center", fill="white",
                 font=("Segoe UI", 8, "bold"),
             )
+        share_x0 = left
+        share_bar_max = min(bar_max, 100)
+        share_w = share_bar_max * min(wh_share, 100) / 100
+        if share_w > 1:
+            canvas.create_rectangle(
+                share_x0, y + 20, share_x0 + share_w, y + 23,
+                fill="#cbd5e1", outline="",
+            )
         canvas.create_text(
             left + bar_max + 8, y + 11,
-            text=f"{total:.2f}  在库{stock_pct:.0f}%", anchor="w", fill=C_TEXT, font=("Segoe UI", 9),
+            text=f"{st:.2f}  {stock_pct:.0f}%  {wh_share:.1f}%",
+            anchor="w", fill=C_TEXT, font=("Segoe UI", 9),
         )
+        y += 4
         if on_channel_click and bw > 0:
             tag = f"ch_{ch}"
             rect = canvas.create_rectangle(
@@ -158,7 +180,7 @@ def draw_channel_chart(
             canvas.tag_bind(tag, "<Button-1>", lambda _e, c=ch: on_channel_click(c))
             canvas.tag_bind(tag, "<Enter>", lambda _e: canvas.configure(cursor="hand2"))
             canvas.tag_bind(tag, "<Leave>", lambda _e: canvas.configure(cursor=""))
-        y += row_h
+        y += row_h + 2
     canvas.configure(scrollregion=(0, 0, w, y + 8))
 
 

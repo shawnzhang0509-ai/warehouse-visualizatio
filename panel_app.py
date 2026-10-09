@@ -36,7 +36,7 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.72"
+APP_VERSION = "1.9.73"
 APP_TITLE = "ifurniture运营提效看板"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
@@ -1097,12 +1097,22 @@ class PanelApp:
             self._volume_kpi_value_labels[key] = vl
             self._volume_kpi_hint_labels[key] = hl
 
-        vol_charts = tk.PanedWindow(vol_tab, orient=tk.HORIZONTAL, bg="white", sashwidth=6)
+        vol_charts = tk.Frame(vol_tab, bg="white")
         vol_charts.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
-        ch_chart_frame = tk.Frame(vol_charts, bg="white", highlightthickness=1, highlightbackground="#e2e8f0")
-        wh_chart_outer = tk.Frame(vol_charts, bg="white", highlightthickness=1, highlightbackground="#e2e8f0")
-        vol_charts.add(ch_chart_frame, minsize=300)
-        vol_charts.add(wh_chart_outer, minsize=380)
+        vol_charts.grid_columnconfigure(0, weight=1)
+        vol_charts.grid_columnconfigure(1, weight=0)
+        vol_charts.grid_rowconfigure(0, weight=1)
+        ch_chart_frame = tk.Frame(
+            vol_charts, bg="white", highlightthickness=1, highlightbackground="#e2e8f0",
+        )
+        wh_chart_outer = tk.Frame(
+            vol_charts, bg="white", highlightthickness=1, highlightbackground="#e2e8f0",
+            width=360,
+        )
+        ch_chart_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 6))
+        wh_chart_outer.grid(row=0, column=1, sticky="ns")
+        wh_chart_outer.grid_propagate(False)
+        self._volume_charts_frame = vol_charts
         ch_scroll = ttk.Scrollbar(ch_chart_frame, orient="vertical")
         self._volume_channel_canvas = tk.Canvas(
             ch_chart_frame, bg="white", highlightthickness=0, height=320,
@@ -2513,10 +2523,12 @@ class PanelApp:
         if self._volume_channel_canvas:
             mode = str(self._volume_channel_chart_mode_var.get() or "全部").strip()
             top_n = 10 if mode.upper().startswith("TOP") else None
+            wh_stock = vol_ui.volume_kpis_from_report(report).get("stock_containers")
             vol_ui.draw_channel_chart(
                 self._volume_channel_canvas,
                 rows,
                 top_n=top_n,
+                warehouse_stock_total=wh_stock,
                 on_channel_click=self._volume_on_channel_chart_click,
             )
             bbox = self._volume_channel_canvas.bbox("all")
