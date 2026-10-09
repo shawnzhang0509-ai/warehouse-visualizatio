@@ -38,8 +38,9 @@ class WarehousePoTest(unittest.TestCase):
 
         checked_in = dict(region_rows[0])
         checked_in["CheckinDate"] = "2026-04-01"
-        with mock.patch.object(wv, "_po_strict_checkin", return_value=True):
-            self.assertEqual(wv._parse_po_rows([checked_in])[0], [])
+        clines, cstats = wv._parse_po_rows([checked_in])
+        self.assertEqual(clines, [])
+        self.assertEqual(cstats["skipped_checkin"], 1)
 
         stats = {"raw_rows": 1, "skipped_checkin": 0, "skipped_no_sku": 0, "skipped_no_qty": 0, "zero_volume": 0}
         with mock.patch.object(
@@ -71,10 +72,22 @@ class WarehousePoTest(unittest.TestCase):
                 w.writerow(["WarehouseName", "Sku", "VolumeM3"])
                 w.writerow(["Walls Road", "271-001", "138"])
             with mock.patch.object(wv, "_region_output_dir", return_value=out):
-                by_wh, by_ch, found = wv._load_stock_volume_maps("NZ")
+                by_wh, by_ch, by_ch_isl, found = wv._load_stock_volume_maps("NZ")
             self.assertEqual(found, path)
             self.assertAlmostEqual(by_wh["Walls Road"], 2.0, places=2)
             self.assertAlmostEqual(by_ch["271"], 2.0, places=2)
+            self.assertAlmostEqual(by_ch_isl["271"]["北岛"], 2.0, places=2)
+
+    def test_po_channel_island_breakdown(self):
+        lines = [
+            {"channel": "130", "island": "北岛", "volume_containers": 100.0},
+            {"channel": "130", "island": "南岛", "volume_containers": 20.0},
+            {"channel": "996", "island": "北岛", "volume_containers": 50.0},
+        ]
+        ch_isl = wv._aggregate_po_channel_island(lines)
+        self.assertAlmostEqual(ch_isl["130"]["北岛"], 100.0)
+        ranked = wv._island_channel_rank(ch_isl, "北岛", "po_containers")
+        self.assertEqual(ranked[0]["channel"], "130")
 
 
 if __name__ == "__main__":

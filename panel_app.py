@@ -1,4 +1,4 @@
-"""有货未展示看板 —— 纯本地桌面软件（Tkinter，不走浏览器）。
+"""ifurniture运营提效看板 —— 纯本地桌面软件（Tkinter，不走浏览器）。
 
 表格每行内嵌产品缩略图；支持搜索、筛选、排序、按系列分组。
 
@@ -19,6 +19,7 @@ from datetime import datetime
 from pathlib import Path
 
 import panel_data
+import volume_tab_ui as vol_ui
 
 try:
     import tkinter as tk
@@ -35,17 +36,20 @@ except Exception:
     Image = None
     ImageTk = None
 
-APP_VERSION = "1.9.51"
+APP_VERSION = "1.9.76"
+APP_TITLE = "ifurniture运营提效看板"
 ROW_HEIGHT = 62
 THUMB = (56, 56)
 IMAGE_BATCH = 40
-ON_HOLD_TREE_BATCH = 80
-ON_HOLD_IMAGE_MAX_ROWS = 120
+ON_HOLD_TREE_BATCH = int(os.getenv("PANEL_ONHOLD_TREE_BATCH", "120") or "120")
+ON_HOLD_IMAGE_MAX_ROWS = int(os.getenv("PANEL_ONHOLD_IMAGES_MAX", "0") or "0")
 PLACEHOLDER_COLOR = "#d1d5db"
 SCROLL_UNITS = 8
 AUTO_EXPAND_ALL_GROUPS = 300
 MAX_EXPAND_GROUP_ITEMS = 80
 LOAD_IMAGES = os.getenv("PANEL_LOAD_IMAGES", "").lower() in ("1", "true", "yes")
+TREE_INSERT_BATCH_MS = int(os.getenv("PANEL_TREE_BATCH_MS", "16") or "16")
+WINDOW_RESIZE_DEBOUNCE_MS = int(os.getenv("PANEL_RESIZE_DEBOUNCE_MS", "280") or "280")
 
 C_HEADER = "#1e4f8a"
 C_BG = "#f0f4f8"
@@ -110,6 +114,7 @@ ONHOLD_SORTABLE_COLS = {
     "status": lambda r: (r.get("status") or "").lower(),
     "order_no": lambda r: (r.get("order_no") or "").lower(),
     "ticket_no": lambda r: (r.get("ticket_no") or "").lower(),
+    "sales_name": lambda r: (r.get("sales_name") or "").lower(),
     "hold_days": lambda r: (
         r.get("hold_days") if r.get("hold_days") is not None else -1
     ),
@@ -125,7 +130,7 @@ class PanelApp:
         if tk is None:
             raise RuntimeError("当前 Python 缺少 Tkinter，无法启动桌面界面。")
         self.root = tk.Tk()
-        self.root.title("有货未展示看板")
+        self.root.title(f"{APP_TITLE} v{APP_VERSION}")
         self.root.geometry("1360x860")
         self.root.minsize(1080, 700)
         self.root.configure(bg=C_BG)
@@ -174,6 +179,18 @@ class PanelApp:
         self._volume_channel_pick_var = None
         self._volume_channel_options = []
         self._volume_last_report = None
+        self._volume_wh_row_meta = {}
+        self._volume_channel_row_meta = {}
+        self._volume_split_island_var = tk.BooleanVar(value=True)
+        self._volume_show_tables_var = tk.BooleanVar(value=False)
+        self._volume_channel_chart_mode_var = tk.StringVar(value="全部")
+        self._volume_kpi_value_labels = {}
+        self._volume_kpi_hint_labels = {}
+        self._volume_channel_canvas = None
+        self._volume_wh_canvas = None
+        self._volume_island_canvas = None
+        self._volume_last_channel_rows = []
+        self._volume_chart_after_id = None
         self._onhold_status_lbl = None
         self._transfer_status_lbl = None
         self._mining_rendered_for = None
@@ -212,6 +229,10 @@ class PanelApp:
         self._stat_cards = {}
         self._stat_card_meta = {}
         self._quick_filter = None
+        self._pending_filtered_products = None
+        self._window_resizing = False
+        self._window_resize_after_id = None
+        self._last_root_geom = (0, 0)
 
         try:
             from runner_config import ensure_runner_config
@@ -250,16 +271,55 @@ class PanelApp:
         self._onhold_days_combo = None
         self._onhold_sort_col = None
         self._onhold_sort_reverse = False
+        self._onhold_render_seq = 0
+        self._onhold_filter_after_id = None
+        self._catalog_by_norm_cache = None
+        self._catalog_by_norm_cache_key = None
         self._filter_combos = []
-        self.load_images_var = tk.BooleanVar(value=True)
+        self._island_filter_label = None
+        self._island_filter_combo = None
+        self.load_images_var = tk.BooleanVar(value=LOAD_IMAGES)
         self.result_count_var = tk.StringVar(value="")
         self._status_var = tk.StringVar(value="")
 
         self._region_labels = {r["key"]: r["label"] for r in regions}
         self._setup_styles()
+        self._inventory_health_attached = False
         self._build_ui(stores, regions)
         self.search_var.trace_add("write", lambda *_: self._debounce_refresh())
+        self.root.bind("<Configure>", self._on_window_configure, add="+")
+        self.root.update_idletasks()
+        self.root.after(80, self._deferred_startup)
+
+    def _deferred_startup(self):
+        self._attach_inventory_health_tab_if_needed()
         self.reload()
+
+    def _ui_interaction_paused(self):
+        return bool(getattr(self, "_window_resizing", False))
+
+    def _on_window_configure(self, event):
+        if event.widget is not self.root:
+            return
+        geom = (int(event.width), int(event.height))
+        if geom == self._last_root_geom:
+            return
+        self._last_root_geom = geom
+        self._window_resizing = True
+        if self._window_resize_after_id:
+            try:
+                self.root.after_cancel(self._window_resize_after_id)
+            except tk.TclError:
+                pass
+        self._window_resize_after_id = self.root.after(
+            WINDOW_RESIZE_DEBOUNCE_MS, self._on_window_configure_done,
+        )
+
+    def _on_window_configure_done(self):
+        self._window_resize_after_id = None
+        self._window_resizing = False
+        if self._images_enabled():
+            self._debounce_visible_images()
 
     def _setup_styles(self):
         style = ttk.Style(self.root)
@@ -276,11 +336,18 @@ class PanelApp:
         style.configure("Tool.TButton", padding=(10, 4))
         style.configure("Vertical.TScrollbar", width=18, arrowsize=14)
         style.configure("Prefix.Treeview", rowheight=34, font=("Segoe UI", 10))
+        style.configure("Main.TNotebook", tabmargins=(4, 6, 4, 0))
+        style.configure(
+            "Main.TNotebook.Tab",
+            padding=(14, 10),
+            font=("Segoe UI", 11, "bold"),
+        )
+        style.map("Main.TNotebook.Tab", expand=[("selected", [1, 1, 1, 0])])
 
     def _build_ui(self, stores, regions):
         header = tk.Frame(self.root, bg=C_HEADER, padx=16, pady=10)
         header.pack(fill=tk.X)
-        tk.Label(header, text="有货未展示看板", bg=C_HEADER, fg="white",
+        tk.Label(header, text=APP_TITLE, bg=C_HEADER, fg="white",
                  font=("Segoe UI", 16, "bold")).pack(side=tk.LEFT)
         tk.Label(header, text=f"v{APP_VERSION}", bg=C_HEADER, fg="#93c5fd",
                  font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(8, 0), pady=(6, 0))
@@ -332,9 +399,27 @@ class PanelApp:
             command=self._export_current_filtered,
         )
         self._export_btn.grid(row=1, column=6, sticky="w", pady=(2, 0))
+        tk.Label(toolbar, textvariable=self._status_var, bg="white", fg=C_CARD_GAP,
+                 font=("Segoe UI", 9)).grid(row=0, column=7, rowspan=2, sticky="e", padx=(16, 0))
+        toolbar.columnconfigure(7, weight=1)
+        self._toolbar = toolbar
 
-        filter_bar = tk.Frame(self.root, bg="white", padx=14, pady=8)
-        filter_bar.pack(fill=tk.X, padx=12, pady=(6, 0))
+        table_wrap = tk.Frame(self.root, bg="white")
+        table_wrap.pack(fill=tk.BOTH, expand=True, padx=12, pady=(8, 12))
+
+        self._notebook = ttk.Notebook(table_wrap, style="Main.TNotebook")
+        self._notebook.pack(fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self._tab_products = ttk.Frame(self._notebook)
+        tab_prefix = ttk.Frame(self._notebook)
+        self._notebook.add(self._tab_products, text="产品明细")
+        self._notebook.add(tab_prefix, text="SKU前三位汇总")
+
+        products_chrome = tk.Frame(self._tab_products, bg=C_BG)
+        products_chrome.pack(fill=tk.X)
+
+        filter_bar = tk.Frame(products_chrome, bg="white", padx=14, pady=8)
+        filter_bar.pack(fill=tk.X, padx=0, pady=(0, 0))
+        self._filter_bar = filter_bar
 
         tk.Label(filter_bar, text="搜索", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).grid(row=0, column=0, sticky="w")
         search_entry = ttk.Entry(filter_bar, textvariable=self.search_var, width=28)
@@ -349,24 +434,26 @@ class PanelApp:
             ("组排序", self.group_sort_var, ("字母序", "SKU数量多到少", "库存总数多到少"), 5),
         ]
         for label, var, values, col in filters:
-            tk.Label(filter_bar, text=label, bg="white", fg=C_MUTED, font=("Segoe UI", 9)).grid(
-                row=0, column=col, sticky="w")
+            lbl = tk.Label(filter_bar, text=label, bg="white", fg=C_MUTED, font=("Segoe UI", 9))
+            lbl.grid(row=0, column=col, sticky="w")
             cb = ttk.Combobox(filter_bar, width=10, state="readonly", textvariable=var, values=values)
             cb.grid(row=1, column=col, sticky="w", padx=(0, 10), pady=(2, 0))
             self._filter_combos.append((cb, var))
             cb.bind("<<ComboboxSelected>>", lambda _e: self.root.after_idle(self._on_filter_combo_change))
+            if label == "南北岛":
+                self._island_filter_label = lbl
+                self._island_filter_combo = cb
 
         ttk.Checkbutton(filter_bar, text="行内缩略图", variable=self.load_images_var,
                         command=self._on_toggle_inline_images).grid(row=1, column=6, sticky="w", padx=(4, 0))
 
         tk.Label(filter_bar, textvariable=self.result_count_var, bg="white", fg=C_MUTED,
                  font=("Segoe UI", 9)).grid(row=1, column=7, sticky="e", padx=(12, 0))
-        tk.Label(filter_bar, textvariable=self._status_var, bg="white", fg=C_CARD_GAP,
-                 font=("Segoe UI", 9)).grid(row=0, column=7, sticky="e", padx=(12, 0))
         filter_bar.columnconfigure(7, weight=1)
 
-        cards = tk.Frame(self.root, bg=C_BG, padx=12, pady=8)
+        cards = tk.Frame(products_chrome, bg=C_BG, padx=12, pady=8)
         cards.pack(fill=tk.X)
+        self._cards_frame = cards
         card_defs = [
             ("gap", "有货未展示", "0", C_CARD_GAP_BG, C_CARD_GAP_BG_ACTIVE, C_CARD_GAP, True,
              "含在产与停产 · 点击筛选"),
@@ -376,8 +463,10 @@ class PanelApp:
              "同系列已陈列 · 点击筛选"),
             ("in_stock", "有货产品", "0", C_CARD_OK_BG, C_CARD_OK_BG_ACTIVE, C_CARD_OK, True,
              "切换有货/无货 · 点击筛选"),
-            ("rate", "有货率", "-", C_CARD_INFO_BG, C_CARD_INFO_BG, C_CARD_INFO, False, ""),
-            ("total", "纳入分析", "0", C_CARD_NEUTRAL_BG, C_CARD_NEUTRAL_BG, C_CARD_NEUTRAL, False, ""),
+            ("rate", "有货率(在产)", "-", C_CARD_INFO_BG, C_CARD_INFO_BG, C_CARD_INFO, False,
+             "仅统计在产 SKU；分母=纳入分析·在产"),
+            ("total", "纳入分析", "0", C_CARD_NEUTRAL_BG, C_CARD_NEUTRAL_BG, C_CARD_NEUTRAL, False,
+             "在产 SKU 基准；选「全部/停产」会变"),
         ]
         for i, (key, title, val, bg, bg_active, fg, filterable, hint_idle) in enumerate(card_defs):
             card = tk.Frame(cards, bg=bg, padx=16, pady=10, cursor="hand2" if filterable else "arrow",
@@ -395,15 +484,16 @@ class PanelApp:
             )
             val_lbl.pack(anchor="w", pady=(2, 0))
             hint = None
-            if filterable:
+            if filterable or key in ("total", "rate"):
                 hint = tk.Label(
                     card, text=hint_idle, bg=bg, fg=fg, font=("Segoe UI", 8),
-                    cursor="hand2",
+                    cursor="hand2" if filterable else "arrow",
                 )
                 hint.pack(anchor="w")
                 self._stat_hints[key] = hint
-                for w in (card, title_lbl, val_lbl, hint):
-                    w.bind("<Button-1>", lambda _e, k=key: self._on_stat_card_click(k))
+                if filterable:
+                    for w in (card, title_lbl, val_lbl, hint):
+                        w.bind("<Button-1>", lambda _e, k=key: self._on_stat_card_click(k))
             self._stat_labels[key] = val_lbl
             self._stat_cards[key] = card
             self._stat_card_meta[key] = {
@@ -420,8 +510,9 @@ class PanelApp:
         self._stock_source_lbl = tk.Label(cards, text="", bg=C_BG, fg=C_MUTED, font=("Segoe UI", 9))
         self._stock_source_lbl.pack(side=tk.RIGHT, padx=8)
 
-        info_row = tk.Frame(self.root, bg=C_BG)
+        info_row = tk.Frame(products_chrome, bg=C_BG)
         info_row.pack(fill=tk.X, padx=12, pady=(0, 6))
+        self._products_chrome = products_chrome
         self._blacklist_lbl = tk.Label(
             info_row,
             text="黑名单：加载中…",
@@ -433,16 +524,6 @@ class PanelApp:
             text="黑名单文件列名：sku / 编码 / ProductCode",
             bg=C_BG, fg="#94a3b8", font=("Segoe UI", 8),
         ).pack(side=tk.RIGHT, padx=(8, 0))
-
-        table_wrap = tk.Frame(self.root, bg="white")
-        table_wrap.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 12))
-
-        self._notebook = ttk.Notebook(table_wrap)
-        self._notebook.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
-        self._tab_products = ttk.Frame(self._notebook)
-        tab_prefix = ttk.Frame(self._notebook)
-        self._notebook.add(self._tab_products, text="产品明细")
-        self._notebook.add(tab_prefix, text="SKU前三位汇总")
 
         inner = tk.Frame(self._tab_products, bg="white")
         inner.pack(fill=tk.BOTH, expand=True)
@@ -879,7 +960,10 @@ class PanelApp:
         self._onhold_status_lbl.pack(anchor="e", padx=8, pady=(0, 4))
         onhold_wrap = tk.Frame(onhold_tab, bg="white")
         onhold_wrap.pack(fill=tk.BOTH, expand=True)
-        ohcols = ("code", "name", "status", "order_no", "ticket_no", "hold_days", "hold_since", "qty", "warehouse")
+        ohcols = (
+            "code", "name", "status", "order_no", "ticket_no", "sales_name",
+            "hold_days", "hold_since", "qty", "warehouse",
+        )
         self._mining_onhold_tree = ttk.Treeview(
             onhold_wrap, columns=ohcols, show="tree headings", selectmode="browse",
         )
@@ -888,6 +972,7 @@ class PanelApp:
         onhold_headings = {
             "code": ("编码", 92), "name": ("名称", 180), "status": ("On Hold 类型", 128),
             "order_no": ("订单号", 88), "ticket_no": ("Ticket", 72),
+            "sales_name": ("销售", 72),
             "hold_days": ("冻结天数", 64), "hold_since": ("起始日", 84), "qty": ("数量", 52),
             "warehouse": ("仓", 120),
         }
@@ -970,31 +1055,123 @@ class PanelApp:
         tk.Label(vol_toolbar, text="或手动", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(side=tk.LEFT)
         ttk.Entry(vol_toolbar, width=16, textvariable=self._volume_channel_var).pack(side=tk.LEFT, padx=(6, 8))
         ttk.Button(vol_toolbar, text="应用筛选", command=self._refresh_volume_tab).pack(side=tk.LEFT)
+        tk.Label(
+            vol_toolbar,
+            text="NZ：渠道图已分北岛/南岛；可拖动图表中间竖条调宽度",
+            bg="white", fg="#94a3b8", font=("Segoe UI", 8),
+        ).pack(side=tk.LEFT, padx=(12, 0))
         self._volume_status_lbl = tk.Label(
             vol_tab,
             text="在库：ERP；在途：po.csv 或刷新时自动执行 Data-NZ/PO.txt（与 SSMS 同库）",
             bg="white", fg=C_MUTED, font=("Segoe UI", 9),
         )
         self._volume_status_lbl.pack(anchor="w", padx=8, pady=(0, 4))
-        vol_panes = tk.PanedWindow(vol_tab, orient=tk.HORIZONTAL, bg="white", sashwidth=6)
-        vol_panes.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 6))
+
+        vol_kpi = tk.Frame(vol_tab, bg=C_BG, padx=8, pady=6)
+        vol_kpi.pack(fill=tk.X)
+        kpi_defs = (
+            ("total", "总柜数（在库+在途）", "—", "#eff6ff", "#1d4ed8"),
+            ("stock", "在库", "—", "#f0fdf4", "#15803d"),
+            ("po", "在途 PO", "—", "#fff7ed", "#c2410c"),
+            ("sku", "纳入分析 SKU", "—", "#f8fafc", "#475569"),
+            ("warn", "容积率≥85% 仓库", "—", "#fef2f2", "#b91c1c"),
+        )
+        for i, (key, title, val, bg, fg) in enumerate(kpi_defs):
+            card = tk.Frame(vol_kpi, bg=bg, padx=14, pady=10, highlightthickness=1, highlightbackground="#e2e8f0")
+            card.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0 if i == 0 else 6, 0))
+            tk.Label(card, text=title, bg=bg, fg=C_MUTED, font=("Segoe UI", 9)).pack(anchor="w")
+            vl = tk.Label(card, text=val, bg=bg, fg=fg, font=("Segoe UI", 20, "bold"))
+            vl.pack(anchor="w", pady=(2, 0))
+            hl = tk.Label(card, text="", bg=bg, fg=C_MUTED, font=("Segoe UI", 8))
+            hl.pack(anchor="w")
+            self._volume_kpi_value_labels[key] = vl
+            self._volume_kpi_hint_labels[key] = hl
+
+        self._volume_charts_panes = tk.PanedWindow(
+            vol_tab, orient=tk.HORIZONTAL, bg="white", sashwidth=8, sashrelief=tk.RAISED,
+        )
+        self._volume_charts_panes.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 4))
+        ch_chart_frame = tk.Frame(
+            self._volume_charts_panes, bg="white", highlightthickness=1, highlightbackground="#e2e8f0",
+        )
+        wh_chart_outer = tk.Frame(
+            self._volume_charts_panes, bg="white", highlightthickness=1, highlightbackground="#e2e8f0",
+        )
+        self._volume_charts_panes.add(ch_chart_frame, minsize=360)
+        self._volume_charts_panes.add(wh_chart_outer, minsize=280)
+        self._volume_charts_panes.bind("<Configure>", lambda _e: self._volume_maybe_set_default_sash())
+        self._volume_sash_set = False
+        ch_scroll = ttk.Scrollbar(ch_chart_frame, orient="vertical")
+        self._volume_channel_canvas = tk.Canvas(
+            ch_chart_frame, bg="white", highlightthickness=0, height=320,
+            yscrollcommand=ch_scroll.set,
+        )
+        ch_scroll.config(command=self._volume_channel_canvas.yview)
+        self._volume_channel_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=4)
+        ch_scroll.pack(side=tk.RIGHT, fill=tk.Y, pady=4)
+        wh_scroll = ttk.Scrollbar(wh_chart_outer, orient="vertical")
+        self._volume_wh_canvas = tk.Canvas(
+            wh_chart_outer, bg="white", highlightthickness=0,
+            yscrollcommand=wh_scroll.set,
+        )
+        wh_scroll.config(command=self._volume_wh_canvas.yview)
+        self._volume_wh_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=4)
+        wh_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._volume_island_canvas = tk.Canvas(
+            vol_tab, bg="white", highlightthickness=0, height=52,
+        )
+        self._volume_island_canvas.pack(fill=tk.X, padx=8, pady=(0, 4))
+        for cv in (self._volume_channel_canvas, self._volume_wh_canvas, self._volume_island_canvas):
+            cv.bind("<Configure>", lambda _e: self._volume_schedule_chart_redraw())
+        self._volume_island_canvas.bind("<Button-1>", self._volume_on_island_strip_click)
+        self._volume_island_canvas.bind("<Enter>", lambda _e: self._volume_island_canvas.configure(cursor="hand2"))
+        self._volume_island_canvas.bind("<Leave>", lambda _e: self._volume_island_canvas.configure(cursor=""))
+
+        tk.Label(vol_toolbar, text="渠道图", bg="white", fg=C_MUTED, font=("Segoe UI", 9)).pack(
+            side=tk.LEFT, padx=(12, 0),
+        )
+        self._volume_channel_chart_combo = ttk.Combobox(
+            vol_toolbar, width=8, state="readonly",
+            textvariable=self._volume_channel_chart_mode_var,
+            values=("全部", "TOP10"),
+        )
+        self._volume_channel_chart_combo.pack(side=tk.LEFT, padx=(4, 0))
+        self._volume_channel_chart_combo.bind(
+            "<<ComboboxSelected>>", lambda _e: self._volume_schedule_chart_redraw(),
+        )
+        ttk.Checkbutton(
+            vol_toolbar, text="显示数据表",
+            variable=self._volume_show_tables_var,
+            command=self._volume_toggle_table_panes,
+        ).pack(side=tk.LEFT, padx=(12, 0))
+
+        self._volume_legacy_panes = tk.PanedWindow(vol_tab, orient=tk.HORIZONTAL, bg="white", sashwidth=6)
+        vol_panes = self._volume_legacy_panes
         ch_frame = tk.Frame(vol_panes, bg="white")
         wh_frame = tk.Frame(vol_panes, bg="white")
         vol_panes.add(ch_frame, minsize=220)
         vol_panes.add(wh_frame, minsize=420)
+        ch_tbl_hdr = tk.Frame(ch_frame, bg="white")
+        ch_tbl_hdr.pack(fill=tk.X, padx=4, pady=(0, 4))
         tk.Label(
-            ch_frame,
-            text="按渠道合计（在库+在途 PO；双击筛选）",
+            ch_tbl_hdr,
+            text="数据表：渠道合计（北岛/南岛子行；双击筛选）",
             bg="white", fg=C_TEXT, font=("Segoe UI", 9, "bold"),
-        ).pack(anchor="w", padx=4, pady=(0, 4))
+        ).pack(side=tk.LEFT)
+        ttk.Button(ch_tbl_hdr, text="展开北/南岛", command=self._volume_expand_all_channels).pack(
+            side=tk.LEFT, padx=(8, 4),
+        )
+        ttk.Button(ch_tbl_hdr, text="折叠", command=self._volume_collapse_all_channels).pack(side=tk.LEFT)
         ch_wrap = tk.Frame(ch_frame, bg="white")
         ch_wrap.pack(fill=tk.BOTH, expand=True)
         self._volume_channel_tree = ttk.Treeview(
             ch_wrap,
             columns=("channel", "stock", "po", "total"),
-            show="headings",
+            show="tree headings",
             style="Prefix.Treeview",
         )
+        self._volume_channel_tree.heading("#0", text="")
+        self._volume_channel_tree.column("#0", width=18, stretch=False)
         self._volume_channel_tree.heading("channel", text="渠道")
         self._volume_channel_tree.heading("stock", text="在库(柜)")
         self._volume_channel_tree.heading("po", text="在途(柜)")
@@ -1008,8 +1185,9 @@ class PanelApp:
         self._volume_channel_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         ch_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._volume_channel_tree.bind("<Double-1>", self._on_volume_channel_double_click)
+        self._volume_channel_tree.bind("<<TreeviewSelect>>", self._on_volume_channel_select)
         tk.Label(
-            wh_frame, text="按南北岛（在库分仓；在途仅南北岛总在途）",
+            wh_frame, text="按南北岛（在库分仓；点在途行看渠道明细）",
             bg="white", fg=C_TEXT, font=("Segoe UI", 9, "bold"),
         ).pack(anchor="w", padx=4, pady=(0, 4))
         wh_wrap = tk.Frame(wh_frame, bg="white")
@@ -1035,10 +1213,39 @@ class PanelApp:
         vol_vscroll.pack(side=tk.RIGHT, fill=tk.Y)
         self._volume_tree.tag_configure("island_hdr", font=("Segoe UI", 9, "bold"), background="#f1f5f9")
         self._volume_tree.tag_configure("island_transit", background="#e0f2fe")
-
-        import inventory_health_ui as ih_ui
-
-        ih_ui.attach_inventory_health_tab(self, self._notebook, {"muted": C_MUTED})
+        self._volume_tree.bind("<<TreeviewSelect>>", self._on_volume_wh_select)
+        self._volume_detail_wrap = tk.Frame(vol_tab, bg="white")
+        detail_wrap = self._volume_detail_wrap
+        detail_wrap.pack(fill=tk.BOTH, expand=False, padx=4, pady=(0, 6))
+        self._volume_detail_title = tk.Label(
+            detail_wrap,
+            text="岛别渠道明细：点击上方南北岛在途条，或勾选「显示数据表」后在表中点总在途行",
+            bg="white", fg=C_MUTED, font=("Segoe UI", 9),
+        )
+        self._volume_detail_title.pack(anchor="w", padx=4, pady=(0, 2))
+        detail_inner = tk.Frame(detail_wrap, bg="white", height=140)
+        detail_inner.pack(fill=tk.BOTH, expand=True)
+        detail_inner.pack_propagate(False)
+        self._volume_detail_tree = ttk.Treeview(
+            detail_inner,
+            columns=("channel", "stock", "po", "total"),
+            show="headings",
+            height=5,
+        )
+        for col, text, w in (
+            ("channel", "渠道", 64),
+            ("stock", "在库(柜)", 80),
+            ("po", "在途(柜)", 80),
+            ("total", "合计(柜)", 80),
+        ):
+            self._volume_detail_tree.heading(col, text=text)
+            self._volume_detail_tree.column(col, width=w, anchor="center")
+        det_scroll = ttk.Scrollbar(detail_inner, orient="vertical", command=self._volume_detail_tree.yview)
+        self._volume_detail_tree.configure(yscrollcommand=det_scroll.set)
+        self._volume_detail_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        det_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._volume_detail_tree.tag_configure("sum", font=("Segoe UI", 9, "bold"), background="#f8fafc")
+        self._volume_toggle_table_panes()
 
         for widget in (
             mining_inner, self._tab_mining, self._tab_onhold, self._tab_transfer,
@@ -1057,6 +1264,7 @@ class PanelApp:
             widget.bind("<MouseWheel>", self._on_prefix_wheel)
             widget.bind("<Button-4>", lambda _e: self._scroll_prefix(-1))
             widget.bind("<Button-5>", lambda _e: self._scroll_prefix(1))
+        self.root.after_idle(self._sync_product_toolbar_buttons)
 
     def _make_placeholder_photo(self):
         if Image is not None and ImageTk is not None:
@@ -1076,7 +1284,7 @@ class PanelApp:
     def _debounce_visible_images(self):
         if self._scroll_after_id:
             self.root.after_cancel(self._scroll_after_id)
-        self._scroll_after_id = self.root.after(80, self._load_visible_images)
+        self._scroll_after_id = self.root.after(160, self._load_visible_images)
 
     def _debounce_refresh(self):
         if self._filter_after_id:
@@ -1133,6 +1341,49 @@ class PanelApp:
         store = self.store_combo.get() if self.store_combo else self.store_var.get()
         return store != panel_data.ALL_STORES
 
+    def _sync_region_island_ui(self):
+        """南北岛仅适用于 NZ；CA/AU 等隐藏筛选、列与「南北岛象限」页签。"""
+        region = self._current_region()
+        supported = panel_data.island_stock_supported(region)
+        if self._island_filter_label is not None and self._island_filter_combo is not None:
+            if supported:
+                self._island_filter_label.grid()
+                self._island_filter_combo.grid()
+            else:
+                self._island_filter_label.grid_remove()
+                self._island_filter_combo.grid_remove()
+                if self.island_filter_var.get() != "全部":
+                    self.island_filter_var.set("全部")
+                    self._island_selected_class = None
+        if self._tree is not None:
+            try:
+                if supported:
+                    self._tree.column("island", width=76, stretch=True)
+                else:
+                    self._tree.column("island", width=0, stretch=False)
+            except tk.TclError:
+                pass
+        if self._notebook is not None and self._tab_island is not None:
+            try:
+                if supported:
+                    tabs = self._notebook.tabs()
+                    if str(self._tab_island) not in tabs:
+                        self._notebook.add(self._tab_island, text="南北岛象限")
+                else:
+                    try:
+                        if str(self._notebook.select()) == str(self._tab_island):
+                            self._notebook.select(self._tab_products)
+                    except tk.TclError:
+                        pass
+                    self._notebook.hide(self._tab_island)
+            except tk.TclError:
+                pass
+        try:
+            from inventory_health_ui import sync_inventory_health_island_ui
+
+            sync_inventory_health_island_ui(self)
+        except ImportError:
+            pass
     def _sync_filter_combos(self):
         for combo, var in getattr(self, "_filter_combos", ()):
             self._sync_island_combo_to_var(combo, var)
@@ -1269,6 +1520,12 @@ class PanelApp:
                 )
                 for w in meta["widgets"]:
                     w.configure(bg=meta["bg"], fg=meta["fg"])
+                hint_lbl = meta.get("hint")
+                if hint_lbl is not None and key in ("total", "rate"):
+                    hint_lbl.configure(
+                        text=hint_overrides.get(key, meta.get("hint_idle", "")),
+                        bg=meta["bg"], fg=meta["fg"],
+                    )
                 continue
 
             is_selected = selected.get(key, False)
@@ -1325,7 +1582,9 @@ class PanelApp:
         threading.Thread(target=_thread, daemon=True).start()
 
     def _schedule_store_prewarm(self, region, current_store, include_discontinued=False):
-        """后台预热其余店面（仅预热在产数据，避免与停产加载抢 CPU）。"""
+        """后台预热其余店面（默认关闭；设 PANEL_PREWARM=1 开启）。"""
+        if os.getenv("PANEL_PREWARM", "").strip().lower() not in ("1", "true", "yes"):
+            return
         stores = list(self.store_combo.cget("values")) if self.store_combo else []
         others = [
             s for s in stores
@@ -1384,6 +1643,7 @@ class PanelApp:
             )
             if self.store_var.get() not in stores:
                 self.store_var.set(default_store)
+            self._sync_region_island_ui()
             self.reload()
 
         self._run_bg(lambda: panel_data.list_stores(region), done)
@@ -1429,7 +1689,7 @@ class PanelApp:
             self._tree.item(iid, image=photo or self._placeholder_photo)
 
     def _schedule_row_image(self, iid, raw, render_token):
-        if not raw:
+        if not raw or self._ui_interaction_paused():
             return
         cache_key = f"{raw}@{THUMB[0]}x{THUMB[1]}"
         if cache_key in self._img_cache:
@@ -1558,7 +1818,7 @@ class PanelApp:
             self._open_image_for_item(item)
 
     def _load_visible_images(self):
-        if not self._images_enabled() or not self._tree:
+        if not self._images_enabled() or not self._tree or self._ui_interaction_paused():
             return
         token = self._render_token
         for iid in self._visible_iids()[:IMAGE_BATCH]:
@@ -1662,6 +1922,8 @@ class PanelApp:
 
     def _apply_loaded_data(self, data, region):
         self._cached_products = data["products"]
+        self._catalog_by_norm_cache = None
+        self._catalog_by_norm_cache_key = None
         self._cached_summary = data["summary"]
         self._cached_blacklist_meta = {
             "blacklist_count": data.get("blacklist_count", 0),
@@ -1693,6 +1955,7 @@ class PanelApp:
         self._prefix_rendered_for = None
         self._owner_rendered_for = None
         self._loaded_full_stock = bool(data.get("summary", {}).get("includes_discontinued"))
+        self._sync_region_island_ui()
         self._refresh_view()
         self.root.after_idle(self._refresh_mining_tabs_if_visible)
 
@@ -1816,10 +2079,11 @@ class PanelApp:
                 and p.get("exempted")
             ):
                 continue
-            island_f = self.island_filter_var.get()
-            if island_f != "全部":
-                if p.get("island_stock_label") != island_f:
-                    continue
+            if panel_data.island_stock_supported(self._current_region()):
+                island_f = self.island_filter_var.get()
+                if island_f != "全部":
+                    if p.get("island_stock_label") != island_f:
+                        continue
             out.append(p)
         return out
 
@@ -1901,9 +2165,33 @@ class PanelApp:
             self._stat_labels["gap"].configure(text="—", font=("Segoe UI", 14, "bold"))
             self._stat_labels["exempted"].configure(text="—", font=("Segoe UI", 14, "bold"))
             self._stat_labels["warehouse_only"].configure(text="—", font=("Segoe UI", 14, "bold"))
+        active_total = sum(1 for p in self._cached_products if not p.get("discontinued"))
+        disc_total = sum(1 for p in self._cached_products if p.get("discontinued"))
         self._stat_labels["in_stock"].configure(text=str(s.get("in_stock_count", 0)))
         self._stat_labels["rate"].configure(text=pct(s.get("in_stock_rate")))
-        self._stat_labels["total"].configure(text=str(s.get("total_non_discontinue", 0)))
+        hint_overrides["rate"] = (
+            "仅统计在产 SKU；分母=纳入分析·在产"
+            + (f"（{active_total} 个）" if active_total else "")
+        )
+        if disc_f == "已停产":
+            hint_overrides["total"] = (
+                f"停产 SKU {disc_total} 个"
+                + ("" if self._loaded_full_stock else "（停产数据加载中或未选「已停产」）")
+            )
+            self._stat_labels["total"].configure(text=str(disc_total))
+        elif disc_f == "全部":
+            combined = active_total + disc_total
+            hint_overrides["total"] = f"在产 {active_total} + 停产 {disc_total}"
+            if not self._loaded_full_stock and disc_total == 0:
+                hint_overrides["total"] += " · 停产未加载，请稍候或再选一次「全部」"
+            self._stat_labels["total"].configure(text=str(combined))
+        else:
+            hint_overrides["total"] = (
+                f"在产 {active_total} 个（有货率 {pct(s.get('in_stock_rate'))} 的分母）"
+            )
+            self._stat_labels["total"].configure(
+                text=str(s.get("total_non_discontinue", active_total)),
+            )
         stock_line = (
             f"店面：{s.get('store', '-')}  |  "
             f"库存文件：{s.get('stock_files', 'stock.csv')}  |  "
@@ -1940,8 +2228,6 @@ class PanelApp:
         self._apply_stat_card_styles(hint_overrides)
 
         filtered = self._apply_client_filters(self._cached_products)
-        active_total = sum(1 for p in self._cached_products if not p.get("discontinued"))
-        disc_total = sum(1 for p in self._cached_products if p.get("discontinued"))
         if disc_f == "已停产":
             self.result_count_var.set(f"显示 {len(filtered)} / 停产 {disc_total} 条")
         elif disc_f == "在产":
@@ -1961,8 +2247,13 @@ class PanelApp:
             elif disc_total == 0 and not self._loaded_full_stock:
                 self.result_count_var.set("停产数据未加载，请再次选择「停产 → 已停产」或点「刷新数据」")
         self._status_var.set(f"正在渲染 {len(filtered)} 条…")
-        self.root.update_idletasks()
-        self._render_tree(filtered)
+        self._pending_filtered_products = filtered
+        if self._products_tab_selected():
+            self._render_tree(filtered)
+        else:
+            self._status_var.set(
+                f"就绪 · {len(filtered)} 条（在「产品明细」页渲染表格；当前未打开该页以加快响应）"
+            )
         prefix_key = (s.get("region"), s.get("store"))
         if (
             prefix_key != self._prefix_rendered_for
@@ -2053,6 +2344,30 @@ class PanelApp:
             return ("warn",)
         return ("low",)
 
+    def _products_tab_selected(self):
+        if not self._notebook or not self._tab_products:
+            return True
+        try:
+            return str(self._notebook.select()) == str(self._tab_products)
+        except tk.TclError:
+            return True
+
+    def _sync_product_toolbar_buttons(self, selected_tab=None):
+        if not self._notebook:
+            return
+        if selected_tab is None:
+            try:
+                selected_tab = self._notebook.select()
+            except Exception:
+                return
+        on_products = selected_tab == str(self._tab_products)
+        if getattr(self, "_export_btn", None):
+            self._export_btn.configure(state=tk.NORMAL if on_products else tk.DISABLED)
+        if not on_products:
+            for btn in (getattr(self, "_expand_all_btn", None), getattr(self, "_collapse_all_btn", None)):
+                if btn is not None:
+                    btn.configure(state=tk.DISABLED)
+
     def _on_notebook_tab_change(self, _event=None):
         if not self._notebook:
             return
@@ -2060,6 +2375,11 @@ class PanelApp:
             selected = self._notebook.select()
         except Exception:
             return
+        self._sync_product_toolbar_buttons(selected)
+        if selected == str(self._tab_products):
+            pending = self._pending_filtered_products
+            if pending is not None and self._cached_products:
+                self.root.after_idle(lambda p=pending: self._render_tree(p))
         mining_tabs = tuple(
             str(t) for t in (
                 self._tab_mining, self._tab_onhold, self._tab_transfer, self._tab_volume,
@@ -2084,10 +2404,136 @@ class PanelApp:
         elif getattr(self, "_tab_inventory_health", None) and selected == str(self._tab_inventory_health):
             self._render_inventory_health()
 
+    def _attach_inventory_health_tab_if_needed(self):
+        if getattr(self, "_inventory_health_attached", False):
+            return
+        import inventory_health_ui as ih_ui
+
+        ih_ui.attach_inventory_health_tab(self, self._notebook, {"muted": C_MUTED})
+        self._inventory_health_attached = True
+        self._sync_region_island_ui()
+
     def _render_inventory_health(self, force=False):
+        self._attach_inventory_health_tab_if_needed()
         from inventory_health_ui import render_inventory_health
 
         render_inventory_health(self, force=force)
+
+    def _volume_toggle_table_panes(self):
+        panes = getattr(self, "_volume_legacy_panes", None)
+        if not panes:
+            return
+        if self._volume_show_tables_var.get():
+            panes.pack(fill=tk.BOTH, expand=True, padx=4, pady=(0, 4), before=self._volume_detail_wrap)
+        else:
+            panes.pack_forget()
+
+    def _volume_schedule_chart_redraw(self):
+        if self._volume_chart_after_id:
+            try:
+                self.root.after_cancel(self._volume_chart_after_id)
+            except tk.TclError:
+                pass
+        self._volume_chart_after_id = self.root.after(120, self._volume_redraw_charts)
+
+    def _volume_sku_count_for_kpi(self):
+        if self._cached_products:
+            active = sum(1 for p in self._cached_products if not p.get("discontinued"))
+            disc = sum(1 for p in self._cached_products if p.get("discontinued"))
+            if self._loaded_full_stock:
+                return active + disc
+            return active
+        s = self._cached_summary or {}
+        return s.get("total_non_discontinue")
+
+    def _volume_update_kpi_cards(self, report):
+        kpis = vol_ui.volume_kpis_from_report(report)
+        labels = self._volume_kpi_value_labels
+        hints = self._volume_kpi_hint_labels
+        if labels.get("total"):
+            labels["total"].configure(text=f"{kpis['total_containers']:.2f}")
+        if labels.get("stock"):
+            labels["stock"].configure(text=f"{kpis['stock_containers']:.2f}")
+            sp = kpis.get("stock_pct")
+            hints["stock"].configure(text=f"占总量 {sp}%" if sp is not None else "")
+        if labels.get("po"):
+            labels["po"].configure(text=f"{kpis['po_containers']:.2f}")
+            pp = kpis.get("po_pct")
+            hints["po"].configure(
+                text=f"占总量 {pp}% · 近一半可能在海上" if pp and pp >= 40 else (f"占总量 {pp}%" if pp else ""),
+            )
+        sku_n = self._volume_sku_count_for_kpi()
+        if labels.get("sku"):
+            labels["sku"].configure(text=str(sku_n) if sku_n is not None else "—")
+            hints["sku"].configure(text="与产品明细「纳入分析」一致（需已加载店面）" if sku_n else "请先选店面并加载产品")
+        high = kpis.get("high_util") or []
+        if labels.get("warn"):
+            labels["warn"].configure(text=str(len(high)))
+            if high:
+                top = " · ".join(f"{n} {u:.1f}%" for n, u in high[:2])
+                hints["warn"].configure(text=top + (" …" if len(high) > 2 else ""))
+            else:
+                hints["warn"].configure(text="无仓库超 85% 警戒线")
+        return kpis
+
+    def _volume_on_channel_chart_click(self, channel):
+        if self._volume_channel_var:
+            self._volume_channel_var.set(channel)
+        if self._volume_channel_pick_var:
+            pick = channel if channel in (self._volume_channel_options or []) else channel
+            self._volume_channel_pick_var.set(pick)
+        self._refresh_volume_tab()
+
+    def _volume_on_island_strip_click(self, event):
+        canvas = self._volume_island_canvas
+        if not canvas:
+            return
+        w = max(int(canvas.winfo_width() or 400), 400)
+        x0, x1 = 12, w - 12
+        bar_w = x1 - x0
+        kpis = vol_ui.volume_kpis_from_report(self._volume_last_report or {})
+        north = float(kpis.get("north_po") or 0)
+        south = float(kpis.get("south_po") or 0)
+        total = north + south
+        if total <= 0:
+            return
+        rel = (event.x - x0) / bar_w if bar_w > 0 else 0.5
+        island = "北岛" if rel < (north / total) else "南岛"
+        self._volume_show_island_po_detail(island)
+
+    def _volume_redraw_charts(self):
+        self._volume_chart_after_id = None
+        report = self._volume_last_report or {}
+        rows = self._volume_last_channel_rows or []
+        if self._volume_channel_canvas:
+            mode = str(self._volume_channel_chart_mode_var.get() or "全部").strip()
+            top_n = 10 if mode.upper().startswith("TOP") else None
+            wh_stock = vol_ui.volume_kpis_from_report(report).get("stock_containers")
+            region = (report.get("region") or self._cached_summary.get("region") or self._current_region())
+            group_islands = panel_data.island_stock_supported(region) and top_n is None
+            vol_ui.draw_channel_chart(
+                self._volume_channel_canvas,
+                rows,
+                top_n=top_n,
+                warehouse_stock_total=wh_stock,
+                group_by_island=group_islands,
+                on_channel_click=self._volume_on_channel_chart_click,
+            )
+            bbox = self._volume_channel_canvas.bbox("all")
+            if bbox:
+                self._volume_channel_canvas.configure(scrollregion=bbox)
+        if self._volume_wh_canvas:
+            vol_ui.draw_warehouse_util_bars(
+                self._volume_wh_canvas,
+                report,
+                on_island_transit_click=self._volume_show_island_po_detail,
+            )
+            bbox = self._volume_wh_canvas.bbox("all")
+            if bbox:
+                self._volume_wh_canvas.configure(scrollregion=bbox)
+        kpis = vol_ui.volume_kpis_from_report(report)
+        if self._volume_island_canvas:
+            vol_ui.draw_island_po_strip(self._volume_island_canvas, kpis)
 
     def _volume_channel_list(self):
         raw = str(self._volume_channel_var.get() if self._volume_channel_var else "").strip()
@@ -2107,16 +2553,189 @@ class PanelApp:
             self._volume_channel_var.set(pick)
         self._refresh_volume_tab()
 
+    def _volume_island_ui_enabled(self):
+        region = self._cached_summary.get("region") or self._current_region()
+        return panel_data.island_stock_supported(region)
+
+    def _volume_maybe_set_default_sash(self):
+        panes = getattr(self, "_volume_charts_panes", None)
+        if not panes or getattr(self, "_volume_sash_set", False):
+            return
+        w = int(panes.winfo_width() or 0)
+        if w < 400:
+            return
+        try:
+            panes.sash_place(0, int(w * 0.68), 0)
+            self._volume_sash_set = True
+        except tk.TclError:
+            pass
+
+    def _volume_fill_channel_tree(self, channel_rows):
+        tree = self._volume_channel_tree
+        if not tree:
+            return
+        self._volume_channel_row_meta = {}
+        if tree.get_children():
+            tree.delete(*tree.get_children())
+        split = self._volume_island_ui_enabled()
+        for row in channel_rows or []:
+            ch = row.get("channel") or ""
+            pid = tree.insert(
+                "", tk.END,
+                values=(
+                    ch,
+                    row.get("volume_containers") or 0,
+                    row.get("po_containers") or 0,
+                    row.get("total_containers") or 0,
+                ),
+            )
+            self._volume_channel_row_meta[pid] = {"kind": "channel", "channel": ch, "row": row}
+            islands = row.get("islands") or {}
+            if split and islands:
+                for isl in ("北岛", "南岛"):
+                    isl_d = islands.get(isl) or {}
+                    cid = tree.insert(
+                        pid, tk.END,
+                        values=(
+                            f"  {isl}",
+                            isl_d.get("volume_containers") or 0,
+                            isl_d.get("po_containers") or 0,
+                            isl_d.get("total_containers") or 0,
+                        ),
+                    )
+                    self._volume_channel_row_meta[cid] = {
+                        "kind": "island", "channel": ch, "island": isl, "row": isl_d,
+                    }
+                tree.item(pid, open=True)
+
+    def _volume_expand_all_channels(self):
+        tree = self._volume_channel_tree
+        if not tree:
+            return
+        for iid in tree.get_children():
+            tree.item(iid, open=True)
+
+    def _volume_collapse_all_channels(self):
+        tree = self._volume_channel_tree
+        if not tree:
+            return
+        for iid in tree.get_children():
+            tree.item(iid, open=False)
+
+    def _volume_fill_island_detail(self, title, rows, sum_stock=0.0, sum_po=0.0):
+        tree = self._volume_detail_tree
+        if not tree:
+            return
+        if self._volume_detail_title:
+            self._volume_detail_title.configure(text=title)
+        if tree.get_children():
+            tree.delete(*tree.get_children())
+        for r in rows or []:
+            st = r.get("volume_containers") or 0
+            po = r.get("po_containers") or 0
+            tree.insert(
+                "", tk.END,
+                values=(r.get("channel") or "", st, po, round(float(st) + float(po), 2)),
+            )
+        if rows:
+            tree.insert(
+                "", tk.END,
+                values=(
+                    "合计",
+                    round(sum_stock, 2),
+                    round(sum_po, 2),
+                    round(sum_stock + sum_po, 2),
+                ),
+                tags=("sum",),
+            )
+
+    def _volume_show_island_po_detail(self, island):
+        report = self._volume_last_report or {}
+        po = report.get("po") or {}
+        rows = list((po.get("island_channel_po") or {}).get(island) or [])
+        stock_rows = list((report.get("island_channel_stock") or {}).get(island) or [])
+        stock_map = {r["channel"]: r.get("volume_containers") or 0 for r in stock_rows}
+        merged = []
+        channels = sorted(
+            set(stock_map) | {r["channel"] for r in rows},
+            key=lambda c: (-(float(stock_map.get(c, 0)) + float(
+                next((x.get("po_containers") or 0 for x in rows if x["channel"] == c), 0)
+            )), c),
+        )
+        sum_st = sum_po = 0.0
+        for ch in channels:
+            po_v = float(next((x.get("po_containers") or 0 for x in rows if x["channel"] == ch), 0))
+            st_v = float(stock_map.get(ch, 0))
+            if po_v <= 0 and st_v <= 0:
+                continue
+            merged.append({
+                "channel": ch,
+                "volume_containers": round(st_v, 2),
+                "po_containers": round(po_v, 2),
+            })
+            sum_st += st_v
+            sum_po += po_v
+        total_po = float((po.get("island_totals") or {}).get(island) or sum_po)
+        title = (
+            f"{island} 渠道明细（在途合计 {round(total_po, 2)} 柜；在库分渠道见下表）"
+        )
+        self._volume_fill_island_detail(title, merged, sum_st, sum_po)
+
+    def _on_volume_channel_select(self, _event=None):
+        tree = self._volume_channel_tree
+        if not tree:
+            return
+        sel = tree.selection()
+        if not sel:
+            return
+        meta = (self._volume_channel_row_meta or {}).get(sel[0])
+        if not meta or meta.get("kind") != "island":
+            return
+        isl = meta.get("island") or ""
+        ch = meta.get("channel") or ""
+        row = meta.get("row") or {}
+        self._volume_fill_island_detail(
+            f"渠道 {ch} · {isl}（在库 {row.get('volume_containers') or 0} / 在途 {row.get('po_containers') or 0} 柜）",
+            [{"channel": ch, **row}],
+            float(row.get("volume_containers") or 0),
+            float(row.get("po_containers") or 0),
+        )
+
+    def _on_volume_wh_select(self, _event=None):
+        tree = self._volume_tree
+        if not tree:
+            return
+        sel = tree.selection()
+        if not sel:
+            return
+        meta = (self._volume_wh_row_meta or {}).get(sel[0]) or {}
+        row_type = meta.get("row_type")
+        island = meta.get("island")
+        if row_type == "island_transit" and island:
+            self._volume_show_island_po_detail(island)
+        elif row_type == "island_header" and island:
+            self._volume_show_island_po_detail(island)
+
     def _on_volume_channel_double_click(self, _event=None):
         if not self._volume_channel_tree:
             return
         sel = self._volume_channel_tree.selection()
         if not sel:
             return
-        vals = self._volume_channel_tree.item(sel[0], "values")
-        if not vals:
-            return
-        ch = str(vals[0]).strip()
+        meta = (self._volume_channel_row_meta or {}).get(sel[0]) or {}
+        ch = meta.get("channel") or ""
+        if meta.get("kind") == "island":
+            vals = self._volume_channel_tree.item(sel[0], "values")
+            if vals:
+                ch = str(vals[0]).strip().lstrip("└").strip()
+        if not ch:
+            vals = self._volume_channel_tree.item(sel[0], "values")
+            if vals:
+                ch = str(vals[0]).strip()
+        if not ch or ch.startswith("北") or ch.startswith("南"):
+            parent = self._volume_channel_tree.parent(sel[0])
+            if parent:
+                ch = (self._volume_channel_row_meta.get(parent) or {}).get("channel") or ch
         if not ch:
             return
         self._volume_channel_var.set(ch)
@@ -2141,7 +2760,9 @@ class PanelApp:
                     r for r in stock_channels if str(r.get("channel") or "").upper() in channels
                 ]
             po_report = report.get("po") or wv.build_po_report(region, channels or None)
-            channel_rows = wv.merge_channel_breakdown(stock_channels, po_report)
+            channel_rows = wv.merge_channel_breakdown(
+                stock_channels, po_report, region=region,
+            )
             channel_names = [r["channel"] for r in channel_rows]
             return report, channel_rows, channel_names
 
@@ -2152,31 +2773,26 @@ class PanelApp:
                 return
             report, channel_rows, channel_names = payload
             self._volume_last_report = report
+            self._volume_last_channel_rows = channel_rows
+            self._volume_update_kpi_cards(report)
             self._volume_channel_options = ["全部渠道"] + channel_names
             if getattr(self, "_volume_channel_combo", None):
                 self._volume_channel_combo.configure(values=self._volume_channel_options)
-            if self._volume_channel_tree:
-                if self._volume_channel_tree.get_children():
-                    self._volume_channel_tree.delete(*self._volume_channel_tree.get_children())
-                for row in channel_rows or []:
-                    self._volume_channel_tree.insert(
-                        "", tk.END,
-                        values=(
-                            row.get("channel") or "",
-                            row.get("volume_containers") or 0,
-                            row.get("po_containers") or 0,
-                            row.get("total_containers") or 0,
-                        ),
-                    )
+            self._volume_fill_channel_tree(channel_rows)
+            self._volume_wh_row_meta = {}
             if self._volume_tree.get_children():
                 self._volume_tree.delete(*self._volume_tree.get_children())
             for row in report.get("data") or []:
                 row_type = row.get("row_type") or "warehouse"
                 if row_type == "island_header":
-                    self._volume_tree.insert(
+                    iid = self._volume_tree.insert(
                         "", tk.END, tags=("island_hdr",),
                         values=(row.get("name") or "", "", "", "", "", "", ""),
                     )
+                    self._volume_wh_row_meta[iid] = {
+                        "row_type": row_type,
+                        "island": row.get("island"),
+                    }
                     continue
                 util = row.get("utilization_pct")
                 util_txt = f"{util}%" if util is not None else "-"
@@ -2190,7 +2806,7 @@ class PanelApp:
                     stock_val = row.get("volume_containers") or 0
                     po_val = 0
                     m3_val = row.get("volume_m3") or "-"
-                self._volume_tree.insert(
+                iid = self._volume_tree.insert(
                     "", tk.END, tags=tags,
                     values=(
                         row.get("name") or "",
@@ -2202,6 +2818,10 @@ class PanelApp:
                         m3_val,
                     ),
                 )
+                self._volume_wh_row_meta[iid] = {
+                    "row_type": row_type,
+                    "island": row.get("island"),
+                }
             src = report.get("source") or "-"
             err_hint = f" · {report.get('error')}" if report.get("error") else ""
             ch = ",".join(report.get("filters", {}).get("channels") or []) or "全部"
@@ -2216,6 +2836,7 @@ class PanelApp:
                         + (f" · {hint}" if hint else "")
                     ),
                 )
+            self._volume_redraw_charts()
 
         if force:
             try:
@@ -2287,7 +2908,10 @@ class PanelApp:
                 self._mining_status_lbl.configure(text=f"{oh_hint} · {parts_hint} · 请点「刷新数据」")
             else:
                 self._mining_status_lbl.configure(
-                    text=oh_diag or "请执行 on_hold.txt / parts.txt 导出到 Output-NZ 后点「刷新数据」",
+                    text=oh_diag or (
+                        f"请执行 {panel_data.region_sql_export_hint(region, 'on_hold')}；"
+                        f"{panel_data.region_sql_export_hint(region, 'parts')} 后点「刷新数据」"
+                    ),
                 )
 
     def _render_mining_panels(self):
@@ -2306,12 +2930,55 @@ class PanelApp:
                 self._transfer_status_lbl.configure(text=f"借调渲染失败：{exc}")
 
     def _catalog_by_norm(self):
+        cache_key = (
+            self._cached_summary.get("region"),
+            self._cached_summary.get("store"),
+            len(self._cached_products or ()),
+        )
+        if (
+            self._catalog_by_norm_cache is not None
+            and self._catalog_by_norm_cache_key == cache_key
+        ):
+            return self._catalog_by_norm_cache
         out = {}
         for product in self._cached_products or []:
             norm = product.get("norm_code") or panel_data._norm_code(product.get("code"))
             if norm:
                 out[norm] = product
+        self._catalog_by_norm_cache = out
+        self._catalog_by_norm_cache_key = cache_key
         return out
+
+    def _onhold_image_cap(self):
+        if not self._images_enabled():
+            return 0
+        cap = ON_HOLD_IMAGE_MAX_ROWS
+        if cap <= 0:
+            cap = int(os.getenv("PANEL_ONHOLD_IMAGES_MAX", "48") or "48")
+        return max(0, cap)
+
+    def _clear_onhold_tree_async(self, on_done):
+        tree = self._mining_onhold_tree
+        if not tree:
+            on_done()
+            return
+        children = tree.get_children()
+
+        def step(batch_start=0):
+            if not tree.winfo_exists():
+                on_done()
+                return
+            chunk = children[batch_start:batch_start + 300]
+            if chunk:
+                tree.delete(*chunk)
+                self.root.after(1, lambda: step(batch_start + 300))
+            else:
+                on_done()
+
+        if children:
+            step(0)
+        else:
+            on_done()
 
     def _clear_onhold_summary_cards(self):
         if not self._onhold_summary_frame:
@@ -2336,6 +3003,38 @@ class PanelApp:
                 font=("Segoe UI", 9), wraplength=920, justify="left",
             ).pack(anchor="w")
             return
+        try:
+            bundle = panel_data.get_region_bundle(
+                self._cached_summary.get("region") or self._current_region(),
+            )
+        except Exception:
+            bundle = {}
+        parse_st = panel_data.on_hold_parse_stats(bundle)
+        raw_n = int(parse_st.get("raw_rows") or 0)
+        det_n = int(parse_st.get("detail_rows") or 0)
+        if raw_n > det_n:
+            tk.Label(
+                self._onhold_summary_frame,
+                text=(
+                    f"CSV 共 {raw_n} 行 → 可分析 {det_n} 行"
+                    f"（未识别 SKU {parse_st.get('skipped_no_code', 0)}，"
+                    f"数量≤0 {parse_st.get('skipped_zero_qty', 0)}）"
+                ),
+                bg="#fff7ed", fg="#c2410c", font=("Segoe UI", 9), padx=8, pady=4,
+            ).pack(side=tk.LEFT, padx=(0, 8), pady=2)
+        elif raw_n > 0:
+            tk.Label(
+                self._onhold_summary_frame,
+                text=f"on_hold.csv 共 {raw_n} 行（每行一条订单/冻结记录）",
+                bg="#f1f5f9", fg="#475569", font=("Segoe UI", 9), padx=8, pady=4,
+            ).pack(side=tk.LEFT, padx=(0, 8), pady=2)
+        no_date = int(parse_st.get("no_hold_date") or 0)
+        if no_date > 0:
+            tk.Label(
+                self._onhold_summary_frame,
+                text=f"无冻结日期 {no_date} 行（选「360天以上」时不会出现在下表）",
+                bg="#fef3c7", fg="#92400e", font=("Segoe UI", 9), padx=8, pady=4,
+            ).pack(side=tk.LEFT, padx=(0, 8), pady=2)
         for row in status_rows[:8]:
             text = (
                 f"{row.get('status')}：{row.get('sku_count', 0)} SKU · "
@@ -2353,7 +3052,7 @@ class PanelApp:
             self._mining_onhold_tree.item(iid, image=photo or self._placeholder_photo)
 
     def _schedule_onhold_row_image(self, iid, raw, render_token):
-        if not raw or not self._images_enabled():
+        if not raw or not self._images_enabled() or self._ui_interaction_paused():
             return
         cache_key = f"{raw}@{THUMB[0]}x{THUMB[1]}"
         if cache_key in self._img_cache:
@@ -2404,7 +3103,12 @@ class PanelApp:
     def _apply_on_hold_status_filter(self):
         self._sync_island_combo_to_var(self._onhold_status_combo, self._onhold_status_filter_var)
         self._sync_island_combo_to_var(self._onhold_days_combo, self._onhold_days_filter_var)
-        self._render_on_hold_analysis()
+        if self._onhold_filter_after_id is not None:
+            try:
+                self.root.after_cancel(self._onhold_filter_after_id)
+            except tk.TclError:
+                pass
+        self._onhold_filter_after_id = self.root.after(180, self._render_on_hold_analysis)
 
     def _onhold_status_filter_value(self):
         self._sync_island_combo_to_var(self._onhold_status_combo, self._onhold_status_filter_var)
@@ -2436,17 +3140,28 @@ class PanelApp:
     def _render_on_hold_analysis(self):
         if not self._mining_onhold_tree:
             return
+        self._onhold_filter_after_id = None
+        self._onhold_render_seq += 1
+        seq = self._onhold_render_seq
         region = self._cached_summary.get("region") or self._current_region()
         try:
             bundle = panel_data.get_region_bundle(region)
         except Exception:
             bundle = {}
         bl = bundle.get("blacklist") or set()
-        status_rows = panel_data.aggregate_on_hold_by_status(
-            on_hold_rows=bundle.get("on_hold_rows"),
-            on_hold_by_code=bundle.get("on_hold_by_code"),
-            blacklist=bl,
-        )
+        detail = bundle.get("on_hold_detail_rows") or []
+        status_rows = bundle.get("on_hold_status_summary")
+        if status_rows is None:
+            if detail:
+                status_rows = panel_data.aggregate_on_hold_by_status(
+                    on_hold_detail_rows=detail, blacklist=bl,
+                )
+            else:
+                status_rows = panel_data.aggregate_on_hold_by_status(
+                    on_hold_rows=bundle.get("on_hold_rows"),
+                    on_hold_by_code=bundle.get("on_hold_by_code"),
+                    blacklist=bl,
+                )
         self._render_on_hold_summary(status_rows)
         options = ["全部状态"] + [r["status"] for r in status_rows]
         if self._onhold_status_combo:
@@ -2460,30 +3175,73 @@ class PanelApp:
         status_f = self._onhold_status_filter_value()
         days_f = self._onhold_days_filter_value()
         min_days = panel_data.parse_on_hold_min_days(days_f)
-        rows, total_matched = panel_data.list_on_hold_analysis(
-            bundle,
-            status_filter=status_f,
-            catalog_by_norm=self._catalog_by_norm(),
-            min_hold_days=min_days,
-            blacklist=bl,
-        )
-        try:
-            rows = self._sort_onhold_rows(rows)
-        except Exception:
-            pass
-        ui_cap = panel_data.ON_HOLD_UI_MAX_ROWS
-        total_sorted = len(rows)
-        if ui_cap and total_sorted > ui_cap:
-            rows = rows[:ui_cap]
-        self._mining_onhold_render_token += 1
-        token = self._mining_onhold_render_token
-        self._mining_onhold_row_data = {}
-        if self._mining_onhold_tree.get_children():
-            self._mining_onhold_tree.delete(*self._mining_onhold_tree.get_children())
+        catalog_snap = self._catalog_by_norm()
+        if self._onhold_status_lbl:
+            self._onhold_status_lbl.configure(text="正在筛选 On Hold…")
+
+        def worker():
+            rows, total_matched, filter_stats = panel_data.list_on_hold_analysis(
+                bundle,
+                status_filter=status_f,
+                catalog_by_norm=catalog_snap,
+                min_hold_days=min_days,
+                blacklist=bl,
+            )
+            try:
+                rows = self._sort_onhold_rows(rows)
+            except Exception:
+                pass
+            ui_cap = panel_data.ON_HOLD_UI_MAX_ROWS
+            total_sorted = len(rows)
+            if ui_cap and total_sorted > ui_cap:
+                rows = rows[:ui_cap]
+            return rows, total_matched, total_sorted, ui_cap, filter_stats
+
+        def done(err, result):
+            if seq != self._onhold_render_seq:
+                return
+            if err:
+                if self._onhold_status_lbl:
+                    self._onhold_status_lbl.configure(text=f"On Hold 加载失败：{err}")
+                return
+            rows, total_matched, total_sorted, ui_cap, filter_stats = result
+            self._mining_onhold_render_token += 1
+            token = self._mining_onhold_render_token
+            self._mining_onhold_row_data = {}
+
+            def paint():
+                self._paint_onhold_rows(
+                    bundle, rows, total_matched, total_sorted, ui_cap,
+                    status_f, min_days, bl, token, filter_stats,
+                )
+
+            self._clear_onhold_tree_async(paint)
+
+        self._run_bg(worker, done)
+
+    def _paint_onhold_rows(
+        self, bundle, rows, total_matched, total_sorted, ui_cap,
+        status_f, min_days, bl, token, filter_stats=None,
+    ):
+        filter_stats = filter_stats or {}
+        if not self._mining_onhold_tree:
+            return
+        image_cap = self._onhold_image_cap()
 
         def _onhold_status_hint(inserted):
             if not rows and not total_matched:
                 diag = panel_data.diagnose_on_hold_bundle(bundle)
+                st = panel_data.on_hold_parse_stats(bundle)
+                if int(st.get("detail_rows") or 0) > 0 and min_days:
+                    sm = int(filter_stats.get("status_matched") or 0)
+                    nd = int(filter_stats.get("excluded_no_hold_date") or 0)
+                    ud = int(filter_stats.get("excluded_under_min_days") or 0)
+                    if sm > 0 or nd > 0:
+                        return (
+                            f"冻结≥{min_days}天 → 表格 0 条。"
+                            f"当前状态匹配 {sm} 条，其中无日期 {nd} 条、不足 {ud} 天。"
+                            f"请改「全部天数」可看全部 {st.get('detail_rows')} 条。"
+                        )
                 return diag or "On Hold 0 条"
             if not rows and total_matched:
                 return (
@@ -2510,12 +3268,13 @@ class PanelApp:
                 hint += " · 无日期行已排除"
             elif no_date and rows:
                 hint += f" · {no_date} 条无冻结日期"
-            if total_sorted > ON_HOLD_IMAGE_MAX_ROWS:
-                hint += f" · 仅前 {ON_HOLD_IMAGE_MAX_ROWS} 行加载缩略图"
+            if image_cap and total_sorted > image_cap:
+                hint += f" · 仅前 {image_cap} 行加载缩略图"
             return hint
 
         if self._onhold_status_lbl and not rows:
             self._onhold_status_lbl.configure(text=_onhold_status_hint(0))
+            return
 
         def fill_onhold_batch(start=0):
             if token != self._mining_onhold_render_token:
@@ -2539,7 +3298,10 @@ class PanelApp:
                             row.get("name") or "",
                             row.get("status") or "-",
                             row.get("order_no") or "-",
-                            row.get("ticket_no") or "-",
+                            (row.get("ticket_no") or "-")
+                            if panel_data._on_hold_status_is_by_ticket(row.get("status"))
+                            else "",
+                            row.get("sales_name") or "-",
                             hold_days_text,
                             row.get("hold_since") or "-",
                             qty_disp,
@@ -2548,7 +3310,7 @@ class PanelApp:
                         tags=("hold", "alt") if idx % 2 else ("hold",),
                     )
                     self._mining_onhold_row_data[iid] = row
-                    if idx < ON_HOLD_IMAGE_MAX_ROWS:
+                    if image_cap and idx < image_cap:
                         raw = self._image_url_for_item(row)
                         if raw:
                             self._schedule_onhold_row_image(iid, raw, token)
@@ -2559,7 +3321,7 @@ class PanelApp:
                     self._onhold_status_lbl.configure(
                         text=f"加载中 {end} / {len(rows)} 行…",
                     )
-                self.root.after(1, lambda s=end: fill_onhold_batch(s))
+                self.root.after(8, lambda s=end: fill_onhold_batch(s))
             elif self._onhold_status_lbl:
                 self._onhold_status_lbl.configure(text=_onhold_status_hint(len(rows)))
 
@@ -3317,7 +4079,7 @@ class PanelApp:
         status_f = self._onhold_status_filter_value()
         days_f = self._onhold_days_filter_value()
         min_days = panel_data.parse_on_hold_min_days(days_f)
-        rows, _total = panel_data.list_on_hold_analysis(
+        rows, _total, _fs = panel_data.list_on_hold_analysis(
             bundle,
             status_filter=status_f,
             catalog_by_norm=self._catalog_by_norm(),
@@ -3705,15 +4467,6 @@ class PanelApp:
     def _render_tree(self, products):
         self._render_token += 1
         render_token = self._render_token
-        self._lazy_groups.clear()
-        self._group_labels.clear()
-        if self._tree.get_children():
-            self._tree.delete(*self._tree.get_children())
-        self._products_by_iid.clear()
-        self._iid_to_url.clear()
-        self._pending_urls.clear()
-        self._loading_urls.clear()
-
         grouped = self._group_products(products)
         store_specific = self._cached_summary.get(
             "store_specific", self._is_store_selected()
@@ -3754,22 +4507,55 @@ class PanelApp:
             return parent
 
         def fill_batch(start=0):
-            if render_token != self._render_token:
+            if render_token != self._render_token or self._ui_interaction_paused():
+                if render_token == self._render_token and self._ui_interaction_paused():
+                    self.root.after(
+                        WINDOW_RESIZE_DEBOUNCE_MS + 40,
+                        lambda s=start: fill_batch(s),
+                    )
                 return
             end = min(start + 60, len(grouped))
             for family_label, items in grouped[start:end]:
                 insert_group(family_label, items)
             if end < len(grouped):
-                self.root.after(1, lambda s=end: fill_batch(s))
+                self.root.after(TREE_INSERT_BATCH_MS, lambda s=end: fill_batch(s))
             else:
                 self._update_group_tool_buttons()
                 self._load_visible_images()
 
-        if grouped:
-            self.root.after_idle(lambda: fill_batch(0))
-        else:
-            self._update_group_tool_buttons()
-            self._load_visible_images()
+        def start_render():
+            self._lazy_groups.clear()
+            self._group_labels.clear()
+            self._products_by_iid.clear()
+            self._iid_to_url.clear()
+            self._pending_urls.clear()
+            self._loading_urls.clear()
+            if grouped:
+                self.root.after_idle(lambda: fill_batch(0))
+            else:
+                self._update_group_tool_buttons()
+                self._load_visible_images()
+
+        children = list(self._tree.get_children()) if self._tree else []
+        if not self._tree:
+            return
+        if len(children) <= 200:
+            if children:
+                self._tree.delete(*children)
+            start_render()
+            return
+
+        def clear_chunk(offset=0):
+            if render_token != self._render_token:
+                return
+            chunk = children[offset:offset + 350]
+            if chunk:
+                self._tree.delete(*chunk)
+                self.root.after(1, lambda: clear_chunk(offset + 350))
+            else:
+                start_render()
+
+        clear_chunk(0)
 
     def run(self):
         self.root.mainloop()
@@ -3779,7 +4565,10 @@ def main():
     if tk is None:
         print("当前 Python 缺少 Tkinter，无法启动桌面界面。")
         return 1
-    PanelApp().run()
+    print(f"启动看板 v{APP_VERSION}…", flush=True)
+    app = PanelApp()
+    print("界面已就绪。", flush=True)
+    app.run()
     return 0
 
 

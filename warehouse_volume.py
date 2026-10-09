@@ -39,7 +39,10 @@ PO_QTY_KEYS = [
 PO_M3_KEYS = [
     "volumem3", "volume_m3", "totaloccupiedvolume", "occupiedvolume", "volume",
 ]
-PO_UNIT_VOL_KEYS = ["volumewithbox", "volume_with_box", "unitvolume", "unit_volume"]
+PO_UNIT_VOL_KEYS = [
+    "volumewithbox", "volume_with_box", "unitvolume", "unit_volume",
+    "priceradarvolume", "price_radar_volume",
+]
 PO_CHANNEL_KEYS = ["channel", "channelname", "channel_code", "skuchannel"]
 PO_WAREHOUSE_KEYS = [
     "warehousename", "warehouse_name", "warehouse", "destinationwarehouse", "destwarehouse",
@@ -152,6 +155,12 @@ EXCLUDED_WAREHOUSE_NAMES = [
     "APEX Center",
     "China_Admin Supplies",
     "SleepLAB-Onehunga",
+    # 店仓/陈列仓：容积率页暂不参与对比（先看中心仓）
+    "CHCH Display",
+    "CHCH Display Colombo",
+    "CHCH Shop Storage",
+    "CHCH Treffers",
+    "CHCH Colombo Shop Storage",
 ]
 
 _MASTER_LOCK = Lock()
@@ -320,8 +329,19 @@ def _looks_like_checkin_date(text: str) -> bool:
     return True
 
 
+def _po_include_checked_in_rows() -> bool:
+    """默认排除已 Check-in 行；设 WAREHOUSE_PO_INCLUDE_CHECKIN=1 可恢复旧行为（全算在途）。"""
+    if os.getenv("WAREHOUSE_PO_INCLUDE_CHECKIN", "").strip().lower() in ("1", "true", "yes"):
+        return True
+    # 兼容旧开关：仅 STRICT=1 时排除（与默认相反，保留给已配置用户）
+    if os.getenv("WAREHOUSE_PO_STRICT_CHECKIN", "").strip().lower() in ("1", "true", "yes"):
+        return False
+    return False
+
+
 def _po_strict_checkin() -> bool:
-    return os.getenv("WAREHOUSE_PO_STRICT_CHECKIN", "").strip().lower() in ("1", "true", "yes")
+    """已弃用命名：未 INCLUDE 时即排除 Check-in。"""
+    return not _po_include_checked_in_rows()
 
 
 def _po_row_has_checkin(row: dict) -> bool:
@@ -567,7 +587,7 @@ def _parse_po_rows(rows: list[dict]) -> tuple[list[dict], dict[str, int]]:
         "volume_fallback_qty": 0,
     }
     for row in rows:
-        if _po_strict_checkin() and _po_row_has_checkin(row):
+        if not _po_include_checked_in_rows() and _po_row_has_checkin(row):
             stats["skipped_checkin"] += 1
             continue
         sku = str(_pick_fuzzy(row, PO_SKU_KEYS) or "").strip()
@@ -634,14 +654,18 @@ def _po_stats_message(stats: dict[str, int], path: Path | None) -> str | None:
     return "；".join(parts)
 
 
-def load_po_lines_from_csv(region: str | None = None) -> tuple[list[dict], Path | None]:
+def load_po_lines_from_csv(
+    region: str | None = None,
+) -> tuple[list[dict], Path | None, dict[str, int]]:
     """只读 Output-{region}/po.csv，不连数据库（库存健康等批量场景用）。"""
     region = normalize_region(region)
     path, csv_rows = _read_region_csv(region, PO_FILE_STEMS)
+    empty = {"raw_rows": 0, "skipped_checkin": 0, "skipped_no_sku": 0, "skipped_no_qty": 0, "zero_volume": 0}
     if not csv_rows:
-        return [], path
-    lines, _stats = _parse_po_rows(csv_rows)
-    return lines, path
+        return [], path, empty
+    lines, stats = _parse_po_rows(csv_rows)
+    stats["data_source"] = "po_csv"
+    return lines, path, stats
 
 
 def load_po_lines(region: str | None = None) -> tuple[list[dict], str | None, Path | None, dict[str, int]]:
@@ -711,6 +735,37 @@ def _aggregate_po(lines: list[dict]) -> tuple[dict[str, float], dict[str, float]
     return by_channel, by_island
 
 
+def _aggregate_po_channel_island(lines: list[dict]) -> dict[str, dict[str, float]]:
+    """渠道 × 南北岛 → 在途柜数。"""
+    out: dict[str, dict[str, float]] = {}
+    for line in lines:
+        ch = str(line.get("channel") or "").strip().upper()
+        isl = line.get("island") or ""
+        if not ch or isl not in ISLAND_ORDER:
+            continue
+        vol = float(line.get("volume_containers") or 0)
+        if vol <= 0:
+            continue
+        bucket = out.setdefault(ch, {i: 0.0 for i in ISLAND_ORDER})
+        bucket[isl] = bucket.get(isl, 0.0) + vol
+    return out
+
+
+def _island_channel_rank(
+    channel_island_map: dict[str, dict[str, float]],
+    island: str,
+    value_key: str = "po_containers",
+) -> list[dict[str, Any]]:
+    rows = []
+    for ch, isl_map in channel_island_map.items():
+        v = float(isl_map.get(island) or 0)
+        if v <= 0:
+            continue
+        rows.append({"channel": ch, value_key: round(v, 2)})
+    rows.sort(key=lambda r: (-r[value_key], r["channel"]))
+    return rows
+
+
 def build_po_report(
     region: str | None = None,
     channel_filters: list[str] | None = None,
@@ -721,9 +776,14 @@ def build_po_report(
     if channels:
         lines = [ln for ln in lines if (ln.get("channel") or "").upper() in channels]
     by_ch, by_island = _aggregate_po(lines)
+    po_channel_island = _aggregate_po_channel_island(lines)
     if not lines and not err:
         err = _po_stats_message(stats, path)
     total = sum(by_ch.values())
+    island_channel_po = {
+        isl: _island_channel_rank(po_channel_island, isl, "po_containers")
+        for isl in ISLAND_ORDER
+    }
     ch_rows = [
         {"channel": k, "po_containers": round(v, 2)}
         for k, v in sorted(by_ch.items(), key=lambda x: -x[1])
@@ -748,14 +808,17 @@ def build_po_report(
         "channels": ch_rows,
         "islands": island_rows,
         "island_totals": {isl: round(by_island.get(isl, 0.0), 2) for isl in ISLAND_ORDER},
+        "channel_island_po": po_channel_island,
+        "island_channel_po": island_channel_po,
     }
 
 
 def _stock_volume_rows_to_maps(
     rows: list[dict], master: dict
-) -> tuple[dict[str, float], dict[str, float]]:
+) -> tuple[dict[str, float], dict[str, float], dict[str, dict[str, float]]]:
     by_wh: dict[str, float] = {}
     by_ch: dict[str, float] = {}
+    by_ch_island: dict[str, dict[str, float]] = {}
     for row in rows:
         wh = str(_pick_fuzzy(row, PO_WAREHOUSE_KEYS) or row.get("WarehouseName") or "").strip()
         sku = str(_pick_fuzzy(row, PO_SKU_KEYS) or "").strip()
@@ -765,25 +828,64 @@ def _stock_volume_rows_to_maps(
             continue
         containers = _m3_to_containers(m3)
         ch = str(_pick_fuzzy(row, PO_CHANNEL_KEYS) or "").strip().upper() or _channel_from_sku(sku)
+        island = _warehouse_island(wh) if wh else None
         if wh and not _volume_stock_warehouse_excluded(wh, master):
             by_wh[wh] = by_wh.get(wh, 0.0) + containers
         if ch:
             by_ch[ch] = by_ch.get(ch, 0.0) + containers
-    return by_wh, by_ch
+            if island in ISLAND_ORDER:
+                bucket = by_ch_island.setdefault(ch, {i: 0.0 for i in ISLAND_ORDER})
+                bucket[island] = bucket.get(island, 0.0) + containers
+    return by_wh, by_ch, by_ch_island
 
 
-def _load_stock_volume_maps(region: str) -> tuple[dict[str, float], dict[str, float], Path | None]:
+def _load_stock_volume_maps(
+    region: str,
+) -> tuple[dict[str, float], dict[str, float], dict[str, dict[str, float]], Path | None]:
     master = _load_warehouse_master()
     path, rows = _read_region_csv(region, STOCK_VOLUME_STEMS)
     if path is None or not rows:
-        return {}, {}, None
-    return (*_stock_volume_rows_to_maps(rows, master), path)
+        return {}, {}, {}, None
+    by_wh, by_ch, by_ch_isl = _stock_volume_rows_to_maps(rows, master)
+    return by_wh, by_ch, by_ch_isl, path
+
+
+def channel_stock_by_island(region: str | None = None) -> dict[str, dict[str, float]]:
+    """渠道 × 南北岛 → 在库柜数（ERP 或 stock_volume.csv）。"""
+    region = normalize_region(region)
+    master = _load_warehouse_master()
+    out: dict[str, dict[str, float]] = {}
+    try:
+        rows = _run_query(region, CHANNEL_VOLUME_SQL)
+        for row in rows:
+            ch = (_row_get(row, "ChannelName", "") or "").strip().upper()
+            wh = (_row_get(row, "WarehouseName", "") or "").strip()
+            if not ch or not wh or _volume_stock_warehouse_excluded(wh, master):
+                continue
+            island = _warehouse_island(wh)
+            if island not in ISLAND_ORDER:
+                continue
+            m3 = float(_row_get(row, "TotalOccupiedVolume", 0) or 0)
+            containers = _m3_to_containers(m3)
+            if containers <= 0:
+                continue
+            bucket = out.setdefault(ch, {i: 0.0 for i in ISLAND_ORDER})
+            bucket[island] = bucket.get(island, 0.0) + containers
+    except Exception:
+        out = {}
+    if not out:
+        _wh, _ch, ch_isl, _path = _load_stock_volume_maps(region)
+        out = ch_isl or {}
+    return out
 
 
 def merge_channel_breakdown(
     stock_rows: list[dict[str, Any]],
     po_report: dict[str, Any],
+    region: str | None = None,
+    stock_channel_island: dict[str, dict[str, float]] | None = None,
 ) -> list[dict[str, Any]]:
+    region = normalize_region(region)
     stock_map = {
         str(r.get("channel") or "").upper(): float(r.get("volume_containers") or 0)
         for r in stock_rows
@@ -792,6 +894,9 @@ def merge_channel_breakdown(
         str(r.get("channel") or "").upper(): float(r.get("po_containers") or 0)
         for r in (po_report.get("channels") or [])
     }
+    po_ch_isl = po_report.get("channel_island_po") or {}
+    if stock_channel_island is None and region == "NZ":
+        stock_channel_island = channel_stock_by_island(region)
     keys = sorted(set(stock_map) | set(po_map), key=lambda k: (-(stock_map.get(k, 0) + po_map.get(k, 0)), k))
     out = []
     for ch in keys:
@@ -799,15 +904,32 @@ def merge_channel_breakdown(
             continue
         stock_v = round(stock_map.get(ch, 0.0), 2)
         po_v = round(po_map.get(ch, 0.0), 2)
-        out.append(
-            {
-                "channel": ch,
-                "volume_containers": stock_v,
-                "po_containers": po_v,
-                "total_containers": round(stock_v + po_v, 2),
-            }
-        )
+        row: dict[str, Any] = {
+            "channel": ch,
+            "volume_containers": stock_v,
+            "po_containers": po_v,
+            "total_containers": round(stock_v + po_v, 2),
+        }
+        if region == "NZ" and (stock_channel_island or po_ch_isl):
+            islands: dict[str, dict[str, float]] = {}
+            for isl in ISLAND_ORDER:
+                st = round(float((stock_channel_island or {}).get(ch, {}).get(isl, 0.0)), 2)
+                po = round(float((po_ch_isl or {}).get(ch, {}).get(isl, 0.0)), 2)
+                islands[isl] = {
+                    "volume_containers": st,
+                    "po_containers": po,
+                    "total_containers": round(st + po, 2),
+                }
+            row["islands"] = islands
+        out.append(row)
     return out
+
+
+def island_channel_stock_rank(
+    stock_channel_island: dict[str, dict[str, float]],
+    island: str,
+) -> list[dict[str, Any]]:
+    return _island_channel_rank(stock_channel_island, island, "volume_containers")
 
 
 def _load_csv_fallback() -> dict[str, float]:
@@ -847,12 +969,12 @@ def query_warehouse_volumes(
             rows = _run_query(region, BASE_VOLUME_SQL)
         volumes = _rows_to_warehouse_map(rows, master)
         if not volumes or sum(volumes.values()) <= 0:
-            sv_wh, _, sv_path = _load_stock_volume_maps(region)
+            sv_wh, _, _sv_isl, sv_path = _load_stock_volume_maps(region)
             if sv_wh:
                 return sv_wh, "stock_volume_csv", None
         return volumes, "database", None
     except Exception as exc:
-        sv_wh, _, sv_path = _load_stock_volume_maps(region)
+        sv_wh, _, _sv_isl, sv_path = _load_stock_volume_maps(region)
         if sv_wh:
             return sv_wh, "stock_volume_csv", str(exc)
         fb = _load_csv_fallback()
@@ -877,7 +999,7 @@ def channel_breakdown(region: str | None = None) -> list[dict[str, Any]]:
     except Exception:
         totals = {}
     if not totals:
-        _, by_ch, _path = _load_stock_volume_maps(region)
+        _, by_ch, _by_isl, _path = _load_stock_volume_maps(region)
         totals = dict(by_ch)
     ranked = sorted(totals.items(), key=lambda x: -x[1])
     return [{"channel": k, "volume_containers": round(v, 2)} for k, v in ranked]
@@ -964,6 +1086,12 @@ def build_volume_report(
     channels = [c.strip().upper() for c in (channel_filters or []) if c and str(c).strip()]
     po_report = build_po_report(region, channels or None)
     po_by_island = dict(po_report.get("island_totals") or {})
+    stock_ch_isl = channel_stock_by_island(region) if region == "NZ" else {}
+    island_channel_stock = (
+        {isl: island_channel_stock_rank(stock_ch_isl, isl) for isl in ISLAND_ORDER}
+        if stock_ch_isl
+        else {}
+    )
 
     hint = None
     if not master:
@@ -1004,6 +1132,8 @@ def build_volume_report(
         "data": rows_out,
         "channelTotals": channel_breakdown(region) if not channels else [],
         "po": po_report,
+        "stock_channel_island": stock_ch_isl,
+        "island_channel_stock": island_channel_stock,
         "unmappedWarehouses": unmapped,
         "container_m3": CONTAINER_VOLUME_M3,
     }

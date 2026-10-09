@@ -60,7 +60,9 @@ class InventoryHealthCalcTest(unittest.TestCase):
             with mock.patch.object(ih.pd, "resolve_sources", return_value=(None, None, "mock", "/tmp")):
                 with mock.patch.object(ih, "load_sales_demand_index", return_value=({}, [])):
                     with mock.patch.object(ih, "_load_weekly_sales", return_value=(weekly, mock.Mock(), None)):
-                        with mock.patch.object(ih, "_load_po_by_sku", return_value={"130001": 69.0}):
+                        with mock.patch.object(
+                            ih, "_load_po_by_sku", return_value=({"130001": 69.0}, None),
+                        ):
                             report = ih.build_inventory_health_report(
                                 "NZ", thresholds=ih.HealthThresholds(cover_days_proxy=14)
                             )

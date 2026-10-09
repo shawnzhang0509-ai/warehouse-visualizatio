@@ -60,7 +60,7 @@ SUPPLIER_KEYS = ["supplier", "vendor", "suppliername", "vendorname"]
 BRAND_KEYS = ["brand", "brandname", "manufacturer"]
 
 DEFAULT_LOOKBACK_DAYS = int(os.getenv("INVENTORY_HEALTH_LOOKBACK_DAYS", "90") or "90")
-DEFAULT_STOCKOUT_X = float(os.getenv("INVENTORY_HEALTH_STOCKOUT_X", "50") or "50")
+DEFAULT_STOCKOUT_X = float(os.getenv("INVENTORY_HEALTH_STOCKOUT_X", "30") or "30")
 DEFAULT_DAYS_Y = float(os.getenv("INVENTORY_HEALTH_DAYS_Y", "60") or "60")
 DEFAULT_COVER_DAYS_PROXY = float(os.getenv("INVENTORY_HEALTH_COVER_DAYS", "14") or "14")
 
@@ -389,27 +389,28 @@ def _priority(stockout: float | None, demand_m3: float | None, days: float | Non
     return 4
 
 
-def _load_po_by_sku(region: str, island_scope: str = "") -> dict[str, float]:
+def _load_po_by_sku(region: str, island_scope: str = "") -> tuple[dict[str, float], str | None]:
     """在途体积：只读 Output-{region}/po.csv，绝不连数据库。"""
     if wv is None:
-        return {}
+        return {}, None
     try:
-        lines, _path = wv.load_po_lines_from_csv(region)
+        lines, path, stats = wv.load_po_lines_from_csv(region)
     except Exception:
-        return {}
+        return {}, None
     scope = normalize_island_scope(island_scope)
     out: dict[str, float] = defaultdict(float)
     for line in lines or []:
         if scope:
             isl = str(line.get("island") or "").strip()
-            if isl != scope:
+            if isl and isl != scope:
                 continue
         sku = str(line.get("sku") or "").strip()
         if not sku:
             continue
         m3 = float(line.get("volume_m3") or 0.0)
         out[pd.sku_join_key(sku)] += m3
-    return dict(out)
+    note = wv._po_stats_message(stats, path) if stats.get("raw_rows") else None
+    return dict(out), note
 
 
 def build_inventory_health_report(
@@ -482,7 +483,7 @@ def build_inventory_health_report(
     t_phase = _time.perf_counter()
 
     _bump("读 po.csv（在途）…")
-    po_by_sku = _load_po_by_sku(region_key, island_f)
+    po_by_sku, po_note = _load_po_by_sku(region_key, island_f)
     timings["po_csv"] = _time.perf_counter() - t_phase
     t_phase = _time.perf_counter()
 
@@ -491,6 +492,8 @@ def build_inventory_health_report(
 
     rows_out: list[InventoryHealthRow] = []
     warnings: list[str] = list(sales_warns)
+    if po_note:
+        warnings.append(f"在途 PO：{po_note}")
     if island_demand_note:
         warnings.append(island_demand_note)
     if warnings_weekly_skip:
@@ -737,13 +740,39 @@ def _rollup_row_dicts(items: list[dict[str, Any]], label: str, th: HealthThresho
     }
 
 
+def rollup_other_channels_on_main_chart() -> bool:
+    """默认不把非省渠道压成「其他」；设 INVENTORY_HEALTH_ROLLUP_OTHERS=1 可恢复合并。"""
+    import os
+
+    return os.getenv("INVENTORY_HEALTH_ROLLUP_OTHERS", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def rows_for_other_channels(
+    report: dict[str, Any],
+    thresholds: HealthThresholds | None = None,
+) -> list[dict[str, Any]]:
+    """非河北/山东的三位渠道列表（下钻「其他」或看明细表用）。"""
+    families = report.get("channel_families") or {}
+    if not families:
+        return list(report.get("rows") or [])
+    fam_labels = set(families.keys())
+    rows = rows_for_family_chart(report, thresholds, main_view=False)
+    return [r for r in rows if str(r.get("channel") or "") not in fam_labels]
+
+
 def rows_for_family_chart(
     report: dict[str, Any],
     thresholds: HealthThresholds | None = None,
     *,
-    main_view: bool = True,
+    main_view: bool | None = None,
 ) -> list[dict[str, Any]]:
-    """主图：有渠道族时按省汇总（河北、山东）；main_view 时其余三位号合并为「其他」。"""
+    """主图：河北/山东子渠道合并为省；其余三位号默认仍单独成点。"""
+    if main_view is None:
+        main_view = rollup_other_channels_on_main_chart()
     families = report.get("channel_families") or {}
     if not families:
         return list(report.get("rows") or [])
