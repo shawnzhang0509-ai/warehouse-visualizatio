@@ -20,6 +20,24 @@ class VolumeTabUiTests(unittest.TestCase):
         self.assertEqual(len(k["high_util"]), 1)
         self.assertEqual(k["north_po_pct"], 75.0)
 
+    def test_channel_split_by_island(self):
+        rows = [
+            {
+                "channel": "996",
+                "volume_containers": 10,
+                "po_containers": 5,
+                "total_containers": 15,
+                "islands": {
+                    "北岛": {"volume_containers": 8, "po_containers": 2, "total_containers": 10},
+                    "南岛": {"volume_containers": 2, "po_containers": 3, "total_containers": 5},
+                },
+            },
+        ]
+        groups = vol_ui.channel_rows_split_by_island(rows)
+        self.assertEqual(len(groups), 2)
+        self.assertEqual(groups[0][0], "北岛")
+        self.assertEqual(groups[0][1][0]["channel"], "996")
+
     def test_channel_whole_warehouse_share(self):
         rows = [{"channel": "996", "volume_containers": 29.0, "po_containers": 11.0, "total_containers": 40.0}]
         wh_total = 290.0
