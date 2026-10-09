@@ -20,6 +20,12 @@ class VolumeTabUiTests(unittest.TestCase):
         self.assertEqual(len(k["high_util"]), 1)
         self.assertEqual(k["north_po_pct"], 75.0)
 
+    def test_channel_whole_warehouse_share(self):
+        rows = [{"channel": "996", "volume_containers": 29.0, "po_containers": 11.0, "total_containers": 40.0}]
+        wh_total = 290.0
+        share = rows[0]["volume_containers"] / wh_total * 100
+        self.assertAlmostEqual(share, 10.0, places=1)
+
     def test_chch_display_warehouses_excluded_from_volume(self):
         master = {}
         for name in (
