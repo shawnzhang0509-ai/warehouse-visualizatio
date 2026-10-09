@@ -286,16 +286,16 @@ def draw_warehouse_util_bars(
     for _isl, rows in groups:
         for r in rows:
             max_stock = max(max_stock, float(r.get("volume_containers") or 0))
-    if max_stock <= 0:
-        max_stock = 1.0
+    max_po = max(
+        (float(t.get("po_containers") or 0) for t in transit_map.values()),
+        default=0.0,
+    )
+    # 在库条与在途 PO 条共用同一柜数刻度，避免各自拉满导致长短失真
+    scale_max = max(max_stock, max_po, 1.0)
     left = 118
     util_w = 56
     right_pad = 44
     bar_max = max(w - left - util_w - right_pad, 48)
-    max_po = max(
-        (float(t.get("po_containers") or 0) for t in transit_map.values()),
-        default=0.0,
-    ) or 1.0
     y = 8
     canvas.create_text(
         12, y, text="仓库容积率", anchor="w", fill=C_TEXT, font=("Segoe UI", 10, "bold"),

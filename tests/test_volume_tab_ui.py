@@ -38,6 +38,12 @@ class VolumeTabUiTests(unittest.TestCase):
         self.assertEqual(groups[0][0], "北岛")
         self.assertEqual(groups[0][1][0]["channel"], "996")
 
+    def test_unified_bar_scale_prefers_larger_po(self):
+        max_stock = 134.0
+        po_north = 212.0
+        scale = max(max_stock, po_north)
+        self.assertGreater(po_north / scale, max_stock / scale)
+
     def test_channel_whole_warehouse_share(self):
         rows = [{"channel": "996", "volume_containers": 29.0, "po_containers": 11.0, "total_containers": 40.0}]
         wh_total = 290.0
