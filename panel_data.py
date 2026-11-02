@@ -312,17 +312,6 @@ def _canonical_display_store_key(name):
     return re.sub(r"[^a-z0-9]+", "", str(name or "").strip().lower())
 
 
-def _display_region_patterns_for_store(store_name, region_key):
-    """北岛 Onehunga/Westgate/Hamilton 等共用陈列面（与库存店面规则一致）。"""
-    if store_name == ALL_STORES:
-        return None
-    text = str(store_name).strip().lower()
-    for patterns, _warehouses in REGION_STORE_STOCK_RULES.get(str(region_key or "").upper(), []):
-        if any(p in text for p in patterns):
-            return patterns
-    return None
-
-
 def _is_display_active_row(row):
     """display.csv 的 Display 列：仅 1/是 计为陈列；无该列时保持旧行为。"""
     raw = _pick(row, DISPLAY_FLAG_KEYS) or _pick_fuzzy(row, DISPLAY_FLAG_KEYS)
@@ -339,18 +328,22 @@ def _is_display_active_row(row):
         return True
 
 
+def _warehouse_is_this_store(warehouse_name, store, store_canon):
+    """陈列行只属于名字相同的那一家店。连字符和空格不算两家店。"""
+    if warehouse_name == store:
+        return True
+    return _canonical_display_store_key(warehouse_name) == store_canon
+
+
 def _displayed_codes_for_store(store, by_store, region_key="NZ"):
-    """所选店面 + 同区域陈列组（如北岛三店）在 display 表中的 SKU 并集。"""
+    """该店面自己的已陈列 SKU。不把 Hamilton 的陈列算进 Onehunga。"""
+    del region_key
     if store == ALL_STORES:
         return set().union(*by_store.values()) if by_store else set()
-    codes = set()
-    patterns = _display_region_patterns_for_store(store, region_key)
     store_canon = _canonical_display_store_key(store)
+    codes = set()
     for wh_name, skus in (by_store or {}).items():
-        low = str(wh_name).lower()
-        if patterns and any(p in low for p in patterns):
-            codes |= set(skus)
-        elif wh_name == store or _canonical_display_store_key(wh_name) == store_canon:
+        if _warehouse_is_this_store(wh_name, store, store_canon):
             codes |= set(skus)
     if codes:
         return codes
@@ -358,20 +351,17 @@ def _displayed_codes_for_store(store, by_store, region_key="NZ"):
 
 
 def _display_details_for_store(display_details, store, region_key="NZ"):
-    """同组店面陈列 SKU 元数据（用于同系列豁免锚点）。"""
+    """该店面自己的陈列明细，供同系列豁免找锚点。"""
+    del region_key
     if store == ALL_STORES:
         merged = {}
         for details in (display_details or {}).values():
             merged.update(details)
         return merged
-    patterns = _display_region_patterns_for_store(store, region_key)
     store_canon = _canonical_display_store_key(store)
     merged = {}
     for wh_name, details in (display_details or {}).items():
-        low = str(wh_name).lower()
-        if patterns and any(p in low for p in patterns):
-            merged.update(details)
-        elif wh_name == store or _canonical_display_store_key(wh_name) == store_canon:
+        if _warehouse_is_this_store(wh_name, store, store_canon):
             merged.update(details)
     if merged:
         return merged
