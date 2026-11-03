@@ -858,10 +858,17 @@ ON_HOLD_TICKET_KEYS = [
     "ticket_id", "serviceticket", "service_ticket", "caseno", "case_no", "工单号",
     "工单", "ticketref", "notes",
 ]
+ON_HOLD_SALES_KEYS = [
+    "salesname", "sales_name", "salesperson", "sales_person", "salesrep", "sales_rep",
+    "salesrepname", "sales_rep_name", "sellername", "seller_name", "soldby", "sold_by",
+    "salesstaff", "sales_staff", "salesman", "saleswoman", "salesassociate",
+    "accountmanager", "account_manager", "repname", "rep_name",
+    "销售", "销售名", "销售名字", "销售姓名", "销售员", "销售人员", "销售顾问", "业务员",
+]
 ON_HOLD_STOCK_ID_KEYS = ["stockid", "stock_id", "lineid", "line_id", "inventoryid"]
 ON_HOLD_ANALYSIS_MAX_ROWS = 15000
 # 界面 Treeview 最多渲染行数（排序后再截断，避免上千行+缩略图卡死）
-ON_HOLD_UI_MAX_ROWS = 2500
+ON_HOLD_UI_MAX_ROWS = int(os.getenv("PANEL_ONHOLD_UI_MAX", "1000") or "1000")
 PARTS_QTY_KEYS = [
     "partsqty", "parts_qty", "partqty", "quantity", "qty", "sum", "total", "amount",
 ]
@@ -901,6 +908,30 @@ def _region_output_dir(region_key):
     if not path.is_absolute():
         path = ROOT_DIR / path
     return path.resolve()
+
+
+def _region_dirs_for_key(region_key):
+    """返回该地区 SQL 模板目录与 CSV 输出目录（相对仓库根，如 Data-CA / Output-CA）。"""
+    rk = str(region_key or default_region() or "NZ").strip().upper()
+    regions = _load_runner_regions()
+    cfg = regions.get(rk) or DEFAULT_REGION_META.get(rk, {})
+    tpl = (cfg.get("template_dir") or f"Data-{rk}").strip()
+    out = (cfg.get("output_dir") or f"Output-{rk}").strip()
+    return tpl, out
+
+
+def region_sql_export_hint(region_key, txt_stem, csv_filename=None):
+    """On Hold / parts 等扩展表：按当前地区提示路径，避免写死 NZ。"""
+    tpl, out = _region_dirs_for_key(region_key)
+    csv_name = csv_filename or f"{txt_stem}.csv"
+    return f"{tpl} 放置 {txt_stem}.txt，执行 SQL 导出到 {out}/{csv_name}"
+
+
+def _bundle_region_key(bundle):
+    rk = str((bundle or {}).get("region") or "").strip().upper()
+    if rk:
+        return rk
+    return _region_from_data_dir((bundle or {}).get("data_dir"), None)
 
 
 def resolve_sources(region=None):
@@ -1486,6 +1517,7 @@ def _load_region_bundle(region, force=False):
         storage_map, storage_unmapped = {}, []
     on_hold_by_code = {}
     on_hold_row_count = 0
+    on_hold_status_summary = []
     if on_hold_path and Path(on_hold_path).is_file():
         on_hold_rows = _read_mining_table(on_hold_path)
         on_hold_detail_rows = _parse_on_hold_detail_rows(on_hold_rows)
@@ -1509,6 +1541,11 @@ def _load_region_bundle(region, force=False):
         parts_detail_rows = []
         parts_kit_bom = {}
     blacklist = _load_blacklist(blacklist_path)
+    if on_hold_detail_rows:
+        on_hold_status_summary = aggregate_on_hold_by_status(
+            on_hold_detail_rows=on_hold_detail_rows,
+            blacklist=blacklist,
+        )
     stock_raw_rows = _read_table(stock_path)
     warehouse_transfer_hints = _warehouse_hints_from_stock_rows(stock_raw_rows)
     warehouse_bucket_overrides = _load_warehouse_bucket_overrides(data_dir)
@@ -1550,6 +1587,7 @@ def _load_region_bundle(region, force=False):
         "on_hold_by_code": on_hold_by_code,
         "on_hold_rows": on_hold_rows,
         "on_hold_detail_rows": on_hold_detail_rows,
+        "on_hold_status_summary": on_hold_status_summary,
         "on_hold_row_count": on_hold_row_count,
         "parts_path": str(parts_path) if parts_path else None,
         "parts_mtime": parts_mtime,
@@ -1937,7 +1975,31 @@ def _pick_on_hold_order_no(row):
     return ""
 
 
-def _pick_on_hold_ticket_no(row, order_no=""):
+def _pick_on_hold_sales_name(row):
+    val = _pick_fuzzy(row, ON_HOLD_SALES_KEYS)
+    if val is not None and str(val).strip():
+        return str(val).strip()
+    lower = _column_key_map(row)
+    for col_norm, cell in lower.items():
+        if not any(tok in col_norm for tok in ("sales", "seller", "soldby", "repname", "销售", "业务员")):
+            continue
+        if any(skip in col_norm for skip in ("order", "sku", "product", "qty", "status", "hold", "warehouse")):
+            continue
+        text = str(cell or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _on_hold_status_is_by_ticket(status):
+    norm = _normalize_on_hold_status(status).lower()
+    return "by ticket" in norm or "工单" in norm
+
+
+def _pick_on_hold_ticket_no(row, order_no="", *, status=""):
+    """Ticket 仅对 On Hold - By Ticket 有意义；订单号后缀不得误显示为 Ticket。"""
+    if status and not _on_hold_status_is_by_ticket(status):
+        return ""
     val = _pick_fuzzy(row, ON_HOLD_TICKET_KEYS)
     if val is not None and str(val).strip():
         text = str(val).strip()
@@ -2027,7 +2089,8 @@ def _parse_on_hold_detail_rows(rows):
             _pick(row, STORE_KEYS + ["warehousename"]) or _pick_fuzzy(row, STORE_KEYS + ["warehousename"]) or ""
         ).strip()
         order_no = _pick_on_hold_order_no(row)
-        ticket_no = _pick_on_hold_ticket_no(row, order_no=order_no)
+        ticket_no = _pick_on_hold_ticket_no(row, order_no=order_no, status=status)
+        sales_name = _pick_on_hold_sales_name(row)
         hold_at = _parse_hold_datetime(_pick_fuzzy(row, ON_HOLD_DATE_KEYS))
         hold_days = _hold_days_from_row(row, hold_at)
         qty = _on_hold_qty_from_row(row)
@@ -2042,6 +2105,7 @@ def _parse_on_hold_detail_rows(rows):
             "status": status,
             "order_no": order_no,
             "ticket_no": ticket_no,
+            "sales_name": sales_name,
             "warehouse": warehouse,
             "qty": qty,
             "hold_at": hold_at,
@@ -2104,11 +2168,30 @@ def _on_hold_row_blacklisted(code, norm_code, blacklist):
     return bool(norm and norm in blacklist)
 
 
-def aggregate_on_hold_by_status(on_hold_rows=None, on_hold_by_code=None, blacklist=None):
+def aggregate_on_hold_by_status(
+    on_hold_rows=None,
+    on_hold_by_code=None,
+    on_hold_detail_rows=None,
+    blacklist=None,
+):
     """按 StockOnHoldStatus 汇总行数 / SKU 数 / 数量（排除黑名单 SKU）。"""
     blacklist = blacklist or set()
     by_status = defaultdict(lambda: {"row_count": 0, "sku_codes": set(), "total_qty": 0.0})
-    if on_hold_rows:
+    if on_hold_detail_rows:
+        for line in on_hold_detail_rows:
+            if _on_hold_row_blacklisted(line.get("code"), line.get("norm_code"), blacklist):
+                continue
+            status = line.get("status") or "（未标注状态）"
+            qty = float(line.get("qty") or 0)
+            if qty <= 0:
+                continue
+            slot = by_status[status]
+            slot["row_count"] += 1
+            norm = line.get("norm_code") or _norm_code(line.get("code"))
+            if norm:
+                slot["sku_codes"].add(norm)
+            slot["total_qty"] += qty
+    elif on_hold_rows:
         for row in on_hold_rows:
             code = _mining_code_from_row(row)
             if not code:
@@ -2155,16 +2238,40 @@ def list_on_hold_status_options(bundle):
     return [r["status"] for r in rows]
 
 
+def on_hold_parse_stats(bundle) -> dict[str, int]:
+    """对比 CSV 原始行数与可进入分析表的行数（帮助解释「1000 行只显示几百」）。"""
+    raw = bundle.get("on_hold_rows") or []
+    detail = bundle.get("on_hold_detail_rows")
+    if detail is None and raw:
+        detail = _parse_on_hold_detail_rows(raw)
+    detail = detail or []
+    skipped_no_code = 0
+    skipped_zero_qty = 0
+    for row in raw:
+        code = _mining_code_from_row(row)
+        if not code:
+            skipped_no_code += 1
+            continue
+        if _on_hold_qty_from_row(row) <= 0:
+            skipped_zero_qty += 1
+    no_hold_date = sum(1 for line in detail if line.get("hold_days") is None)
+    return {
+        "raw_rows": len(raw),
+        "detail_rows": len(detail),
+        "skipped_no_code": skipped_no_code,
+        "skipped_zero_qty": skipped_zero_qty,
+        "no_hold_date": no_hold_date,
+    }
+
+
 def diagnose_on_hold_bundle(bundle):
     """说明 On Hold 为 0 的常见原因（文件缺失 / 空文件 / 列名不匹配）。"""
     path = bundle.get("on_hold_path")
     row_count = int(bundle.get("on_hold_row_count") or 0)
     sku_count = len(bundle.get("on_hold_by_code") or {})
     if not path or not Path(path).is_file():
-        return (
-            "未找到 on_hold.csv：请在 Data-NZ 放置 on_hold.txt，执行 SQL 导出到 Output-NZ/on_hold.csv，"
-            "然后点「刷新数据」。"
-        )
+        hint = region_sql_export_hint(_bundle_region_key(bundle), "on_hold")
+        return f"未找到 on_hold.csv：请在 {hint}，然后点「刷新数据」。"
     name = Path(path).name
     if row_count <= 0:
         return (
@@ -2221,14 +2328,21 @@ def list_on_hold_analysis(
 ):
     """On Hold 明细：每行 CSV 一条（同 SKU 不同订单/时间分开），可按状态精确筛选。"""
     blacklist = blacklist if blacklist is not None else (bundle.get("blacklist") or set())
+    detail = bundle.get("on_hold_detail_rows")
     raw_rows = bundle.get("on_hold_rows") or []
-    if raw_rows:
+    if detail is None:
+        detail = _parse_on_hold_detail_rows(raw_rows) if raw_rows else []
+    elif not detail and raw_rows:
         detail = _parse_on_hold_detail_rows(raw_rows)
-    else:
-        detail = list(bundle.get("on_hold_detail_rows") or [])
     catalog_by_norm = catalog_by_norm or {}
     status_filter = str(status_filter or "").strip()
     out = []
+    filter_stats = {
+        "status_matched": 0,
+        "excluded_no_hold_date": 0,
+        "excluded_under_min_days": 0,
+        "excluded_blacklist": 0,
+    }
     for line in detail:
         status_raw = line.get("status") or "（未标注状态）"
         tokens = _on_hold_status_tokens(status_raw)
@@ -2237,17 +2351,23 @@ def list_on_hold_analysis(
         norm_filter = _normalize_on_hold_status(status_filter)
         norm_tokens = [_normalize_on_hold_status(t) for t in tokens]
         hold_days = line.get("hold_days")
+        filter_stats["status_matched"] += 1
+        norm = line.get("norm_code") or ""
+        if _on_hold_row_blacklisted(line.get("code"), norm, blacklist):
+            filter_stats["excluded_blacklist"] += 1
+            continue
         if min_hold_days is not None and min_hold_days > 0:
-            if hold_days is None or hold_days < min_hold_days:
+            if hold_days is None:
+                filter_stats["excluded_no_hold_date"] += 1
+                continue
+            if hold_days < min_hold_days:
+                filter_stats["excluded_under_min_days"] += 1
                 continue
         display_status = (
             status_filter
             if norm_filter and norm_filter not in ("", "全部状态") and norm_filter in norm_tokens
             else status_raw
         )
-        norm = line.get("norm_code") or ""
-        if _on_hold_row_blacklisted(line.get("code"), norm, blacklist):
-            continue
         cat = catalog_by_norm.get(norm) or {}
         out.append({
             "norm_code": norm,
@@ -2257,6 +2377,7 @@ def list_on_hold_analysis(
             "status": display_status,
             "order_no": line.get("order_no") or "",
             "ticket_no": line.get("ticket_no") or "",
+            "sales_name": line.get("sales_name") or "",
             "hold_days": line.get("hold_days"),
             "hold_since": line.get("hold_since") or "",
             "hold_at": line.get("hold_at"),
@@ -2277,8 +2398,8 @@ def list_on_hold_analysis(
     out.sort(key=_sort_hold_key, reverse=True)
     cap = max_rows if max_rows is not None else ON_HOLD_ANALYSIS_MAX_ROWS
     if cap and len(out) > cap:
-        return out[:cap], len(out)
-    return out, len(out)
+        return out[:cap], len(out), filter_stats
+    return out, len(out), filter_stats
 
 
 def _load_parts_inventory(rows):
@@ -3426,7 +3547,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         diagnostics.append({
             "level": "info",
             "message": (
-                "未找到 on_hold.csv：可在 Data-NZ 放置 on_hold.txt 并执行 SQL 导出，"
+                f"未找到 on_hold.csv：可在 {region_sql_export_hint(region_key, 'on_hold')}，"
                 "用于 On Hold 挖掘。"
             ),
         })
@@ -3434,7 +3555,7 @@ def build_products(store=None, only_gap=False, include_discontinued=False, regio
         diagnostics.append({
             "level": "info",
             "message": (
-                "未找到 parts.csv：可在 Data-NZ 放置 parts.txt 并执行 SQL 导出，"
+                f"未找到 parts.csv：可在 {region_sql_export_hint(region_key, 'parts')}，"
                 "用于配件挖掘。"
             ),
         })
@@ -3519,7 +3640,7 @@ def write_export_csv(path, fieldnames, rows):
 
 
 ONHOLD_EXPORT_FIELDS = (
-    "code", "name", "family", "status", "order_no", "ticket_no",
+    "code", "name", "family", "status", "order_no", "ticket_no", "sales_name",
     "hold_days", "hold_since", "qty", "warehouse",
 )
 ONHOLD_EXPORT_HEADERS = {
@@ -3529,6 +3650,7 @@ ONHOLD_EXPORT_HEADERS = {
     "status": "On Hold 类型",
     "order_no": "订单号",
     "ticket_no": "Ticket",
+    "sales_name": "销售",
     "hold_days": "冻结天数",
     "hold_since": "起始日",
     "qty": "数量",
@@ -3568,6 +3690,7 @@ def format_onhold_export_row(row):
         "status": row.get("status") or "",
         "order_no": row.get("order_no") or "",
         "ticket_no": row.get("ticket_no") or "",
+        "sales_name": row.get("sales_name") or "",
         "hold_days": "" if hold_days is None else hold_days,
         "hold_since": row.get("hold_since") or "",
         "qty": qty_disp,

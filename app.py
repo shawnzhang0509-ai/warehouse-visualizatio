@@ -1,5 +1,6 @@
 import argparse
 import csv
+import hashlib
 import json
 import os
 import threading
@@ -60,13 +61,14 @@ _NON_SQL_CONFIG_FILES = frozenset(
 
 try:
     import tkinter as tk
-    from tkinter import filedialog, messagebox, scrolledtext, ttk
+    from tkinter import filedialog, messagebox, scrolledtext, simpledialog, ttk
 except Exception:
     tk = None
     ttk = None
     filedialog = None
     messagebox = None
     scrolledtext = None
+    simpledialog = None
 
 
 from runner_config import (
@@ -119,6 +121,42 @@ def _ensure_runner_config():
 
 def _region_label(region_key, cfg):
     return cfg.get("label") or region_key
+
+
+# 连接串显示解锁：优先环境变量 SQL_EXECUTOR_REVEAL_PASSWORD，否则校验内置哈希（非明文入库）
+_CONNECTION_REVEAL_SHA256 = (
+    "d2b9e27d472b769bc68a73e50fd31dd0d7702106cc4b8210e59bbaafd41ef07e"
+)
+
+
+def _connection_reveal_password_ok(password: str) -> bool:
+    env = os.getenv("SQL_EXECUTOR_REVEAL_PASSWORD", "").strip()
+    if env:
+        return password == env
+    digest = hashlib.sha256(password.encode("utf-8")).hexdigest()
+    return digest == _CONNECTION_REVEAL_SHA256
+
+
+def mask_connection_uri(uri: str) -> str:
+    """界面默认展示：隐藏用户名/密码，保留主机与库名。"""
+    text = str(uri or "").strip()
+    if not text:
+        return ""
+    try:
+        parsed = _parse_mssql_uri(text)
+        qs = ""
+        if "?" in text:
+            qs = "?" + text.split("?", 1)[1]
+        return (
+            f"mssql+pymssql://*****:*****@{parsed['host']}:{parsed['port']}"
+            f"/{parsed['database']}{qs}"
+        )
+    except Exception:
+        if "@" in text:
+            tail = text.split("@", 1)[1]
+            scheme = text.split("://", 1)[0] if "://" in text else "mssql"
+            return f"{scheme}://*****:*****@{tail}"
+        return "********"
 
 
 def _parse_mssql_uri(uri):
@@ -753,6 +791,7 @@ class DesktopRunnerApp:
         self.progress_text_var = tk.StringVar(value="")
         self.save_hint_var = tk.StringVar(value="已加载")
         self._active_edit_region = None
+        self._conn_revealed = False
 
         self._build_ui()
         self._active_edit_region = self._current_edit_region()
@@ -800,9 +839,13 @@ class DesktopRunnerApp:
         self.conn_label.grid(row=0, column=0, sticky=tk.W, padx=(0, 8), pady=4)
         self.conn_text = tk.Text(form, height=3, wrap=tk.WORD)
         self.conn_text.grid(row=0, column=1, sticky=tk.EW, pady=4)
-        self.conn_text.bind("<KeyRelease>", lambda _e: self._mark_unsaved())
-        self.test_btn = ttk.Button(form, text="测试连接", command=self.test_connection_action)
-        self.test_btn.grid(row=0, column=2, sticky=tk.E, padx=(8, 0), pady=4)
+        self.conn_text.bind("<KeyRelease>", lambda _e: self._on_conn_text_edited())
+        conn_btns = ttk.Frame(form)
+        conn_btns.grid(row=0, column=2, sticky=tk.E, padx=(8, 0), pady=4)
+        self.reveal_conn_btn = ttk.Button(conn_btns, text="显示连接串", command=self.toggle_connection_reveal_action)
+        self.reveal_conn_btn.pack(side=tk.TOP, pady=(0, 4))
+        self.test_btn = ttk.Button(conn_btns, text="测试连接", command=self.test_connection_action)
+        self.test_btn.pack(side=tk.TOP)
 
         ttk.Label(form, text="TXT 模板目录").grid(row=1, column=0, sticky=tk.W, padx=(0, 8), pady=4)
         self.template_dir_entry = ttk.Entry(form)
@@ -948,9 +991,48 @@ class DesktopRunnerApp:
         if not region:
             return
         cfg = self.config_data["regions"][region]
-        cfg["connection_uri"] = self.conn_text.get("1.0", tk.END).strip()
+        if self._conn_revealed:
+            cfg["connection_uri"] = self.conn_text.get("1.0", tk.END).strip()
         cfg["template_dir"] = self.template_dir_entry.get().strip()
         cfg["output_dir"] = self.output_dir_entry.get().strip()
+
+    def _on_conn_text_edited(self):
+        if not self._conn_revealed:
+            return
+        self._mark_unsaved()
+
+    def _refresh_conn_text_widget(self, region: str):
+        cfg = self.config_data["regions"].get(region, {})
+        uri = str(cfg.get("connection_uri") or "")
+        self.conn_text.configure(state=tk.NORMAL)
+        self.conn_text.delete("1.0", tk.END)
+        shown = uri if self._conn_revealed else mask_connection_uri(uri)
+        self.conn_text.insert("1.0", shown)
+        if self._conn_revealed:
+            self.conn_text.configure(state=tk.NORMAL)
+            if getattr(self, "reveal_conn_btn", None):
+                self.reveal_conn_btn.configure(text="隐藏连接串")
+        else:
+            self.conn_text.configure(state=tk.DISABLED)
+            if getattr(self, "reveal_conn_btn", None):
+                self.reveal_conn_btn.configure(text="显示连接串")
+
+    def toggle_connection_reveal_action(self):
+        if self._conn_revealed:
+            self._sync_edit_form_to_config()
+            self._conn_revealed = False
+            self._refresh_conn_text_widget(self._active_edit_region or self._current_edit_region())
+            return
+        if simpledialog is None or messagebox is None:
+            return
+        pwd = simpledialog.askstring("验证", "输入密码以显示数据库连接串：", show="*")
+        if pwd is None:
+            return
+        if not _connection_reveal_password_ok(pwd):
+            messagebox.showerror("验证失败", "密码不正确。")
+            return
+        self._conn_revealed = True
+        self._refresh_conn_text_widget(self._active_edit_region or self._current_edit_region())
 
     def _log_config_sources(self):
         from runner_config import RUNNER_CONFIG_FILE
@@ -980,8 +1062,7 @@ class DesktopRunnerApp:
         label = cfg.get("label", region)
         if getattr(self, "conn_label", None):
             self.conn_label.configure(text=f"数据库连接 ({region} {label})")
-        self.conn_text.delete("1.0", tk.END)
-        self.conn_text.insert("1.0", cfg.get("connection_uri", ""))
+        self._refresh_conn_text_widget(region)
         self.template_dir_entry.delete(0, tk.END)
         self.template_dir_entry.insert(0, cfg.get("template_dir", ""))
         self.output_dir_entry.delete(0, tk.END)

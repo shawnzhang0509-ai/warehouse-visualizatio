@@ -44,6 +44,12 @@ class ExportFilteredTests(unittest.TestCase):
         self.assertEqual(row["qty"], 1)
         self.assertEqual(row["code"], "581-012")
 
+    def test_diagnose_on_hold_uses_region_paths(self):
+        msg = panel_data.diagnose_on_hold_bundle({"region": "CA", "on_hold_path": None})
+        self.assertIn("Data-CA", msg)
+        self.assertIn("Output-CA", msg)
+        self.assertNotIn("Data-NZ", msg)
+
     def test_list_on_hold_analysis_respects_status_and_days(self):
         bundle = {
             "on_hold_rows": [
@@ -79,7 +85,7 @@ class ExportFilteredTests(unittest.TestCase):
                 },
             ]
         }
-        rows, total = panel_data.list_on_hold_analysis(
+        rows, total, _stats = panel_data.list_on_hold_analysis(
             bundle,
             status_filter="On Hold - Unpaid Order",
             min_hold_days=360,
@@ -88,6 +94,78 @@ class ExportFilteredTests(unittest.TestCase):
         codes = [r["code"] for r in rows]
         self.assertEqual(codes, ["111-001"])
         self.assertEqual(total, 1)
+        self.assertEqual(rows[0].get("sales_name"), "")
+
+    def test_on_hold_ticket_only_for_by_ticket_status(self):
+        bundle = {
+            "on_hold_rows": [
+                {
+                    "Sku": "333-001",
+                    "ProductName": "Paid",
+                    "StockOnHoldStatus": "On Hold - Paid Order",
+                    "OrderNo": "SO12345.DJFTE",
+                    "TicketNo": "SHOULD-NOT-SHOW",
+                    "Qty": 1,
+                    "WarehouseName": "CHCH",
+                },
+                {
+                    "Sku": "333-002",
+                    "ProductName": "Ticket row",
+                    "StockOnHoldStatus": "On Hold - By Ticket",
+                    "OrderNo": "SO99",
+                    "TicketNo": "TK-100",
+                    "Qty": 1,
+                    "WarehouseName": "CHCH",
+                },
+            ]
+        }
+        rows, total, _stats = panel_data.list_on_hold_analysis(bundle, status_filter="")
+        self.assertEqual(total, 2)
+        by_code = {r["code"]: r for r in rows}
+        self.assertEqual(by_code["333-001"]["ticket_no"], "")
+        self.assertEqual(by_code["333-002"]["ticket_no"], "TK-100")
+
+    def test_on_hold_sales_name_column(self):
+        bundle = {
+            "on_hold_rows": [
+                {
+                    "Sku": "222-001",
+                    "ProductName": "Sofa",
+                    "StockOnHoldStatus": "On Hold - Paid Order",
+                    "OrderNo": "O1",
+                    "SalesName": "Alice Chen",
+                    "Qty": 2,
+                    "WarehouseName": "Calgary",
+                },
+            ]
+        }
+        rows, total, _stats = panel_data.list_on_hold_analysis(bundle, status_filter="")
+        self.assertEqual(total, 1)
+        self.assertEqual(rows[0]["sales_name"], "Alice Chen")
+        export_rows = [panel_data.format_onhold_export_row(r) for r in rows]
+        self.assertEqual(export_rows[0]["sales_name"], "Alice Chen")
+
+    def test_list_on_hold_export_csv(self):
+        bundle = {
+            "on_hold_rows": [
+                {
+                    "Sku": "111-001",
+                    "ProductName": "Keep",
+                    "StockOnHoldStatus": "On Hold - Unpaid Order",
+                    "OrderNo": "A1",
+                    "TicketNo": "T1",
+                    "OnHoldDate": "2025-01-01",
+                    "Qty": 1,
+                    "WarehouseName": "CHCH",
+                },
+            ]
+        }
+        rows, total, _stats = panel_data.list_on_hold_analysis(
+            bundle,
+            status_filter="On Hold - Unpaid Order",
+            min_hold_days=360,
+            max_rows=0,
+        )
         export_rows = [panel_data.format_onhold_export_row(r) for r in rows]
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "onhold.csv"

@@ -14,14 +14,102 @@ try:
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    from matplotlib import font_manager
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
     from matplotlib.figure import Figure
 
     HAS_MPL = True
 except ImportError:
     HAS_MPL = False
+    font_manager = None
     FigureCanvasTkAgg = None
+    NavigationToolbar2Tk = None
     Figure = None
+
+OTHERS_ROLLUP_LABEL = "其他"
+_CJK_FONT_CONFIGURED = False
+
+
+def _configure_matplotlib_cjk() -> None:
+    """气泡图标注中文（河北/山东等）；Windows 优先微软雅黑。"""
+    global _CJK_FONT_CONFIGURED
+    if not HAS_MPL or _CJK_FONT_CONFIGURED:
+        return
+    import os
+    import sys
+
+    candidates: list[str] = []
+    if sys.platform == "win32":
+        windir = os.environ.get("WINDIR", r"C:\Windows")
+        candidates.extend(
+            [
+                os.path.join(windir, "Fonts", "msyh.ttc"),
+                os.path.join(windir, "Fonts", "msyhbd.ttc"),
+                os.path.join(windir, "Fonts", "simhei.ttf"),
+                os.path.join(windir, "Fonts", "simsun.ttc"),
+            ]
+        )
+    candidates.extend(
+        [
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJKsc-Regular.otf",
+        ]
+    )
+    for path in candidates:
+        if not os.path.isfile(path):
+            continue
+        try:
+            font_manager.fontManager.addfont(path)
+            name = font_manager.FontProperties(fname=path).get_name()
+            matplotlib.rcParams["font.sans-serif"] = [name] + list(
+                matplotlib.rcParams.get("font.sans-serif", [])
+            )
+            matplotlib.rcParams["axes.unicode_minus"] = False
+            _CJK_FONT_CONFIGURED = True
+            return
+        except Exception:
+            continue
+    for name in (
+        "Microsoft YaHei",
+        "SimHei",
+        "PingFang SC",
+        "Noto Sans CJK SC",
+        "WenQuanYi Micro Hei",
+        "Arial Unicode MS",
+    ):
+        try:
+            font_manager.findfont(name, fallback_to_default=False)
+            matplotlib.rcParams["font.sans-serif"] = [name] + list(
+                matplotlib.rcParams.get("font.sans-serif", [])
+            )
+            matplotlib.rcParams["axes.unicode_minus"] = False
+            _CJK_FONT_CONFIGURED = True
+            return
+        except Exception:
+            continue
+    matplotlib.rcParams["axes.unicode_minus"] = False
+    _CJK_FONT_CONFIGURED = True
+
+
+def sync_inventory_health_drilldown_btn(app, link_key: str | None) -> None:
+    """选中气泡/表格行时：河北/山东 → 分渠道图；合并的「其他」→ 其他渠道图。"""
+    btn = getattr(app, "_ih_family_btn", None)
+    if btn is None:
+        return
+    families = getattr(app, "_ih_channel_families", None) or {}
+    key = str(link_key or "").strip()
+    fam = family_for_channel_link(key, families) if key else None
+    app._ih_selected_family = fam
+    if fam:
+        app._ih_drilldown = ("family", fam)
+        btn.configure(state="normal", text="分渠道图")
+    elif key == OTHERS_ROLLUP_LABEL:
+        app._ih_drilldown = ("other", None)
+        btn.configure(state="normal", text="其他渠道图")
+    else:
+        app._ih_drilldown = None
+        btn.configure(state="disabled", text="分渠道图")
 
 
 QUADRANT_LABELS = {
@@ -130,10 +218,122 @@ def _build_points(rows: list[dict], y_th: float) -> tuple[list[dict], list[dict]
 
 
 def _draw_quadrant_labels(ax, x_th: float, y_cap: float):
-    ax.text(x_th * 0.5, y_cap * 0.88, QUADRANT_LABELS["tl"], ha="center", fontsize=8, color="#64748b")
-    ax.text(x_th * 1.5, y_cap * 0.88, QUADRANT_LABELS["tr"], ha="center", fontsize=8, color="#dc2626", fontweight="bold")
-    ax.text(x_th * 0.5, y_cap * 0.12, QUADRANT_LABELS["bl"], ha="center", fontsize=8, color="#64748b")
-    ax.text(x_th * 1.5, y_cap * 0.12, QUADRANT_LABELS["br"], ha="center", fontsize=8, color="#ea580c")
+    """象限名标在绘图区外缘，避免与气泡重叠。"""
+    from matplotlib.transforms import blended_transform_factory
+
+    x_mid_l = x_th * 0.5
+    x_mid_r = x_th * 1.5
+    trans_bottom = blended_transform_factory(ax.transData, ax.transAxes)
+    trans_top = blended_transform_factory(ax.transData, ax.transAxes)
+    ax.text(
+        x_mid_l,
+        -0.11,
+        f"{QUADRANT_LABELS['bl']}\n健康",
+        transform=trans_bottom,
+        ha="center",
+        va="top",
+        fontsize=7.5,
+        color="#15803d",
+        fontweight="bold",
+        clip_on=False,
+        zorder=12,
+        bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="#bbf7d0", alpha=0.92),
+    )
+    ax.text(
+        x_mid_r,
+        -0.11,
+        f"{QUADRANT_LABELS['br']}\n供应不足",
+        transform=trans_bottom,
+        ha="center",
+        va="top",
+        fontsize=7.5,
+        color="#c2410c",
+        fontweight="bold",
+        clip_on=False,
+        zorder=12,
+        bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="#fed7aa", alpha=0.92),
+    )
+    ax.text(
+        x_mid_l,
+        1.05,
+        f"{QUADRANT_LABELS['tl']}\n可能积压",
+        transform=trans_top,
+        ha="center",
+        va="bottom",
+        fontsize=7.5,
+        color="#1d4ed8",
+        clip_on=False,
+        zorder=12,
+        bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="#bfdbfe", alpha=0.92),
+    )
+    ax.text(
+        x_mid_r,
+        1.05,
+        f"{QUADRANT_LABELS['tr']}\n库存错配",
+        transform=trans_top,
+        ha="center",
+        va="bottom",
+        fontsize=7.5,
+        color="#b91c1c",
+        fontweight="bold",
+        clip_on=False,
+        zorder=12,
+        bbox=dict(boxstyle="round,pad=0.25", facecolor="white", edgecolor="#fecaca", alpha=0.92),
+    )
+
+
+def _chart_show_guide_panel() -> bool:
+    return os.getenv("INVENTORY_HEALTH_CHART_HIDE_GUIDE", "").strip().lower() not in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _draw_chart_guide_banner(
+    ax_guide,
+    x_th: float,
+    y_th: float,
+    families: dict[str, list[str]] | None,
+) -> None:
+    """读图说明横条：放在主图上方，不占用绘图区宽度。"""
+    ax_guide.set_facecolor("#f8fafc")
+    ax_guide.axis("off")
+    fam_bit = ""
+    if families:
+        fam_bit = f"  |  {'、'.join(sorted(families.keys()))} 省渠道主图合并为一个气泡"
+    line1 = (
+        f"读图说明：横轴缺货率%，竖虚线 {x_th:g}% 为警戒线；"
+        f"纵轴理论库存消耗天（在库÷日均需求），横虚线 {y_th:g} 天；"
+        f"气泡越大=日均需求体积越大。"
+        f"{fam_bit}"
+    )
+    line2 = (
+        "四象限：左下绿·健康（维持）  |  右下橙·供应不足（补货）  |  "
+        "左上蓝·可能积压（控采/促销）  |  右上红·库存错配（查结构/在途）"
+    )
+    ax_guide.text(
+        0.5,
+        0.72,
+        line1,
+        transform=ax_guide.transAxes,
+        va="top",
+        ha="center",
+        fontsize=7.4,
+        color="#334155",
+        wrap=True,
+    )
+    ax_guide.text(
+        0.5,
+        0.08,
+        line2,
+        transform=ax_guide.transAxes,
+        va="bottom",
+        ha="center",
+        fontsize=7.2,
+        color="#475569",
+        wrap=True,
+    )
 
 
 def _scatter_points(ax, points: list[dict], *, marker="o", selected_key: str | None = None):
@@ -205,29 +405,12 @@ def bind_chart_interaction(app, canvas, fig, meta):
         cb = getattr(app, "_ih_select_tree_by_link", None)
         if callable(cb):
             cb(key)
-        families = getattr(app, "_ih_channel_families", None) or {}
-        app._ih_selected_family = family_for_channel_link(key, families)
-        btn = getattr(app, "_ih_family_btn", None)
-        if btn is not None:
-            btn.configure(
-                state="normal" if app._ih_selected_family else "disabled",
-            )
+        sync_inventory_health_drilldown_btn(app, key)
 
     fig.canvas.mpl_connect("pick_event", _on_pick)
 
     def _on_tk_dblclick(_event=None):
-        key = meta.get("selected_key") or ""
-        families = getattr(app, "_ih_channel_families", None) or {}
-        fam = family_for_channel_link(key, families)
-        if not fam:
-            return
-        app._ih_selected_family = fam
-        open_family_subchannels_chart(
-            app.root,
-            getattr(app, "_ih_report", None) or {},
-            fam,
-            getattr(app, "_ih_thresholds", {}) or {},
-        )
+        run_inventory_health_drilldown(app)
 
     try:
         canvas.get_tk_widget().bind("<Double-Button-1>", _on_tk_dblclick)
@@ -235,7 +418,126 @@ def bind_chart_interaction(app, canvas, fig, meta):
         pass
 
 
-def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, float]):
+def chart_report_for_view(app) -> tuple[dict[str, Any], dict[str, float]] | None:
+    """当前库存健康主图数据（与嵌入图一致）。"""
+    import inventory_health as ih
+
+    report = getattr(app, "_ih_report", None) or {}
+    if not report:
+        return None
+    th_raw = getattr(app, "_ih_thresholds", {}) or {}
+    th_obj = ih.HealthThresholds(
+        stockout_pct=float(th_raw.get("stockout_pct") or ih.DEFAULT_STOCKOUT_X),
+        consumption_days=float(th_raw.get("consumption_days") or ih.DEFAULT_DAYS_Y),
+        cover_days_proxy=float(th_raw.get("cover_days_proxy") or ih.DEFAULT_COVER_DAYS_PROXY),
+    )
+    chart_report = dict(report)
+    chart_report["rows"] = ih.rows_for_family_chart(report, th_obj)
+    if not chart_report.get("rows"):
+        return None
+    return chart_report, dict(th_obj.__dict__)
+
+
+def open_inventory_health_chart_viewer(app, *, fullscreen: bool = False) -> None:
+    """放大窗口或全屏查看象限图（含 Matplotlib 缩放/平移工具栏）。"""
+    import tkinter as tk
+    from tkinter import ttk
+
+    if not HAS_MPL:
+        return
+    root = getattr(app, "root", None)
+    if root is None:
+        return
+    packed = chart_report_for_view(app)
+    if not packed:
+        return
+    chart_report, th = packed
+
+    win = tk.Toplevel(root)
+    win.configure(bg="white")
+    win.title("库存健康象限图 — 全屏" if fullscreen else "库存健康象限图 — 放大")
+    win.transient(root)
+
+    top = tk.Frame(win, bg="white")
+    top.pack(fill=tk.X, padx=8, pady=6)
+    hint = "Esc 退出全屏 · 工具栏可框选放大/平移 · 双击气泡可下钻省渠道"
+    ttk.Label(top, text=hint, wraplength=900).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+    def _close(_event=None):
+        try:
+            win.destroy()
+        except tk.TclError:
+            pass
+
+    ttk.Button(top, text="关闭", command=_close).pack(side=tk.RIGHT, padx=(8, 0))
+    if fullscreen:
+        ttk.Button(top, text="退出全屏", command=_close).pack(side=tk.RIGHT)
+
+    body = tk.Frame(win, bg="white")
+    body.pack(fill=tk.BOTH, expand=True)
+
+    dpi = 100
+    if fullscreen:
+        win.update_idletasks()
+        sw = max(800, int(win.winfo_screenwidth()))
+        sh = max(600, int(win.winfo_screenheight()))
+        fig_w = max(10.0, (sw - 24) / dpi)
+        fig_h = max(7.0, (sh - 120) / dpi)
+        figsize = (fig_w, fig_h)
+        try:
+            win.attributes("-fullscreen", True)
+        except tk.TclError:
+            try:
+                win.state("zoomed")
+            except tk.TclError:
+                win.geometry(f"{sw}x{sh}+0+0")
+    else:
+        win.geometry("1280x920")
+        figsize = (12.0, 8.8)
+
+    win.bind("<Escape>", _close)
+
+    chart_host = tk.Frame(body, bg="white")
+    chart_host.pack(fill=tk.BOTH, expand=True)
+    _widget, fig, meta, canvas = render_bubble_chart(
+        chart_host,
+        chart_report,
+        th,
+        show_guide=True,
+        figsize=figsize,
+        dpi=dpi,
+    )
+    if canvas is None or fig is None:
+        return
+    toolbar_frame = tk.Frame(body, bg="white")
+    toolbar_frame.pack(fill=tk.X)
+    NavigationToolbar2Tk(canvas, toolbar_frame)
+    bind_chart_interaction(app, canvas, fig, meta)
+
+
+def run_inventory_health_drilldown(app) -> None:
+    """双击气泡或点「分渠道图 / 其他渠道图」。"""
+    mode = getattr(app, "_ih_drilldown", None)
+    report = getattr(app, "_ih_report", None) or {}
+    th = getattr(app, "_ih_thresholds", {}) or {}
+    root = getattr(app, "root", None)
+    if not root or not mode:
+        return
+    if mode[0] == "family" and mode[1]:
+        open_family_subchannels_chart(root, report, mode[1], th)
+    elif mode[0] == "other":
+        open_other_channels_chart(root, report, th)
+
+
+def render_bubble_chart(
+    parent,
+    report: dict[str, Any],
+    thresholds: dict[str, float],
+    *,
+    show_guide: bool | None = None,
+    figsize: tuple[float, float] | None = None,
+    dpi: int = 100,
+):
     """主图 Y 轴 0~150 天；超长点叠在顶栏。返回 (widget, fig, meta)。"""
     meta: dict[str, Any] = {"outliers": [], "main_y_max": _MAIN_Y_MAX}
     if not HAS_MPL:
@@ -249,8 +551,11 @@ def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, fl
         lbl.pack(fill=tk.BOTH, expand=True)
         return lbl, None, meta, None
 
+    _configure_matplotlib_cjk()
     rows = _chart_rows(report)
-    x_th = float(thresholds.get("stockout_pct") or 50)
+    import inventory_health as ih
+
+    x_th = float(thresholds.get("stockout_pct") or ih.DEFAULT_STOCKOUT_X)
     y_th = float(thresholds.get("consumption_days") or 60)
     normal, outliers = _build_points(rows, y_th)
     meta["outliers"] = [
@@ -267,17 +572,28 @@ def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, fl
     ]
     meta["outlier_count"] = len(outliers)
 
-    fig = Figure(figsize=(8.4, 6.0), dpi=100, facecolor="white")
-    ax = fig.add_subplot(111)
+    if show_guide is None:
+        show_guide = _chart_show_guide_panel() and bool(report.get("channel_families") or report.get("region"))
+    fams = report.get("channel_families") or {}
+    default_size = (8.6, 7.0) if show_guide else (8.4, 6.2)
+    w, h = figsize if figsize else default_size
+    fig = Figure(figsize=(w, h), dpi=dpi, facecolor="white")
+    if show_guide:
+        gs = fig.add_gridspec(2, 1, height_ratios=[0.22, 1], hspace=0.28)
+        ax_guide = fig.add_subplot(gs[0, 0])
+        ax = fig.add_subplot(gs[1, 0])
+    else:
+        ax = fig.add_subplot(111)
+        ax_guide = None
     ax.set_facecolor("#fafbfc")
     ax.set_xlabel("Stockout Rate (%)", fontsize=10)
     ax.set_ylabel("Theoretical Inventory Consumption Days", fontsize=10)
-    fams = report.get("channel_families") or {}
     title = "Inventory Health"
     if fams:
-        bits = "、".join(sorted(fams.keys()))
-        title = f"Inventory Health — 省渠道 {bits}（其余→其他）"
-    ax.set_title(title, fontsize=11, fontweight="bold")
+        bits = ", ".join(sorted(fams.keys()))
+        title = f"Inventory Health ({bits} merged; other 3-digit channels separate)"
+    title_pad = 28 if show_guide else 8
+    ax.set_title(title, fontsize=10, fontweight="bold", pad=title_pad)
     ax.axvline(x_th, color="#94a3b8", linestyle="--", linewidth=1)
     ax.axhline(y_th, color="#94a3b8", linestyle="--", linewidth=1)
 
@@ -313,16 +629,20 @@ def render_bubble_chart(parent, report: dict[str, Any], thresholds: dict[str, fl
     ax.set_xlim(0, max(xmax, x_th * 2))
     ax.set_ylim(0, y_cap)
     _draw_quadrant_labels(ax, x_th, y_cap)
-    legend_y = 0.02
-    for quad, color in (
-        ("Supply Shortage", QUADRANT_COLORS["Supply Shortage"]),
-        ("Inventory Mismatch", QUADRANT_COLORS["Inventory Mismatch"]),
-        ("Potential Overstock", QUADRANT_COLORS["Potential Overstock"]),
-        ("Healthy", QUADRANT_COLORS["Healthy"]),
-    ):
-        ax.scatter([], [], c=color, s=36, label=quad, edgecolors="#334155", linewidths=0.3)
-    ax.legend(loc="lower right", fontsize=7, framealpha=0.9, title="Quadrant")
+    if ax_guide is not None:
+        _draw_chart_guide_banner(ax_guide, x_th, y_th, fams if fams else None)
+    else:
+        for quad, color in (
+            ("Supply Shortage", QUADRANT_COLORS["Supply Shortage"]),
+            ("Inventory Mismatch", QUADRANT_COLORS["Inventory Mismatch"]),
+            ("Potential Overstock", QUADRANT_COLORS["Potential Overstock"]),
+            ("Healthy", QUADRANT_COLORS["Healthy"]),
+        ):
+            ax.scatter([], [], c=color, s=36, label=quad, edgecolors="#334155", linewidths=0.3)
+        ax.legend(loc="lower right", fontsize=7, framealpha=0.9, title="Quadrant")
     ax.grid(True, alpha=0.25)
+    ax.margins(x=0.02, y=0.02)
+    fig.subplots_adjust(left=0.09, right=0.97, bottom=0.14, top=0.94 if not show_guide else 0.88)
 
     canvas = FigureCanvasTkAgg(fig, master=parent)
     canvas.draw()
@@ -372,6 +692,39 @@ def _rollup_channel_dicts(items: list[dict], label: str, th: dict[str, float]) -
     }
 
 
+def open_other_channels_chart(
+    parent,
+    report: dict[str, Any],
+    thresholds: dict[str, float],
+):
+    """非省渠道的三位号气泡图（合并「其他」时双击下钻）。"""
+    if not HAS_MPL:
+        return
+    import inventory_health as ih
+
+    sub_rows = ih.rows_for_other_channels(report)
+    if not sub_rows:
+        return
+    import tkinter as tk
+    from tkinter import ttk
+
+    win = tk.Toplevel(parent)
+    win.title(f"其他渠道 — {len(sub_rows)} 个三位号")
+    win.geometry("900x620")
+    win.transient(parent)
+    frame = tk.Frame(win, bg="white")
+    frame.pack(fill=tk.BOTH, expand=True)
+    render_bubble_chart(
+        frame, {"rows": sub_rows, "region": report.get("region")}, thresholds, show_guide=False,
+    )
+    ttk.Label(
+        win,
+        text="各非河北/山东渠道；主图默认逐个显示，无需从此进入。",
+        wraplength=860,
+    ).pack(anchor="w", padx=10, pady=4)
+    ttk.Button(win, text="关闭", command=win.destroy).pack(pady=(0, 8))
+
+
 def open_family_subchannels_chart(
     parent,
     report: dict[str, Any],
@@ -407,7 +760,7 @@ def open_family_subchannels_chart(
 
     frame = tk.Frame(win, bg="white")
     frame.pack(fill=tk.BOTH, expand=True)
-    render_bubble_chart(frame, mini, thresholds)
+    render_bubble_chart(frame, mini, thresholds, show_guide=False)
     ttk.Label(
         win,
         text=f"子渠道：{', '.join(sorted(buckets.keys()))}",
@@ -437,7 +790,9 @@ def open_long_days_chart(parent, report: dict[str, Any], thresholds: dict[str, f
     fig = Figure(figsize=(8.0, 5.6), dpi=100, facecolor="white")
     ax = fig.add_subplot(111)
     ax.set_facecolor("#fafbfc")
-    x_th = float(thresholds.get("stockout_pct") or 50)
+    import inventory_health as ih
+
+    x_th = float(thresholds.get("stockout_pct") or ih.DEFAULT_STOCKOUT_X)
     ax.set_xlabel("Stockout Rate (%)", fontsize=10)
     ax.set_ylabel("Theoretical Inventory Consumption Days (actual)", fontsize=10)
     ax.set_title(f"Long inventory days (>{_MAIN_Y_MAX:.0f}d)", fontsize=11, fontweight="bold")

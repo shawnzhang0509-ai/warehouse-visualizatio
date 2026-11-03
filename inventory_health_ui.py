@@ -10,13 +10,22 @@ from tkinter import ttk
 
 import panel_data as pd
 import inventory_health as ih
-import inventory_health_chart as ihc
 from channel_prefixes import (
     family_for_channel_link,
     list_merged_channel_filter_options,
     load_channel_families_for_region,
     load_region_po_channel_prefixes,
 )
+
+_ih_chart_mod = None
+
+
+def _ih_chart():
+    """延迟加载 Matplotlib，避免启动时卡在 import（尤其 Windows + 新 Python）。"""
+    global _ih_chart_mod
+    if _ih_chart_mod is None:
+        import inventory_health_chart as _ih_chart_mod
+    return _ih_chart_mod
 
 
 def _ui_after(app, delay_ms: int, callback):
@@ -59,11 +68,51 @@ def _populate_ih_channel_combo(app):
         app._ih_channel_combo["values"] = values
 
 
+def _widget_is_pack_managed(widget) -> bool:
+    if widget is None:
+        return False
+    try:
+        widget.pack_info()
+        return True
+    except tk.TclError:
+        return False
+
+
+def sync_inventory_health_island_ui(app):
+    """仅 NZ 显示库存健康页的「南北岛」筛选；切换地区时同步显隐。"""
+    region = app._current_region() if hasattr(app, "_current_region") else "NZ"
+    supported = pd.island_stock_supported(region)
+    slot = getattr(app, "_ih_island_slot", None)
+    if slot is None:
+        return
+    anchor = getattr(app, "_ih_category_anchor", None)
+    if supported:
+        if not _widget_is_pack_managed(slot):
+            try:
+                if _widget_is_pack_managed(anchor):
+                    slot.pack(side=tk.LEFT, padx=(6, 0), before=anchor)
+                else:
+                    slot.pack(side=tk.LEFT, padx=(6, 0))
+            except tk.TclError:
+                slot.pack(side=tk.LEFT, padx=(6, 0))
+    else:
+        try:
+            slot.pack_forget()
+        except tk.TclError:
+            pass
+        if hasattr(app, "_ih_island_var"):
+            app._ih_island_var.set("全部")
+
+
 def _snapshot_ih_filters(app) -> dict:
     """在主线程读取 Tk 变量；后台线程调用 StringVar.get() 在 Windows 上会死锁。"""
+    region = app._current_region() if hasattr(app, "_current_region") else "NZ"
     ch = app._ih_channel_var.get()
     if str(ch).strip() in ("全部", ""):
         ch = ""
+    island_scope = ""
+    if pd.island_stock_supported(region) and hasattr(app, "_ih_island_var"):
+        island_scope = app._ih_island_var.get()
     return {
         "channel": ch,
         "category": app._ih_category_var.get(),
@@ -71,11 +120,7 @@ def _snapshot_ih_filters(app) -> dict:
         "branch": app._ih_branch_var.get(),
         "group_by": app._ih_group_var.get() or "channel",
         "owner": app._ih_owner_var.get() if hasattr(app, "_ih_owner_var") else "",
-        "island_scope": (
-            app._ih_island_var.get()
-            if hasattr(app, "_ih_island_var")
-            else ""
-        ),
+        "island_scope": island_scope,
         "stockout_th": app._ih_stockout_th.get(),
         "days_th": app._ih_days_th.get(),
         "cover_proxy": app._ih_cover_proxy.get(),
@@ -126,22 +171,23 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
         "<<ComboboxSelected>>",
         lambda _e: app._render_inventory_health(force=True),
     )
-    region0 = app._current_region() if hasattr(app, "_current_region") else "NZ"
-    if pd.island_stock_supported(region0):
-        ttk.Label(toolbar, text="南北岛").pack(side=tk.LEFT, padx=(6, 0))
-        app._ih_island_combo = ttk.Combobox(
-            toolbar,
-            width=6,
-            textvariable=app._ih_island_var,
-            state="readonly",
-            values=("全部", "北岛", "南岛"),
-        )
-        app._ih_island_combo.pack(side=tk.LEFT, padx=4)
-        app._ih_island_combo.bind(
-            "<<ComboboxSelected>>",
-            lambda _e: app._render_inventory_health(force=True),
-        )
-    ttk.Label(toolbar, text="分类").pack(side=tk.LEFT)
+    app._ih_island_slot = tk.Frame(toolbar)
+    app._ih_island_label = ttk.Label(app._ih_island_slot, text="南北岛")
+    app._ih_island_label.pack(side=tk.LEFT)
+    app._ih_island_combo = ttk.Combobox(
+        app._ih_island_slot,
+        width=6,
+        textvariable=app._ih_island_var,
+        state="readonly",
+        values=("全部", "北岛", "南岛"),
+    )
+    app._ih_island_combo.pack(side=tk.LEFT, padx=4)
+    app._ih_island_combo.bind(
+        "<<ComboboxSelected>>",
+        lambda _e: app._render_inventory_health(force=True),
+    )
+    app._ih_category_anchor = ttk.Label(toolbar, text="分类")
+    app._ih_category_anchor.pack(side=tk.LEFT)
     ttk.Entry(toolbar, width=10, textvariable=app._ih_category_var).pack(side=tk.LEFT, padx=4)
     ttk.Label(toolbar, text="SKU").pack(side=tk.LEFT)
     ttk.Entry(toolbar, width=12, textvariable=app._ih_sku_var).pack(side=tk.LEFT, padx=4)
@@ -195,25 +241,31 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
         chart_tool,
         text="超长库存图 (0)",
         state=tk.DISABLED,
-        command=lambda: ihc.open_long_days_chart(
+        command=lambda: _ih_chart().open_long_days_chart(
             app.root,
             getattr(app, "_ih_report", None) or {},
             getattr(app, "_ih_thresholds", {}),
         ),
     )
     app._ih_outlier_btn.pack(side=tk.LEFT, padx=(0, 6))
+    app._ih_drilldown = None
     app._ih_family_btn = ttk.Button(
         chart_tool,
         text="分渠道图",
         state=tk.DISABLED,
-        command=lambda: ihc.open_family_subchannels_chart(
-            app.root,
-            getattr(app, "_ih_report", None) or {},
-            getattr(app, "_ih_selected_family", None),
-            getattr(app, "_ih_thresholds", {}),
-        ),
+        command=lambda: _ih_chart().run_inventory_health_drilldown(app),
     )
-    app._ih_family_btn.pack(side=tk.LEFT)
+    app._ih_family_btn.pack(side=tk.LEFT, padx=(0, 6))
+
+    def _ih_chart_zoom():
+        _ih_chart().open_inventory_health_chart_viewer(app, fullscreen=False)
+
+    def _ih_chart_fullscreen():
+        _ih_chart().open_inventory_health_chart_viewer(app, fullscreen=True)
+
+    ttk.Button(chart_tool, text="放大查看", command=_ih_chart_zoom).pack(side=tk.LEFT, padx=(0, 4))
+    ttk.Button(chart_tool, text="全屏", command=_ih_chart_fullscreen).pack(side=tk.LEFT)
+
     chart_frame = tk.Frame(chart_wrap, bg="white")
     chart_frame.pack(fill=tk.BOTH, expand=True)
     table_frame = tk.Frame(panes, bg="white")
@@ -260,18 +312,14 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
     def _on_ih_tree_select(_event=None):
         sel = app._ih_tree.selection()
         if not sel:
-            ihc.highlight_chart_link(app, None)
+            _ih_chart().highlight_chart_link(app, None)
             app._ih_selected_family = None
             if getattr(app, "_ih_family_btn", None):
                 app._ih_family_btn.configure(state=tk.DISABLED)
             return
         link = app._ih_row_link.get(sel[0], "")
-        ihc.highlight_chart_link(app, link or None)
-        families = getattr(app, "_ih_channel_families", None) or {}
-        app._ih_selected_family = family_for_channel_link(link, families)
-        if getattr(app, "_ih_family_btn", None):
-            state = tk.NORMAL if app._ih_selected_family else tk.DISABLED
-            app._ih_family_btn.configure(state=state)
+        _ih_chart().highlight_chart_link(app, link or None)
+        _ih_chart().sync_inventory_health_drilldown_btn(app, link)
 
     app._ih_tree.bind("<<TreeviewSelect>>", _on_ih_tree_select)
 
@@ -290,16 +338,18 @@ def attach_inventory_health_tab(app, notebook, style_colors: dict):
 
     formula = tk.Label(
         tab,
-        text="省渠道：po_channel_prefixes.txt 写 河北_321 或 Output 下同名文件夹 → 主图显示河北/山东；"
-        "单击选中、双击省气泡或点「分渠道图」下钻子渠道；汇总=渠道",
+        text="河北/山东子渠道合并为省气泡，其余三位号仍单独显示；选中河北/山东点「分渠道图」或双击下钻。"
+        "若主图只有「其他」一个点，请升级到 v1.9.52+ 或勿设 INVENTORY_HEALTH_ROLLUP_OTHERS=1",
         bg="white", fg="#64748b", font=("Segoe UI", 8),
         wraplength=900, justify=tk.LEFT,
     )
     formula.pack(anchor="w", padx=8, pady=(0, 6))
+    sync_inventory_health_island_ui(app)
 
 
 def render_inventory_health(app, force=False):
     region = app._current_region() if hasattr(app, "_current_region") else "NZ"
+    sync_inventory_health_island_ui(app)
     _populate_ih_owner_combo(app)
     _populate_ih_channel_combo(app)
 
@@ -386,11 +436,11 @@ def _apply_chart(app, report, th):
         app._ih_thresholds = th.__dict__
         chart_report = dict(report)
         chart_report["rows"] = ih.rows_for_family_chart(report, th)
-        app._ih_chart_widget, _fig, chart_meta, canvas = ihc.render_bubble_chart(
+        app._ih_chart_widget, _fig, chart_meta, canvas = _ih_chart().render_bubble_chart(
             app._ih_chart_frame, chart_report, th.__dict__,
         )
         if canvas is not None and _fig is not None:
-            ihc.bind_chart_interaction(app, canvas, _fig, chart_meta)
+            _ih_chart().bind_chart_interaction(app, canvas, _fig, chart_meta)
         n_out = int(chart_meta.get("outlier_count") or 0)
         if getattr(app, "_ih_outlier_btn", None) is not None:
             app._ih_outlier_btn.configure(text=f"超长库存图 ({n_out})")
